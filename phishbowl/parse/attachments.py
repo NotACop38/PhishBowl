@@ -165,6 +165,9 @@ _DETECTED_FAMILY = {
     "application/x-xz": "archive",
     "application/x-dosexec": "executable",
     "application/x-executable": "executable",
+    # OLE/CFB container (legacy Office, MSI, …). A file declared e.g.
+    # application/pdf whose bytes sniff as OLE is a classic mismatch.
+    "application/x-ole-storage": "ole",
 }
 
 

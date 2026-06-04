@@ -175,6 +175,19 @@ def test_legacy_office_extensions_flagged_macro_capable() -> None:
     assert AttachmentFlag.ARCHIVE not in docx
 
 
+def test_declared_pdf_with_ole_bytes_flags_type_mismatch() -> None:
+    ole = b"\xd0\xcf\x11\xe0"
+    # invoice.pdf whose bytes sniff as OLE/CFB (an Office/MSI container) is a
+    # classic mismatch and must flag TYPE_MISMATCH...
+    flags = _flags("invoice.pdf", "application/pdf", "application/x-ole-storage", ole)
+    assert AttachmentFlag.TYPE_MISMATCH in flags
+
+    # ...but a legitimately-declared legacy .doc (msword) detected as OLE must
+    # not — that's the expected on-disk shape, not a mismatch.
+    doc = _flags("memo.doc", "application/msword", "application/x-ole-storage", ole)
+    assert AttachmentFlag.TYPE_MISMATCH not in doc
+
+
 def test_attached_eml_captured_as_one_attachment() -> None:
     parsed = _parse("forwarded_eml.eml")
 
@@ -261,6 +274,20 @@ def test_parse_dispatch_msg_degrades_gracefully(tmp_path: Path) -> None:
 
     assert parsed.source.format is EmailFormat.MSG
     assert any(a.code == "unsupported_format" for a in parsed.anomalies)
+
+
+def test_parse_dispatch_msg_missing_file_raises() -> None:
+    with pytest.raises(FileNotFoundError):
+        parse("/does/not/exist.msg")
+
+
+def test_parse_dispatch_msg_unreadable_raises(tmp_path: Path) -> None:
+    # A .msg path that exists but can't be read as a file (here, a directory)
+    # must error rather than report a successful placeholder parse.
+    not_a_file = tmp_path / "folder.msg"
+    not_a_file.mkdir()
+    with pytest.raises(OSError):
+        parse(not_a_file)
 
 
 def test_attachment_digests_are_consistent_with_each_other() -> None:
