@@ -33,7 +33,7 @@ _SEVERITY_STYLE = {
 }
 
 _AUTH_STYLE = {
-    "pass": "green",
+    "pass": "green",  # nosec B105 - Rich colour name for an auth result, not a credential
     "fail": "bright_red",
     "softfail": "yellow",
     "temperror": "yellow",

@@ -45,6 +45,7 @@ from .addresses import parse_address_list, parse_single_address
 from .attachments import build_attachment, is_attachment, iter_parts
 from .auth import parse_auth
 from .charset import decode_mime_words, decode_payload
+from .limits import MAX_INPUT_BYTES, read_within_limit
 from .routing import parse_routing
 
 T = TypeVar("T")
@@ -67,6 +68,18 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
     parsed = ParsedEmail(
         source=Source(filename=filename, format=EmailFormat.EML, parser_version=__version__),
     )
+
+    # Defensive input cap: refuse to deep-parse an oversized blob (the bytes path
+    # has no file to stat, so we check the length here). Degrades to a noted
+    # partial result rather than raising, matching the bytes-path contract.
+    if len(data) > MAX_INPUT_BYTES:
+        parsed.anomalies.append(
+            Anomaly(
+                code="input_too_large",
+                message=f"input is {len(data)} bytes, exceeding the {MAX_INPUT_BYTES}-byte limit",
+            )
+        )
+        return parsed
 
     try:
         msg = email.message_from_bytes(data)
@@ -91,9 +104,9 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
 
 
 def parse_file(path: str | Path) -> ParsedEmail:
-    """Read ``path`` and parse it as ``.eml``."""
+    """Read ``path`` and parse it as ``.eml`` (refusing oversized input)."""
     p = Path(path)
-    return parse_eml(p.read_bytes(), filename=p.name)
+    return parse_eml(read_within_limit(p), filename=p.name)
 
 
 def _guard(parsed: ParsedEmail, code: str, fn: Callable[[], T], default: T) -> T:

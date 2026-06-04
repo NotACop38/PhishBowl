@@ -29,6 +29,7 @@ from email.message import Message
 from phishbowl.models import Attachment, AttachmentFlag
 
 from .charset import decode_mime_words
+from .limits import MAX_PARTS
 
 # --- Magic-byte signatures -------------------------------------------------
 # (prefix, detected content-type). Order matters: more specific first. We only
@@ -217,24 +218,40 @@ def is_attachment(part: Message) -> bool:
     return maintype != "text"
 
 
-def iter_parts(part: Message):
+def iter_parts(part: Message, *, max_parts: int = MAX_PARTS):
     """Walk a message, treating ``message/*`` parts as opaque attachment leaves.
 
     Unlike :meth:`email.message.Message.walk`, this does not descend into an
     attached ``message/rfc822``: the enclosed email is yielded whole (so it is
     hashed as one attachment) and its inner parts never leak into the outer
     body or attachment set.
+
+    Defensive cap: at most ``max_parts`` leaves are yielded, so a multipart tree
+    engineered to explode into millions of parts (a "MIME bomb") is truncated
+    rather than walked unbounded (see :mod:`phishbowl.parse.limits`).
     """
-    if part.get_content_maintype() == "message":
-        yield part
-        return
-    if part.is_multipart():
-        payload = part.get_payload()
-        if isinstance(payload, list):
-            for sub in payload:
-                yield from iter_parts(sub)
+    yielded = 0
+
+    def _walk(node: Message):
+        nonlocal yielded
+        if yielded >= max_parts:
             return
-    yield part
+        if node.get_content_maintype() == "message":
+            yielded += 1
+            yield node
+            return
+        if node.is_multipart():
+            payload = node.get_payload()
+            if isinstance(payload, list):
+                for sub in payload:
+                    if yielded >= max_parts:
+                        return
+                    yield from _walk(sub)
+                return
+        yielded += 1
+        yield node
+
+    yield from _walk(part)
 
 
 def detect_type(data: bytes) -> str | None:
@@ -365,9 +382,13 @@ def build_attachment_from_bytes(
         declared_type=declared_type,
         detected_type=detected_type,
         size=len(data),
-        md5=hashlib.md5(data).hexdigest(),
-        sha1=hashlib.sha1(data).hexdigest(),
-        sha256=hashlib.sha256(data).hexdigest(),
+        # MD5/SHA1/SHA256 here are file-identity *IOC fingerprints* for
+        # threat-intel lookup and reporting — never a security/auth control — so
+        # the weak-hash concern doesn't apply. usedforsecurity=False states that
+        # intent explicitly (and resolves bandit B324).
+        md5=hashlib.md5(data, usedforsecurity=False).hexdigest(),
+        sha1=hashlib.sha1(data, usedforsecurity=False).hexdigest(),
+        sha256=hashlib.sha256(data, usedforsecurity=False).hexdigest(),
         flags=_flags(filename, declared_type, detected_type, data),
     )
 
