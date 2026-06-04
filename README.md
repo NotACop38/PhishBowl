@@ -1,55 +1,267 @@
-# Phishbowl
+<div align="center">
 
-> Self-hostable, vendor-neutral, **defensive-only** phishing triage.
+# 🐟 PhishBowl
 
-Drop in a suspicious `.eml`/`.msg` → parse it → extract and defang IOCs →
-risk-score it → get an analyst-ready report. **Offline-first:** the core
-pipeline produces a complete verdict with **zero API keys**. Optional OSINT
-enrichment only augments.
+### Self-hostable, vendor-neutral, **defensive-only** phishing triage.
 
-> [!WARNING]
-> **Early scaffold.** This repo is being built phase by phase per
-> [`docs/CHECKLIST.md`](docs/CHECKLIST.md); most functionality isn't
-> implemented yet. This README is a stub and will be polished as features land.
+*Drop in a suspicious `.eml`/`.msg` → get an analyst-ready verdict in seconds.*
+*Offline-first: a complete report with **zero API keys**, **zero network egress**, and **zero risk** to you.*
 
-## Pipeline (target)
+<br>
 
+![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)
+![License: MIT](https://img.shields.io/badge/license-MIT-22A45D)
+![Scope: defensive-only](https://img.shields.io/badge/scope-defensive--only-C73E3A)
+![Pipeline: offline-first](https://img.shields.io/badge/pipeline-offline--first-2E7D9A)
+![Report: zero egress](https://img.shields.io/badge/report-zero--egress-5E35B1)
+![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-E08A3C)
+
+</div>
+
+<br>
+
+> **What it does, in one breath:** PhishBowl parses a reported email, extracts and
+> **defangs** every indicator, optionally enriches them via allowlisted OSINT APIs,
+> computes a **transparent** risk score where every point traces to a named rule, and
+> renders a gorgeous self-contained HTML report you'd be proud to paste into a ticket.
+
+<div align="center">
+
+![PhishBowl verdict banner — Malicious, 100/100, with a per-rule score breakdown](docs/assets/sample-report-hero.png)
+
+<sub>Real output. Zero API keys. Generated offline in seconds.</sub>
+
+</div>
+
+---
+
+## 📑 Table of contents
+
+- [60-second quickstart](#-60-second-quickstart)
+- [The report](#-the-report)
+- [Why PhishBowl](#-why-phishbowl)
+- [How it works](#-how-it-works)
+- [Transparent scoring](#-transparent-scoring)
+- [Outputs](#-outputs)
+- [Connector roadmap](#-connector-roadmap)
+- [Defensive use & safety](#-defensive-use--safety-non-negotiable)
+- [Documentation](#-documentation)
+- [Contributing](#-contributing)
+- [License](#-license)
+
+---
+
+## ⚡ 60-second quickstart
+
+No API keys. No config. No network. One command from a fresh clone to a shareable report:
+
+```bash
+git clone https://github.com/notacop38/phishbowl && cd phishbowl
+pip install -e .                                       # Python 3.11+
+
+# Triage a bundled SYNTHETIC sample → self-contained HTML report
+phishbowl analyze tests/fixtures/crafted_malicious.eml --html report.html
+
+# Open it — it renders anywhere and phones home to no one
+open report.html        # macOS · use `xdg-open` on Linux, `start` on Windows
 ```
-ingest → parse → extract → defang → score(offline) → [optional: enrich → re-score] → report
+
+That's it. The terminal prints a colorized verdict summary, and `report.html` is a
+single self-contained file you can attach to a ticket or share with a colleague.
+Want machine-readable output too? Add `--json result.json`.
+
+> [!NOTE]
+> **Early scaffold.** The **offline core** (parse → extract → defang → score →
+> report) is built and tested. Enrichment connectors and SOAR export are on the
+> [roadmap](#-connector-roadmap). PhishBowl is built phase-by-phase per
+> [`docs/CHECKLIST.md`](docs/CHECKLIST.md).
+
+---
+
+## 🖼 The report
+
+The HTML report is the headline deliverable — a light/dark-adaptive "forensic dossier":
+a verdict banner with a risk dial, a per-rule score breakdown with evidence, authentication
+results, defanged IOC tables with provenance, the routing path, and an attachment table.
+**It loads zero remote assets, so it never phones home to the attacker.**
+
+<div align="center">
+
+![PhishBowl HTML report](docs/assets/sample-report.png)
+
+<sub>Generated from the synthetic <a href="tests/fixtures/crafted_malicious.eml"><code>crafted_malicious.eml</code></a> fixture — no real phishing samples are ever committed.</sub>
+
+</div>
+
+### Regenerate / re-capture this screenshot
+
+The committed image is produced by [`make screenshot`](scripts/screenshot.sh):
+
+```bash
+make screenshot      # renders tests/fixtures/crafted_malicious.eml → docs/assets/sample-report.{html,png}
 ```
 
-Outputs: a self-contained **HTML** report (the primary deliverable), a colorized
-**CLI** summary, and complete **JSON** for piping to other tools.
+The target renders the report with a headless Chromium via Playwright if it's available
+(`npx playwright` — auto-downloaded on first run). If no headless renderer is present it
+still writes the HTML and prints clear instructions to open it in a browser and screenshot
+it manually. See [`scripts/screenshot.sh`](scripts/screenshot.sh).
 
-## Safety (defensive-only)
+---
 
-Phishbowl analyzes emails you *received*, for triage. It **never** sends, never
-detonates attachments, never fetches the email's URLs, and never
-auto-remediates — and its HTML report performs **zero network egress** when
-opened. See [`docs/PRD.md` §4](docs/PRD.md) and [`CLAUDE.md`](CLAUDE.md).
+## ✨ Why PhishBowl
 
-## Install (dev)
+| | |
+|---|---|
+| 🔌 **Offline-first, not offline-only** | The core pipeline produces a complete, defensible verdict with **zero API keys**. Enrichment only ever *augments* — no connector can gate or zero out a verdict. |
+| 🧾 **Reports you'll actually paste into a ticket** | A self-contained HTML dossier, a rich colorized CLI summary, and complete JSON for piping downstream. |
+| 🔬 **Transparent by construction** | No ML black box. The score is the sum of named, YAML-weighted rules; every point cites the evidence that fired it. |
+| 🛡️ **Defensive-only, enforced in code** | Never sends, never detonates, never fetches the email's URLs, never auto-remediates — and the report does zero network egress. |
+| 🧼 **Defanged everywhere** | `hxxps://evil[.]com`, `1[.]2[.]3[.]4`, `user[at]evil[.]com` in all human-facing output, so a misclick can't hurt you. |
+| 🔓 **Unwraps protective wrappers offline** | Microsoft Safelinks and Proofpoint URL Defense are decoded as a pure string transform — **never by fetching the link**. |
+| 📨 **`.eml` *and* `.msg`** | Both formats normalize into one internal contract, so everything downstream is format-agnostic. |
+| 🧩 **Pluggable connectors** | A stable plugin API (registry + entry-points) so the community can ship integrations without forking. |
+| 🙈 **PII redaction** | An opt-in mode strips recipients and internal hosts/IPs so a report can be shared externally — attacker indicators stay in full. |
+| 🏠 **Self-hostable & vendor-neutral** | MIT-licensed, `pip install`, no SaaS, no lock-in. |
+
+---
+
+## 🔭 How it works
+
+The **offline core** (parse → extract → defang → score → report) always runs and is
+always sufficient for a complete verdict. Enrichment is a distinct, optional layer that
+augments signals and re-scores — but the offline verdict is computed and shown regardless.
+
+```mermaid
+flowchart LR
+    IN([".eml / .msg"]) --> P["PARSE<br/>headers · auth · routing<br/>addresses · attachments"]
+    P --> M(["ParsedEmail<br/>one internal contract"])
+    M --> X["EXTRACT<br/>URLs · domains · IPs<br/>hashes · addresses"]
+    X --> D["DEFANG<br/>unwrap Safelinks /<br/>URL Defense · neuter IOCs"]
+    D --> S["SCORE offline<br/>additive YAML rules<br/>0–100 → verdict"]
+    S --> R(["REPORT<br/>HTML · CLI · JSON"])
+
+    S -.->|optional, key-gated| E["ENRICH<br/>VirusTotal · urlscan<br/>AbuseIPDB · RDAP · Shodan"]
+    E -.->|re-score, tagged| S
+
+    classDef core fill:#0d121b,stroke:#5ed3c9,stroke-width:1px,color:#e7eef6;
+    classDef io fill:#131b27,stroke:#243044,color:#8a98ab;
+    classDef opt fill:#131b27,stroke:#d8a52a,stroke-dasharray:4 3,color:#d8a52a;
+    class P,X,D,S,R core;
+    class IN,M io;
+    class E opt;
+```
+
+Everything downstream of parsing consumes a single Pydantic contract, `ParsedEmail`, so
+both the `.eml` and `.msg` paths converge and nothing after parsing cares about the source
+format. See [`docs/PRD.md` §5–§7](docs/PRD.md) for the full architecture.
+
+---
+
+## 🎯 Transparent scoring
+
+PhishBowl is deliberately **transparent over clever** — there is no model to second-guess.
+
+- **The score is additive.** It's the **sum of the weights of every rule that fired**,
+  clamped to **0–100**. A clean email fires nothing and lands at **0**.
+- **Every point is traceable.** Each fired rule emits a human-readable reason *and the
+  evidence that triggered it* (e.g. `dmarc=fail (p=reject) header.from=example.com`).
+- **Weights live in YAML**, not code — tune PhishBowl to your environment without
+  touching Python ([`phishbowl/score/defaults.yaml`](phishbowl/score/defaults.yaml)).
+- **Signals are source-tagged** `offline` vs `[enrichment]`, so a zero-key verdict is
+  still meaningful and you can always see which points came from local heuristics.
+
+**Verdict bands:**
+
+| Score | Verdict |
+|------:|---------|
+| 0–19 | 🟢 Benign — no strong indicators |
+| 20–39 | 🟡 Low suspicion |
+| 40–64 | 🟠 Suspicious — analyst review |
+| 65–84 | 🔴 Likely malicious |
+| 85–100 | ⛔ Malicious — high confidence |
+
+Full rule catalog and tuning instructions: [`docs/SCORING.md`](docs/SCORING.md).
+
+---
+
+## 📤 Outputs
+
+| Output | Flag | What it's for |
+|--------|------|---------------|
+| **Rich CLI** | *(default)* | Colorized verdict banner, top reasons, IOC tables, auth results — read it right in the terminal. |
+| **HTML** | `--html report.html` | The primary deliverable: a self-contained, zero-egress dossier you can attach to a ticket. |
+| **JSON** | `--json result.json` | Complete structured result (defanged **and** clearly-labeled raw) for piping into other tools. |
+| **Redaction** | `--redact` / `--redact-field` | Strip bystander PII (recipients, internal hosts/IPs) so a report can be shared externally. |
+
+---
+
+## 🧩 Connector roadmap
+
+Enrichment is a **layer, not a dependency**. Connectors are pluggable, key-gated, and
+allowlisted to their vendor's documented API — they may **never** be coerced into fetching
+a URL from the analyzed email (SSRF guard). All are planned for **Phase 5**; the offline
+verdict never depends on any of them.
+
+| Connector | IOC types | API key | OPSEC note | Status |
+|-----------|-----------|:-------:|------------|:------:|
+| **WHOIS / RDAP** | domain | — | Passive lookup; domain age < 30d is a strong phishing signal. | 🔜 Planned |
+| **VirusTotal** | url · domain · hash | required | Passive reputation lookup; respects free-tier rate limits. | 🔜 Planned |
+| **AbuseIPDB** | ip | required | Abuse confidence for the sending IP. | 🔜 Planned |
+| **Shodan** | ip | required | Exposed-service context for related IPs. | 🔜 Planned |
+| **urlscan.io** | url | required | ⚠️ Active submission *visits* the URL (on urlscan's infra). **Operator opt-in, private by default** — prefer passive search. | 🔜 Planned |
+
+Want to build one? Start with the [connector-authoring guide](docs/CONNECTORS.md).
+
+---
+
+## 🛡 Defensive use & safety (non-negotiable)
+
+PhishBowl analyzes emails you **received or were forwarded**, for triage. This boundary is
+load-bearing and enforced in code and tests ([`CLAUDE.md`](CLAUDE.md), [`docs/PRD.md` §4](docs/PRD.md)):
+
+- 🚫 **Never sends.** No SMTP, no replies, no read receipts, no callback of any kind to the email's infrastructure.
+- 🚫 **Never detonates.** Attachments are hashed and inspected by metadata/magic bytes only — never executed; archives are not auto-extracted.
+- 🚫 **Never fetches the email's URLs.** PhishBowl never opens the suspicious links. Indicators only ever go to allowlisted OSINT APIs the operator explicitly configures.
+- 🚫 **Never auto-remediates.** It produces a verdict and an optional playbook *draft* — it never quarantines, blocks, or acts.
+- 🚫 **Zero network egress in the report.** The HTML report loads no remote images, fonts, scripts, or trackers. *A report about a phishing email must never phone home to the attacker.*
+- 🚫 **Only synthetic samples committed.** Real phishing can carry live links, real PII, or actual malware — fixtures are always synthesized, never real. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+---
+
+## 📚 Documentation
+
+| Doc | What's in it |
+|-----|--------------|
+| [`docs/PRD.md`](docs/PRD.md) | Product requirements — the source of truth. |
+| [`docs/CHECKLIST.md`](docs/CHECKLIST.md) | The phased engineering build order. |
+| [`docs/SCORING.md`](docs/SCORING.md) | The scoring-config guide: rule catalog, weights, bands, tuning. |
+| [`docs/CONNECTORS.md`](docs/CONNECTORS.md) | Connector-authoring guide (placeholder — interface lands in Phase 5). |
+| [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | Plain-English glossary: IOC, SPF/DKIM/DMARC, defang, Safelinks/URL Defense, SOAR, RDAP, and more. |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute — including the **no real samples** rule. |
+
+---
+
+## 🤝 Contributing
+
+PhishBowl is an early, phase-by-phase build and contributions are welcome. The routine
+gate is a fast `make test`:
 
 ```bash
 pip install -e ".[dev]"
-```
-
-Requires Python 3.11+.
-
-## Develop
-
-```bash
 make test     # the routine gate — a fast pytest run
 make lint     # ruff check
 make format   # ruff format
 ```
 
-## Docs
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first — especially the rule that **real phishing
+samples are never committed**.
 
-- [`docs/PRD.md`](docs/PRD.md) — product requirements (source of truth)
-- [`docs/CHECKLIST.md`](docs/CHECKLIST.md) — phased engineering checklist
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — how to contribute (incl. the **no real samples** rule)
+---
 
-## License
+## 📄 License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE). Self-host it, fork it, ship a connector.
+
+<div align="center">
+<sub>Built defensive-first. If you find PhishBowl useful, a ⭐ helps others find it.</sub>
+</div>
