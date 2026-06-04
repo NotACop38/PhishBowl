@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phishbowl.dev/schemas/xsoar_playbook.schema.json",
+  "title": "Phishbowl Cortex XSOAR playbook (draft export)",
+  "description": "Schema for the Cortex XSOAR 6.x playbook artifact Phishbowl emits. DRAFT / EXPORT ONLY: every task is a manual task (task.iscommand is const false), so importing this playbook never auto-runs an integration command. Phishbowl never quarantines, blocks, sends, or acts; it only proposes a human-review playbook seeded with the triage verdict and indicators.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "id",
+    "version",
+    "name",
+    "description",
+    "starttaskid",
+    "tasks",
+    "inputs",
+    "outputs",
+    "tags"
+  ],
+  "properties": {
+    "id": { "type": "string", "minLength": 1 },
+    "version": { "type": "integer" },
+    "name": { "type": "string", "minLength": 1 },
+    "description": { "type": "string", "minLength": 1 },
+    "fromversion": { "type": "string" },
+    "system": { "type": "boolean" },
+    "starttaskid": { "type": "string", "minLength": 1 },
+    "tags": { "type": "array", "items": { "type": "string" } },
+    "inputs": { "type": "array", "items": { "$ref": "#/$defs/input" } },
+    "outputs": { "type": "array" },
+    "tasks": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": { "$ref": "#/$defs/task" }
+    }
+  },
+  "$defs": {
+    "input": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["key", "value"],
+      "properties": {
+        "key": { "type": "string", "minLength": 1 },
+        "value": { "type": "object" },
+        "required": { "type": "boolean" },
+        "description": { "type": "string" }
+      }
+    },
+    "task": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "taskid", "type", "task"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "taskid": { "type": "string", "minLength": 1 },
+        "type": { "enum": ["start", "title", "regular"] },
+        "task": { "$ref": "#/$defs/taskdef" },
+        "nexttasks": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "separatecontext": { "type": "boolean" }
+      }
+    },
+    "taskdef": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "The inner task definition. iscommand is const false and brand const empty: a draft export contains only manual tasks and never binds an automation command, so import cannot trigger remediation.",
+      "required": ["id", "version", "name", "iscommand", "brand"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "type": { "enum": ["start", "title", "regular"] },
+        "iscommand": { "const": false },
+        "brand": { "const": "" }
+      }
+    }
+  }
+}

@@ -72,10 +72,10 @@ Want machine-readable output too? Add `--json result.json`.
 
 > [!NOTE]
 > **Status.** The **offline core** (parse → extract → defang → score → report) is
-> built and tested, and **opt-in OSINT enrichment** (`--enrich`) layers on top
-> with five allowlisted, key-gated connectors. SOAR export is next on the
-> [roadmap](#-connectors). PhishBowl is built phase-by-phase per
-> [`docs/CHECKLIST.md`](docs/CHECKLIST.md).
+> built and tested, **opt-in OSINT enrichment** (`--enrich`) layers on top with
+> five allowlisted, key-gated connectors, and **SOAR export** (`--xsoar` /
+> `--sentinel`) emits Cortex XSOAR and Microsoft Sentinel playbook *drafts*.
+> PhishBowl is built phase-by-phase per [`docs/CHECKLIST.md`](docs/CHECKLIST.md).
 
 ---
 
@@ -192,6 +192,7 @@ Full rule catalog and tuning instructions: [`docs/SCORING.md`](docs/SCORING.md).
 | **Rich CLI** | *(default)* | Colorized verdict banner, top reasons, IOC tables, auth results — read it right in the terminal. |
 | **HTML** | `--html report.html` | The primary deliverable: a self-contained, zero-egress dossier you can attach to a ticket. |
 | **JSON** | `--json result.json` | Complete structured result (defanged **and** clearly-labeled raw) for piping into other tools. |
+| **SOAR export** | `--xsoar playbook.yml` / `--sentinel azuredeploy.json` | Cortex XSOAR & Microsoft Sentinel playbook **drafts** — inert, never auto-run. See [`docs/SOAR_EXPORT.md`](docs/SOAR_EXPORT.md). |
 | **Redaction** | `--redact` / `--redact-field` | Strip bystander PII (recipients, internal hosts/IPs) so a report can be shared externally. |
 
 ---
@@ -246,6 +247,7 @@ load-bearing and enforced in code and tests ([`CLAUDE.md`](CLAUDE.md), [`docs/PR
 | [`docs/CHECKLIST.md`](docs/CHECKLIST.md) | The phased engineering build order. |
 | [`docs/SCORING.md`](docs/SCORING.md) | The scoring-config guide: rule catalog, weights, bands, tuning. |
 | [`docs/CONNECTORS.md`](docs/CONNECTORS.md) | Connector-authoring guide (placeholder — interface lands in Phase 5). |
+| [`docs/SOAR_EXPORT.md`](docs/SOAR_EXPORT.md) | SOAR export guide: XSOAR & Sentinel playbook drafts, field mappings, import steps. |
 | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | Plain-English glossary: IOC, SPF/DKIM/DMARC, defang, Safelinks/URL Defense, SOAR, RDAP, and more. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute — including the **no real samples** rule. |
 

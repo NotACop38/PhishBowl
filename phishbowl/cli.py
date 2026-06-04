@@ -10,6 +10,11 @@ it augments the offline verdict with allowlisted OSINT connectors and re-scores,
 tagging every added point ``[enrichment]``. Without ``--enrich`` (and without
 keys) the pipeline is entirely offline and unchanged.
 
+Phase 6 adds optional SOAR export: ``--xsoar`` and ``--sentinel`` write a Cortex
+XSOAR playbook and a Microsoft Sentinel playbook (Logic App ARM template)
+respectively. These are **drafts** — every XSOAR task is manual and the Sentinel
+workflow ships disabled — so importing one triggers no automation.
+
 Phishbowl is defensive-only: it never sends, detonates, fetches the email's
 URLs, or auto-remediates (CLAUDE.md invariants). Even with ``--enrich``, the only
 network egress is to allowlisted vendor APIs — never the analyzed email's URLs.
@@ -24,6 +29,7 @@ import typer
 from rich.console import Console
 
 from phishbowl.connectors import EnrichmentReport, EnrichmentSettings, enrich_email
+from phishbowl.export import render_sentinel, render_xsoar
 from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse
 from phishbowl.report import (
@@ -65,6 +71,20 @@ def analyze(
         Path | None,
         typer.Option("--json", "-j", help="Write the complete JSON result to this path."),
     ] = None,
+    xsoar: Annotated[
+        Path | None,
+        typer.Option(
+            "--xsoar",
+            help="Write a Cortex XSOAR playbook DRAFT (YAML) to this path. Manual tasks only.",
+        ),
+    ] = None,
+    sentinel: Annotated[
+        Path | None,
+        typer.Option(
+            "--sentinel",
+            help="Write a Microsoft Sentinel playbook DRAFT (ARM JSON). Ships disabled.",
+        ),
+    ] = None,
     redact: Annotated[
         bool,
         typer.Option("--redact", help="Redact bystander PII (recipients, internal hosts/IPs)."),
@@ -91,10 +111,12 @@ def analyze(
     """Triage a suspicious email and produce a report (HTML / JSON / CLI).
 
     Runs the offline pipeline end-to-end with zero API keys and prints a rich
-    summary; pass ``--html``/``--json`` to also write those outputs. Add
-    ``--enrich`` to layer in OSINT enrichment (key-gated, reading secrets from the
-    environment only). Phishbowl is defensive-only: it never sends, detonates,
-    fetches the email's URLs, or auto-remediates.
+    summary; pass ``--html``/``--json`` to also write those outputs, and
+    ``--xsoar``/``--sentinel`` to emit SOAR playbook drafts. Add ``--enrich`` to
+    layer in OSINT enrichment (key-gated, reading secrets from the environment
+    only). Phishbowl is defensive-only: it never sends, detonates, fetches the
+    email's URLs, or auto-remediates — SOAR exports are inert drafts for an analyst
+    to review, never executed automation.
     """
     try:
         parsed = parse(path)
@@ -132,6 +154,18 @@ def analyze(
     if json_out is not None:
         json_out.write_text(render_json(view), encoding="utf-8")
         typer.echo(f"phishbowl: wrote JSON result to {json_out}")
+    if xsoar is not None:
+        xsoar.write_text(render_xsoar(view), encoding="utf-8")
+        typer.echo(
+            f"phishbowl: wrote XSOAR playbook DRAFT to {xsoar} "
+            "(manual tasks only — review before running; Phishbowl never acts)"
+        )
+    if sentinel is not None:
+        sentinel.write_text(render_sentinel(view), encoding="utf-8")
+        typer.echo(
+            f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
+            "(ships disabled — review and enable manually; Phishbowl never acts)"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
