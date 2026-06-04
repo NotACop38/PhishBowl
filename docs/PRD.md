@@ -101,7 +101,7 @@ The single internal model everything downstream consumes. Pydantic v2 (validatio
 
 - **Source** — `filename`, `format` (`eml`|`msg`), `parsed_at`, `parser_version`.
 - **Headers** — ordered list of `(name, value)` preserving duplicates, plus convenience accessors.
-- **Auth** — `spf`, `dkim`, `dmarc`, each `{result, detail}` over `pass|fail|softfail|neutral|none|temperror|permperror`.
+- **Auth** — `spf`, `dkim`, `dmarc`, each `{result, detail}` over `pass|fail|softfail|neutral|none|temperror|permerror`.
 - **Routing** — ordered list of parsed `Received` hops.
 - **Addresses** — `from_`, `reply_to`, `return_path`, `sender`, `to`, `cc`, each split into `{display_name, addr_spec, domain}`.
 - **Subject**, **Date**.
@@ -180,7 +180,7 @@ This is the community contribution surface, so the *interface* is designed befor
 - **Graceful degrade** — missing key → connector skipped with a clear report note ("VirusTotal: skipped, no API key"); network/API error → soft-fail with note, never crash the run.
 - **Allowlisted egress** — connectors may only reach their vendor's documented API base URL. They must never be coerced into fetching an arbitrary URL taken from the email (SSRF guard).
 
-**urlscan operational-security note.** urlscan is the one connector that causes a URL to be *visited* (on urlscan's infrastructure, not ours). Submissions must default to **private** scans. A public scan can tip off an attacker that they've been detected and can leak victim data; if we ever expose a public option it must be explicit and carry a warning.
+**urlscan operational-security note.** urlscan is the one connector that causes a URL to be *visited* (on urlscan's infrastructure, not ours) — so it is never part of the offline default pipeline and is strictly **operator opt-in**. Submissions must default to **private** scans, but private is not a safety guarantee: it only hides the *result page*. The request to the (possibly attacker-controlled) host still happens — which can tip off an attacker that the email was detected — and phishing URLs often carry a per-victim token, so submitting the raw URL can leak victim-specific data to a third party. Prefer passive lookups/searches where they answer the question; treat active submission as a deliberate, per-run choice. A public scan compounds both risks; if we ever expose a public option it must be explicit and carry a warning.
 
 ## 10. Outputs & report security
 
@@ -227,7 +227,7 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 - Connectors are a potential SSRF vector → allowlisted vendor egress only; never fetch email URLs (§9).
 - API keys are secrets → never logged, never in outputs (§11).
 - Fixtures are a supply-chain/PII risk → synthetic only; document in CONTRIBUTING that real samples are never committed (§4).
-- urlscan public submission is an opsec risk → private by default (§9).
+- urlscan submission causes a third-party fetch of the email's URL → operator opt-in, private by default; even a private scan still reaches the host and can leak per-victim URL tokens, so prefer passive lookups (§9).
 
 ## 14. Success metrics
 
