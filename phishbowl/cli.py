@@ -10,8 +10,20 @@ import typer
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
-    help="Phishbowl — a self-hostable, defensive-only phishing triage tool.",
 )
+
+
+@app.callback()
+def main() -> None:
+    """Phishbowl — a self-hostable, defensive-only phishing triage tool.
+
+    Offline-first phishing triage: parse a suspicious .eml/.msg, extract and
+    defang IOCs, risk-score it, and produce an analyst-ready report.
+
+    This callback intentionally does nothing; it exists so that ``analyze``
+    (and future commands) stay subcommands — i.e. ``phishbowl analyze <file>``
+    — instead of Typer collapsing a lone command into the root program.
+    """
 
 
 @app.command()
