@@ -22,10 +22,25 @@ from phishbowl.models import (
     EmailFormat,
     ParsedEmail,
 )
-from phishbowl.parse import parse, parse_eml
+from phishbowl.parse import parse, parse_eml, parse_msg
 from phishbowl.parse.attachments import _flags
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _load_msg_builder():
+    """Load the synthetic .msg generator so tests can build .msg variants in-memory."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_synthetic_msg", FIXTURES / "build_synthetic_msg.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_msgbuild = _load_msg_builder()
 
 
 def _parse(name: str) -> ParsedEmail:
@@ -316,12 +331,15 @@ def test_parse_dispatch_unsupported_suffix_raises() -> None:
 
 
 def test_parse_dispatch_msg_degrades_gracefully(tmp_path: Path) -> None:
+    # Garbage that isn't a real .msg must degrade to a noted partial result with
+    # the correct format, never crash (PRD §11) — same contract as the .eml path.
     msg = tmp_path / "outlook.msg"
     msg.write_bytes(b"not really a msg")
     parsed = parse(msg)
 
+    assert isinstance(parsed, ParsedEmail)
     assert parsed.source.format is EmailFormat.MSG
-    assert any(a.code == "unsupported_format" for a in parsed.anomalies)
+    assert any(a.code == "parse_error" for a in parsed.anomalies)
 
 
 def test_parse_dispatch_msg_missing_file_raises() -> None:
@@ -336,6 +354,229 @@ def test_parse_dispatch_msg_unreadable_raises(tmp_path: Path) -> None:
     not_a_file.mkdir()
     with pytest.raises(OSError):
         parse(not_a_file)
+
+
+# --- .msg path (extract-msg) -----------------------------------------------
+
+
+def test_msg_normalizes_into_same_model_as_eml() -> None:
+    # The core Phase 1 guarantee: a .msg parses into the SAME ParsedEmail shape
+    # as a .eml, so everything downstream of parsing is format-agnostic (PRD §5).
+    msg = _parse("synthetic_phish.msg")
+    eml = _parse("benign_newsletter.eml")
+
+    assert isinstance(msg, ParsedEmail)
+    # Identical serialized schema, and identical sub-model types per field.
+    assert msg.model_dump(mode="json").keys() == eml.model_dump(mode="json").keys()
+    assert type(msg.auth) is type(eml.auth)
+    assert type(msg.routing) is type(eml.routing)
+    assert type(msg.addresses) is type(eml.addresses)
+    assert type(msg.body) is type(eml.body)
+
+    # The .msg path populates the same format-agnostic fields the .eml path does,
+    # rather than leaving them empty as if they were format-specific.
+    for parsed in (msg, eml):
+        assert parsed.addresses.from_ is not None
+        assert parsed.addresses.from_.domain
+        assert parsed.subject
+        assert parsed.date is not None
+        assert parsed.body.text
+        assert len(parsed.headers) > 0
+        assert len(parsed.routing) >= 1
+
+    assert msg.source.format is EmailFormat.MSG
+    assert eml.source.format is EmailFormat.EML
+
+
+def test_msg_fields_normalized_from_mapi_and_headers() -> None:
+    parsed = _parse("synthetic_phish.msg")
+
+    assert parsed.subject == "Action required: confirm your account details"
+    frm = parsed.addresses.from_
+    assert frm is not None
+    assert frm.addr_spec == "support@account-verify.example"
+    assert frm.domain == "account-verify.example"
+    assert [a.addr_spec for a in parsed.addresses.to] == ["analyst@example.org"]
+
+    # Routing recovered from the preserved transport headers, top-to-bottom.
+    assert len(parsed.routing) == 2
+    assert parsed.routing.hops[0].from_ == "mail.account-verify.example"
+
+    assert parsed.date is not None
+    assert parsed.body.text is not None and "re-verified" in parsed.body.text
+    assert parsed.body.has_html is True
+    # html_raw is retained for analysis but never rendered (PRD §10).
+    assert parsed.body.html_raw is not None
+
+
+def test_msg_attachment_inspected_like_eml() -> None:
+    # Attachments come from MAPI streams, not MIME parts, yet flow through the
+    # same inspector — so hashes and magic-byte detection match the .eml path.
+    parsed = _parse("synthetic_phish.msg")
+
+    assert len(parsed.attachments) == 1
+    att = parsed.attachments[0]
+    assert att.filename == "statement.pdf"
+    assert att.declared_type == "application/pdf"
+    assert att.detected_type == "application/pdf"  # sniffed from %PDF- magic bytes
+    assert att.size > 0
+    assert len({att.md5, att.sha1, att.sha256}) == 3  # three distinct digests
+
+
+def test_msg_auth_is_lossier_and_noted() -> None:
+    # Outlook drops Authentication-Results from .msg transport headers, so auth
+    # reads as NONE — not because checks failed, but because nothing survived.
+    parsed = _parse("synthetic_phish.msg")
+
+    assert parsed.auth.spf.result is AuthResultState.NONE
+    assert parsed.auth.dkim.result is AuthResultState.NONE
+    assert parsed.auth.dmarc.result is AuthResultState.NONE
+    # That lossiness is explicitly recorded so the report never overstates it.
+    assert any(a.code == "msg_auth_unavailable" for a in parsed.anomalies)
+
+
+def test_msg_parse_bytes_direct_matches_dispatch() -> None:
+    # parse_msg(bytes) and parse(path) agree (dispatch just reads the file).
+    data = (FIXTURES / "synthetic_phish.msg").read_bytes()
+    direct = parse_msg(data, filename="synthetic_phish.msg")
+    viapath = _parse("synthetic_phish.msg")
+    assert direct.subject == viapath.subject
+    assert direct.source.format is EmailFormat.MSG
+    assert [a.addr_spec for a in direct.addresses.to] == [a.addr_spec for a in viapath.addresses.to]
+
+
+def test_msg_plain_text_only_does_not_fabricate_html() -> None:
+    # extract-msg's htmlBody convenience property synthesizes HTML from the text
+    # body when no real HTML part exists; we must read the raw PR_HTML stream so a
+    # plain-text .msg reports has_html=False and never feeds downstream link/HTML
+    # analysis fabricated markup (matching the .eml parser's semantics).
+    data = _msgbuild.build_message(
+        subject="Plain only",
+        body_text="just text, no html part",
+        sender=("Bob Sender", "bob@sender.example"),
+        recipients=[(_msgbuild.RECIP_TO, "Alice", "alice@example.org")],
+    )
+    parsed = parse_msg(data, filename="plain.msg")
+
+    assert parsed.body.text is not None and "just text" in parsed.body.text
+    assert parsed.body.has_html is False
+    assert parsed.body.html_raw is None
+
+
+def test_msg_bcc_recipient_not_classified_as_to() -> None:
+    # A saved Bcc recipient must not appear as a To/Cc: the model has no Bcc
+    # field, and misfiling it would mislead the report. Only To and Cc map.
+    data = _msgbuild.build_message(
+        subject="Recipients",
+        body_text="body",
+        sender=("Bob", "bob@sender.example"),
+        recipients=[
+            (_msgbuild.RECIP_TO, "Alice", "alice@example.org"),
+            (_msgbuild.RECIP_CC, "Carol", "carol@example.org"),
+            (_msgbuild.RECIP_BCC, "Eve", "eve@secret.example"),
+        ],
+    )
+    parsed = parse_msg(data, filename="recips.msg")
+
+    assert [a.addr_spec for a in parsed.addresses.to] == ["alice@example.org"]
+    assert [a.addr_spec for a in parsed.addresses.cc] == ["carol@example.org"]
+    # The Bcc address appears in neither list.
+    all_specs = [a.addr_spec for a in (*parsed.addresses.to, *parsed.addresses.cc)]
+    assert "eve@secret.example" not in all_specs
+
+
+def test_msg_recipients_filled_from_mapi_when_headers_omit_them() -> None:
+    # Transport headers with a From but no To/Cc must still get recipients from
+    # the MAPI table — the fallback fills gaps, it doesn't only run when From is
+    # missing. (It must not clobber the header-derived From.)
+    headers = (
+        "From: Bob Sender <bob@sender.example>\r\n"
+        "Subject: gappy headers\r\n"
+        "Date: Mon, 01 Jun 2026 09:00:00 +0000\r\n"
+    )
+    data = _msgbuild.build_message(
+        subject="gappy headers",
+        body_text="body",
+        transport_headers=headers,
+        sender=("MAPI Sender", "mapi@sender.example"),
+        recipients=[(_msgbuild.RECIP_TO, "Alice", "alice@example.org")],
+    )
+    parsed = parse_msg(data, filename="gappy.msg")
+
+    # From came from the headers and was not overwritten by the MAPI sender...
+    assert parsed.addresses.from_ is not None
+    assert parsed.addresses.from_.addr_spec == "bob@sender.example"
+    # ...while the recipients the headers lacked were recovered from MAPI.
+    assert [a.addr_spec for a in parsed.addresses.to] == ["alice@example.org"]
+
+
+def test_msg_no_transport_headers_noted_and_mapi_used() -> None:
+    # With no transport headers at all, routing/auth are unavailable (noted), and
+    # sender/recipients come entirely from MAPI.
+    data = _msgbuild.build_message(
+        subject="No headers",
+        body_text="body",
+        sender=("Bob", "bob@sender.example"),
+        recipients=[(_msgbuild.RECIP_TO, "Alice", "alice@example.org")],
+    )
+    parsed = parse_msg(data, filename="noheaders.msg")
+
+    assert parsed.addresses.from_ is not None
+    assert parsed.addresses.from_.addr_spec == "bob@sender.example"
+    assert len(parsed.routing) == 0
+    codes = {a.code for a in parsed.anomalies}
+    assert "msg_no_transport_headers" in codes
+    assert "msg_auth_unavailable" in codes
+
+
+def test_msg_cc_filled_from_mapi_when_headers_have_only_to() -> None:
+    # Headers supply To but not Cc; the MAPI table has a Cc recipient. Each
+    # recipient list is filled independently, so cc is recovered without
+    # overwriting the header-derived to.
+    headers = (
+        "From: Bob <bob@sender.example>\r\n"
+        "To: Alice <alice@example.org>\r\n"
+        "Subject: only to\r\n"
+        "Date: Mon, 01 Jun 2026 09:00:00 +0000\r\n"
+    )
+    data = _msgbuild.build_message(
+        subject="only to",
+        body_text="body",
+        transport_headers=headers,
+        sender=("Bob", "bob@sender.example"),
+        recipients=[
+            (_msgbuild.RECIP_TO, "Alice", "alice@example.org"),
+            (_msgbuild.RECIP_CC, "Carol", "carol@example.org"),
+        ],
+    )
+    parsed = parse_msg(data, filename="onlyto.msg")
+
+    assert [a.addr_spec for a in parsed.addresses.to] == ["alice@example.org"]
+    assert [a.addr_spec for a in parsed.addresses.cc] == ["carol@example.org"]
+
+
+def test_msg_embedded_message_attachment_is_hashed_not_empty() -> None:
+    # An embedded .msg (e.g. a reported phishing email) must be serialized and
+    # hashed as evidence — not recorded as a zero-byte attachment.
+    inner = _msgbuild.embedded_message_storage(
+        subject="Reported phish", body_text="you won a prize"
+    )
+    data = _msgbuild.build_message(
+        subject="Outer",
+        body_text="see attached",
+        sender=("Bob", "bob@sender.example"),
+        embedded=[("reported.msg", inner)],
+    )
+    parsed = parse_msg(data, filename="outer.msg")
+
+    assert len(parsed.attachments) == 1
+    att = parsed.attachments[0]
+    assert att.filename == "reported.msg"
+    assert att.size > 0
+    # The serialized container sniffs as an OLE/CFB document, not empty.
+    assert att.detected_type == "application/x-ole-storage"
+    assert att.sha256 != hashlib.sha256(b"").hexdigest()
+    assert len({att.md5, att.sha1, att.sha256}) == 3
 
 
 def test_attachment_digests_are_consistent_with_each_other() -> None:
