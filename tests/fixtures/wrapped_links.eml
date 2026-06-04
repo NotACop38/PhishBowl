@@ -1,0 +1,75 @@
+Return-Path: <bounce@mailer.account-verify.example>
+Received: from gw.mailer.example (gw.mailer.example [203.0.113.45])
+	by mx.example.org (Postfix) with ESMTPS id WRAP01
+	for <analyst@example.org>; Wed, 03 Jun 2026 11:20:04 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=fail smtp.mailfrom=account-verify.example;
+	dkim=none;
+	dmarc=fail header.from=account-verify.example
+From: "IT Service Desk" <support@account-verify.example>
+Reply-To: <replies@reply-catcher.example>
+To: "Analyst" <analyst@example.org>
+Subject: Action required: confirm your account
+Date: Wed, 03 Jun 2026 11:20:00 +0000
+Message-ID: <20260603112000.0007@account-verify.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="wrap-boundary-0007"
+
+This is a multi-part message in MIME format.
+--wrap-boundary-0007
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+This is a SYNTHETIC, obviously-fake phishing sample for Phishbowl's test suite.
+All indicators use reserved example-only values (RFC 2606 / RFC 5737).
+
+Please confirm your account using one of the protected links below:
+
+  - Microsoft Safelinks:
+    https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Faccount-verify.example%2Flogin%3Fid%3D42&data=05%7C01%7C&sdata=Xyz123&reserved=0
+
+  - Proofpoint URL Defense v2:
+    https://urldefense.proofpoint.com/v2/url?u=https-3A__secure-2Dupdate.example_portal&d=DwMFaQ&c=AbCd&r=Zyx&m=123&s=456&e=
+
+  - Proofpoint URL Defense v3:
+    https://urldefense.com/v3/__https://reset-portal.example/p?q=a*b__;Kw!!DOxrgLBm!SyntheticTokenForTests$
+
+  - Mimecast (cannot be reversed offline):
+    https://protect.mimecast.com/s/aB12CdEf34?domain=phish-portal.example
+
+Other indicators for extraction coverage:
+
+  - Raw-IP payload host: http://198.51.100.23/payload.bin
+  - Documentation IPv6: 2001:db8::6660
+  - Reported attachment SHA256:
+    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
+
+If you did not expect this message, do nothing. (You did not; this is a test.)
+
+-- The (fake) IT Service Desk
+--wrap-boundary-0007
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<!DOCTYPE html>
+<html>
+  <body>
+    <p>Please confirm your account using one of the protected links below:</p>
+    <ul>
+      <li>
+        <a href="https://nam12.safelinks.protection.outlook.com/?url=https%3A%2F%2Faccount-verify.example%2Flogin%3Fid%3D42&amp;data=05%7C01%7C&amp;sdata=Xyz123&amp;reserved=0">Confirm via Safelinks</a>
+      </li>
+      <li>
+        <a href="https://urldefense.proofpoint.com/v2/url?u=https-3A__secure-2Dupdate.example_portal&amp;d=DwMFaQ&amp;c=AbCd&amp;r=Zyx&amp;m=123&amp;s=456&amp;e=">Confirm via Proofpoint v2</a>
+      </li>
+      <li>
+        <a href="https://urldefense.com/v3/__https://reset-portal.example/p?q=a*b__;Kw!!DOxrgLBm!SyntheticTokenForTests$">Confirm via Proofpoint v3</a>
+      </li>
+      <li>
+        <a href="https://protect.mimecast.com/s/aB12CdEf34?domain=phish-portal.example">Confirm via Mimecast</a>
+      </li>
+    </ul>
+    <p>&mdash; The (fake) IT Service Desk</p>
+  </body>
+</html>
+--wrap-boundary-0007--
