@@ -1,0 +1,61 @@
+Return-Path: <newsletter@example.com>
+Received: from mail.example.com (mail.example.com [192.0.2.10])
+	by mx.example.org (Postfix) with ESMTPS id ABC123
+	for <analyst@example.org>; Tue, 02 Jun 2026 09:15:04 +0000 (UTC)
+Received: from app.example.com (app.example.com [192.0.2.20])
+	by mail.example.com (Postfix) with ESMTP id DEF456
+	for <newsletter@example.com>; Tue, 02 Jun 2026 09:15:02 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=pass smtp.mailfrom=example.com;
+	dkim=pass header.d=example.com header.s=selector1;
+	dmarc=pass header.from=example.com
+Received-SPF: pass (example.org: domain of example.com designates 192.0.2.10 as permitted sender) client-ip=192.0.2.10;
+From: "Example Newsletter" <newsletter@example.com>
+Reply-To: "Example Support" <support@example.com>
+Sender: <newsletter@example.com>
+To: "Analyst" <analyst@example.org>
+Cc: <team@example.org>
+Subject: Your weekly Example.com community digest
+Date: Tue, 02 Jun 2026 09:15:00 +0000
+Message-ID: <20260602091500.0001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="benign-boundary-0001"
+
+This is a multi-part message in MIME format.
+--benign-boundary-0001
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hello and welcome to this week's Example.com community digest.
+
+This is a synthetic, obviously-benign sample email used by Phishbowl's test
+suite. Every indicator below uses reserved example-only values:
+
+  - Sender domain: example.com
+  - Recipient domain: example.org
+  - Reference link: https://www.example.com/community/digest
+  - Documentation IP: 192.0.2.10 (TEST-NET-1, RFC 5737)
+
+There is nothing to do here. Have a great week!
+
+-- The Example.com community team
+--benign-boundary-0001
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+<!DOCTYPE html>
+<html>
+  <body>
+    <h1>Example.com community digest</h1>
+    <p>
+      Hello and welcome to this week's
+      <a href="https://www.example.com/community/digest">community digest</a>.
+    </p>
+    <p>
+      This is a synthetic, obviously-benign sample email used by Phishbowl's
+      test suite. Every indicator uses reserved example-only values.
+    </p>
+    <p>&mdash; The Example.com community team</p>
+  </body>
+</html>
+--benign-boundary-0001--
