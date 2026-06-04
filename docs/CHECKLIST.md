@@ -59,12 +59,12 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Objective:** Extract every indicator, unwrap protective wrappers offline, defang by default.
 
 **Tasks:**
-- [ ] Extract addresses, URLs, domains, IPv4/IPv6, hashes (via `iocextract` + custom passes).
-- [ ] Wrapper unwrapping (string transform only, **never fetch**): Microsoft Safelinks; Proofpoint URL Defense v1/v2/v3. Retain both wrapped + unwrapped.
-- [ ] Detect-and-mark non-reversible wrappers (Mimecast/Barracuda/Cisco) as "wrapped, unresolved."
-- [ ] Defanger: URLs, IPs, emails (`hxxps`, `[.]`, `[at]`) for all human-facing output.
-- [ ] Dedup/normalize indicators; preserve provenance (source header/part).
-- [ ] Tests: known wrapped samples unwrap correctly; defang round-trips; provenance retained.
+- [x] Extract addresses, URLs, domains, IPv4/IPv6, hashes (via `iocextract` + custom passes).
+- [x] Wrapper unwrapping (string transform only, **never fetch**): Microsoft Safelinks; Proofpoint URL Defense v1/v2/v3. Retain both wrapped + unwrapped.
+- [x] Detect-and-mark non-reversible wrappers (Mimecast/Barracuda/Cisco) as "wrapped, unresolved."
+- [x] Defanger: URLs, IPs, emails (`hxxps`, `[.]`, `[at]`) for all human-facing output.
+- [x] Dedup/normalize indicators; preserve provenance (source header/part).
+- [x] Tests: known wrapped samples unwrap correctly; defang round-trips; provenance retained; extraction does zero network I/O.
 
 **DoD:** Synthetic email with Safelinks + Proofpoint links yields correct unwrapped indicators, all defanged in output, each tagged with provenance.
 
