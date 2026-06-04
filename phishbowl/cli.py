@@ -11,6 +11,8 @@ URLs, or auto-remediates (CLAUDE.md invariants).
 
 from __future__ import annotations
 
+import re
+
 import typer
 
 from phishbowl.models import ParsedEmail
@@ -20,6 +22,19 @@ app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
+
+# C0/C1 control characters (incl. ESC, CR/LF, DEL). Email-derived text is
+# hostile input (PRD §13): a Subject carrying terminal escape/OSC sequences
+# could rewrite the analyst's terminal or forge hyperlinks, so we strip these
+# before echoing any email-controlled field.
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def _safe(text: str | None) -> str:
+    """Strip terminal control characters from an email-derived string."""
+    if not text:
+        return "(none)"
+    return _CONTROL_CHARS.sub("", text)
 
 
 @app.callback()
@@ -41,8 +56,8 @@ def _summarize(parsed: ParsedEmail) -> str:
     from_ = parsed.addresses.from_
     lines = [
         f"phishbowl: parsed {src.filename} (format={src.format.value})",
-        f"  subject:     {parsed.subject or '(none)'}",
-        f"  from:        {from_.addr_spec if from_ else '(none)'}",
+        f"  subject:     {_safe(parsed.subject)}",
+        f"  from:        {_safe(from_.addr_spec if from_ else None)}",
         f"  spf/dkim/dmarc: "
         f"{parsed.auth.spf.result}/{parsed.auth.dkim.result}/{parsed.auth.dmarc.result}",
         f"  headers:     {len(parsed.headers)}",

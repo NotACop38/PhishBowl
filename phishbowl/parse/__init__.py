@@ -41,6 +41,10 @@ def parse(path: str | Path) -> ParsedEmail:
         return parse_file(p)
 
     if suffix in _MSG_SUFFIXES:
+        # Validate the input exists/reads before returning the placeholder, so a
+        # missing path errors like the .eml path rather than reporting success.
+        if not p.is_file():
+            raise FileNotFoundError(f"no such file: {p}")
         # .msg normalization (extract-msg) is a later Phase 1 task; until then,
         # degrade gracefully instead of pretending to parse it.
         parsed = ParsedEmail(

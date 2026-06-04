@@ -23,12 +23,18 @@ from phishbowl.models import (
     ParsedEmail,
 )
 from phishbowl.parse import parse, parse_eml
+from phishbowl.parse.attachments import _flags
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _parse(name: str) -> ParsedEmail:
     return parse(FIXTURES / name)
+
+
+def _flags_for(filename: str, declared: str = "application/octet-stream") -> list[AttachmentFlag]:
+    """Structural flags for a filename with empty content (extension-driven)."""
+    return _flags(filename, declared, None, b"")
 
 
 # --- Clean path ------------------------------------------------------------
@@ -153,6 +159,53 @@ def test_attachments_are_never_executed_or_extracted() -> None:
     parsed = _parse("with_attachment.eml")
     assert len(parsed.attachments) == 2
     assert all(a.sha256 for a in parsed.attachments)
+
+
+def test_legacy_office_extensions_flagged_macro_capable() -> None:
+    # Legacy OLE Office formats (.doc/.xls/.ppt) can carry VBA macros and have
+    # no macro-free variant, so they must flag MACRO_CAPABLE...
+    for filename in ("budget.xls", "memo.doc", "deck.ppt"):
+        att = _flags_for(filename)
+        assert AttachmentFlag.MACRO_CAPABLE in att
+
+    # ...while a modern .docx (which cannot contain macros) must not, and is not
+    # mistaken for an archive despite being a zip container.
+    docx = _flags_for("modern.docx")
+    assert AttachmentFlag.MACRO_CAPABLE not in docx
+    assert AttachmentFlag.ARCHIVE not in docx
+
+
+def test_attached_eml_captured_as_one_attachment() -> None:
+    parsed = _parse("forwarded_eml.eml")
+
+    # The message/rfc822 part is captured whole (filename + hashes), not
+    # descended into.
+    attached = [a for a in parsed.attachments if a.declared_type == "message/rfc822"]
+    assert len(attached) == 1
+    assert attached[0].filename == "reported.eml"
+    assert attached[0].sha256 and attached[0].size > 0
+
+    # The inner email's body must NOT leak into the outer message body.
+    assert parsed.body.text is not None
+    assert "forwarded the attached message" in parsed.body.text
+    assert "won a prize" not in parsed.body.text
+    assert "claim your synthetic prize" not in parsed.body.text
+
+
+def test_inline_text_part_stays_in_body_not_attachment() -> None:
+    # Content-Disposition: inline on a text part is a body part, not attachment.
+    raw = (
+        b"From: a@example.com\r\n"
+        b"Subject: hi\r\n"
+        b'Content-Type: text/plain; charset="utf-8"\r\n'
+        b"Content-Disposition: inline\r\n"
+        b"\r\n"
+        b"inline body text here\r\n"
+    )
+    parsed = parse_eml(raw, filename="inline.eml")
+    assert parsed.body.text is not None
+    assert "inline body text here" in parsed.body.text
+    assert parsed.attachments == []
 
 
 # --- Malformed path --------------------------------------------------------

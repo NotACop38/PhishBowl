@@ -93,8 +93,8 @@ _DANGEROUS_EXTS = {
     "vhdx",
 }
 
-# Macro-enabled Office Open XML extensions.
-_MACRO_EXTS = {
+# Macro-enabled Office Open XML (zip-based) extensions.
+_OOXML_MACRO_EXTS = {
     "docm",
     "dotm",
     "xlsm",
@@ -106,8 +106,26 @@ _MACRO_EXTS = {
     "sldm",
 }
 
+# Legacy OLE (CFB) Office extensions — these can all carry VBA macros too, and
+# unlike the modern non-``m`` Open XML formats there is no macro-free variant.
+_LEGACY_MACRO_EXTS = {
+    "doc",
+    "dot",
+    "xls",
+    "xlt",
+    "xla",
+    "ppt",
+    "pot",
+    "pps",
+    "ppa",
+}
+
+# Any macro-capable Office extension (PRD §8 — MACRO_CAPABLE flag).
+_MACRO_EXTS = _OOXML_MACRO_EXTS | _LEGACY_MACRO_EXTS
+
 # Office Open XML (zip-based) extensions — zip magic on these is expected and
-# must NOT be flagged ARCHIVE or as a type mismatch.
+# must NOT be flagged ARCHIVE or as a type mismatch. Legacy OLE formats are
+# excluded: they are CFB containers, not zips.
 _OOXML_EXTS = {
     "docx",
     "dotx",
@@ -116,7 +134,7 @@ _OOXML_EXTS = {
     "pptx",
     "potx",
     "ppsx",
-} | _MACRO_EXTS
+} | _OOXML_MACRO_EXTS
 
 # Map declared content-types and detected types to a coarse "family" for the
 # mismatch check. ``None`` means "ambiguous — don't judge".
@@ -153,24 +171,51 @@ _DETECTED_FAMILY = {
 def is_attachment(part: Message) -> bool:
     """True if ``part`` is an attachment rather than a body part.
 
-    A part counts as an attachment when it is explicitly dispositioned as one,
-    carries a filename, or is a non-text leaf (e.g. an inline image). Multipart
-    containers and plain text/html body parts are not attachments.
+    A part counts as an attachment when it is an attached message
+    (``message/rfc822``), explicitly dispositioned as one, carries a filename,
+    or is a non-text leaf (e.g. an inline image). Multipart containers and
+    text body parts — including ``Content-Disposition: inline`` text — are not.
     """
+    maintype = part.get_content_maintype()
+    # An attached email is an attachment to capture, not a container to descend
+    # into (the stdlib reports message/rfc822 as multipart). Handled first so
+    # the is_multipart() guard below doesn't swallow it.
+    if maintype == "message":
+        return True
     if part.is_multipart():
         return False
     # A part that declares multipart but failed to split (malformed boundary)
     # is a parse artifact, not a real attachment.
-    if part.get_content_maintype() == "multipart":
+    if maintype == "multipart":
         return False
     disposition = part.get_content_disposition()
     if disposition == "attachment":
         return True
     if part.get_filename() is not None:
         return True
-    if disposition == "inline":
-        return True
-    return part.get_content_maintype() != "text"
+    # Inline (or undeclared) text parts are body; any non-text leaf — e.g. an
+    # inline image — is an attachment.
+    return maintype != "text"
+
+
+def iter_parts(part: Message):
+    """Walk a message, treating ``message/*`` parts as opaque attachment leaves.
+
+    Unlike :meth:`email.message.Message.walk`, this does not descend into an
+    attached ``message/rfc822``: the enclosed email is yielded whole (so it is
+    hashed as one attachment) and its inner parts never leak into the outer
+    body or attachment set.
+    """
+    if part.get_content_maintype() == "message":
+        yield part
+        return
+    if part.is_multipart():
+        payload = part.get_payload()
+        if isinstance(payload, list):
+            for sub in payload:
+                yield from iter_parts(sub)
+            return
+    yield part
 
 
 def detect_type(data: bytes) -> str | None:
@@ -248,6 +293,29 @@ def _flags(
     return flags
 
 
+def _attachment_bytes(part: Message) -> bytes:
+    """Transfer-decoded bytes of an attachment part (for hashing/sniffing).
+
+    For an attached ``message/rfc822``, ``get_payload(decode=True)`` returns
+    ``None`` (it's a container), so we serialize the enclosed message instead —
+    still just reading bytes, never executing or extracting anything.
+    """
+    try:
+        data = part.get_payload(decode=True)
+    except Exception:
+        data = None
+    if data is not None:
+        return data
+    if part.get_content_maintype() == "message":
+        try:
+            payload = part.get_payload()
+            if isinstance(payload, list) and payload:
+                return payload[0].as_bytes()
+        except Exception:
+            return b""
+    return b""
+
+
 def build_attachment(part: Message) -> Attachment:
     """Hash and inspect one attachment part into an :class:`Attachment`.
 
@@ -256,13 +324,7 @@ def build_attachment(part: Message) -> Attachment:
     filename = decode_mime_words(part.get_filename())
     declared_type = part.get_content_type()
 
-    try:
-        data = part.get_payload(decode=True)
-    except Exception:
-        data = None
-    if data is None:
-        data = b""
-
+    data = _attachment_bytes(part)
     detected_type = detect_type(data) if data else None
 
     return Attachment(

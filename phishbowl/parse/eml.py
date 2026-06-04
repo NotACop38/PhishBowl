@@ -42,7 +42,7 @@ from phishbowl.models import (
 )
 
 from .addresses import parse_address_list, parse_single_address
-from .attachments import build_attachment, is_attachment
+from .attachments import build_attachment, is_attachment, iter_parts
 from .auth import parse_auth
 from .charset import decode_mime_words, decode_payload
 from .routing import parse_routing
@@ -151,7 +151,7 @@ def _build_body(msg: Message) -> Body:
     text: str | None = None
     html: str | None = None
     has_html = False
-    for part in msg.walk():
+    for part in iter_parts(msg):
         if part.is_multipart() or is_attachment(part):
             continue
         ctype = part.get_content_type()
@@ -165,7 +165,7 @@ def _build_body(msg: Message) -> Body:
 
 
 def _build_attachments(msg: Message) -> list[Attachment]:
-    return [build_attachment(part) for part in msg.walk() if is_attachment(part)]
+    return [build_attachment(part) for part in iter_parts(msg) if is_attachment(part)]
 
 
 def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:

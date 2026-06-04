@@ -42,3 +42,25 @@ def test_analyze_command_missing_file() -> None:
     result = runner.invoke(app, ["analyze", "/does/not/exist.eml"])
 
     assert result.exit_code != 0
+
+
+def test_analyze_command_missing_msg_file() -> None:
+    # A missing .msg must error like the .eml path, not report a phantom parse.
+    result = runner.invoke(app, ["analyze", "/does/not/exist.msg"])
+
+    assert result.exit_code != 0
+
+
+def test_analyze_strips_control_chars_from_email_fields(tmp_path: Path) -> None:
+    # A Subject carrying terminal escape/OSC sequences must not reach the
+    # terminal raw (PRD §13: email text is hostile input).
+    evil = tmp_path / "evil.eml"
+    evil.write_bytes(b"From: a@example.com\r\nSubject: clear\x1b[2Jscreen\x07bell\r\n\r\nbody\r\n")
+
+    result = runner.invoke(app, ["analyze", str(evil)])
+
+    assert result.exit_code == 0
+    assert "\x1b" not in result.stdout
+    assert "\x07" not in result.stdout
+    # The visible text survives with the control bytes removed.
+    assert "clear[2Jscreenbell" in result.stdout
