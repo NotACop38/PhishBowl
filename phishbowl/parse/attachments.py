@@ -29,6 +29,7 @@ from email.message import Message
 from phishbowl.models import Attachment, AttachmentFlag
 
 from .charset import decode_mime_words
+from .limits import MAX_PARTS
 
 # --- Magic-byte signatures -------------------------------------------------
 # (prefix, detected content-type). Order matters: more specific first. We only
@@ -217,24 +218,66 @@ def is_attachment(part: Message) -> bool:
     return maintype != "text"
 
 
-def iter_parts(part: Message):
+def iter_parts(part: Message, *, max_parts: int | None = None):
     """Walk a message, treating ``message/*`` parts as opaque attachment leaves.
 
     Unlike :meth:`email.message.Message.walk`, this does not descend into an
     attached ``message/rfc822``: the enclosed email is yielded whole (so it is
     hashed as one attachment) and its inner parts never leak into the outer
-    body or attachment set.
+    body or attachment set. Parts are yielded in document order (depth-first,
+    pre-order).
+
+    Defensive cap: the walk is **iterative** (no recursion) and counts *every*
+    node it visits — multipart containers included — toward ``max_parts``, then
+    stops. That bounds both a high-fan-out tree and a deeply *nested* one (a
+    "MIME bomb"), neither of which can drive unbounded work or blow the recursion
+    limit (see :mod:`phishbowl.parse.limits`). ``max_parts`` defaults to
+    :data:`MAX_PARTS`, read dynamically so tests can lower it.
     """
-    if part.get_content_maintype() == "message":
-        yield part
-        return
-    if part.is_multipart():
-        payload = part.get_payload()
-        if isinstance(payload, list):
-            for sub in payload:
-                yield from iter_parts(sub)
+    limit = MAX_PARTS if max_parts is None else max_parts
+    visited = 0
+    stack: list[Message] = [part]
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > limit:
             return
-    yield part
+        if node.get_content_maintype() == "message":
+            # Opaque attachment leaf — yield whole, never descend into it.
+            yield node
+            continue
+        if node.is_multipart():
+            payload = node.get_payload()
+            if isinstance(payload, list):
+                # Push children reversed so popping restores document order.
+                stack.extend(reversed(payload))
+                continue
+        yield node
+
+
+def parts_exceed_budget(part: Message, *, max_parts: int | None = None) -> bool:
+    """True if the MIME tree visits more than ``max_parts`` nodes.
+
+    Mirrors :func:`iter_parts`' node accounting exactly, so it answers "did (or
+    would) the walk truncate?" — letting the parser record a structural anomaly
+    when parts are dropped rather than silently losing them. Bounded and
+    iterative: it stops counting one past the cap.
+    """
+    limit = MAX_PARTS if max_parts is None else max_parts
+    visited = 0
+    stack: list[Message] = [part]
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > limit:
+            return True
+        if node.get_content_maintype() == "message":
+            continue
+        if node.is_multipart():
+            payload = node.get_payload()
+            if isinstance(payload, list):
+                stack.extend(payload)
+    return False
 
 
 def detect_type(data: bytes) -> str | None:
@@ -365,9 +408,13 @@ def build_attachment_from_bytes(
         declared_type=declared_type,
         detected_type=detected_type,
         size=len(data),
-        md5=hashlib.md5(data).hexdigest(),
-        sha1=hashlib.sha1(data).hexdigest(),
-        sha256=hashlib.sha256(data).hexdigest(),
+        # MD5/SHA1/SHA256 here are file-identity *IOC fingerprints* for
+        # threat-intel lookup and reporting — never a security/auth control — so
+        # the weak-hash concern doesn't apply. usedforsecurity=False states that
+        # intent explicitly (and resolves bandit B324).
+        md5=hashlib.md5(data, usedforsecurity=False).hexdigest(),
+        sha1=hashlib.sha1(data, usedforsecurity=False).hexdigest(),
+        sha256=hashlib.sha256(data, usedforsecurity=False).hexdigest(),
         flags=_flags(filename, declared_type, detected_type, data),
     )
 

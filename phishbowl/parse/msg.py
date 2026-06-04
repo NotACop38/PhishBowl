@@ -59,6 +59,7 @@ from .attachments import build_attachment_from_bytes
 from .auth import parse_auth
 from .charset import _decode_bytes
 from .eml import _build_addresses, _build_headers, _date, _guard, _subject
+from .limits import MAX_INPUT_BYTES, read_within_limit
 from .routing import parse_routing
 
 # The PR_TRANSPORT_MESSAGE_HEADERS stream — the original RFC 822 header block as
@@ -87,6 +88,18 @@ def parse_msg(data: bytes, filename: str | None = None) -> ParsedEmail:
         source=Source(filename=filename, format=EmailFormat.MSG, parser_version=__version__),
     )
 
+    # Defensive input cap: refuse to deep-parse an oversized blob (the bytes path
+    # has no file to stat, so we check the length here). Degrades to a noted
+    # partial result rather than raising, matching the .eml path's contract.
+    if len(data) > MAX_INPUT_BYTES:
+        parsed.anomalies.append(
+            Anomaly(
+                code="input_too_large",
+                message=f"input is {len(data)} bytes, exceeding the {MAX_INPUT_BYTES}-byte limit",
+            )
+        )
+        return parsed
+
     # Imported lazily so importing the parse layer never hard-requires the
     # optional ``.msg`` dependency just to handle ``.eml`` files.
     try:
@@ -108,15 +121,15 @@ def parse_msg(data: bytes, filename: str | None = None) -> ParsedEmail:
     finally:
         try:
             msg.close()
-        except Exception:  # pragma: no cover - close is best-effort
-            pass
+        except Exception:  # pragma: no cover - close is best-effort  # nosec B110
+            pass  # releasing the parser handle must never mask the real result
     return parsed
 
 
 def parse_file(path: str | Path) -> ParsedEmail:
-    """Read ``path`` and parse it as ``.msg``."""
+    """Read ``path`` and parse it as ``.msg`` (refusing oversized input)."""
     p = Path(path)
-    return parse_msg(p.read_bytes(), filename=p.name)
+    return parse_msg(read_within_limit(p), filename=p.name)
 
 
 def _populate(parsed: ParsedEmail, msg) -> None:

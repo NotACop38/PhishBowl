@@ -42,9 +42,10 @@ from phishbowl.models import (
 )
 
 from .addresses import parse_address_list, parse_single_address
-from .attachments import build_attachment, is_attachment, iter_parts
+from .attachments import build_attachment, is_attachment, iter_parts, parts_exceed_budget
 from .auth import parse_auth
 from .charset import decode_mime_words, decode_payload
+from .limits import MAX_INPUT_BYTES, MAX_PARTS, read_within_limit
 from .routing import parse_routing
 
 T = TypeVar("T")
@@ -67,6 +68,18 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
     parsed = ParsedEmail(
         source=Source(filename=filename, format=EmailFormat.EML, parser_version=__version__),
     )
+
+    # Defensive input cap: refuse to deep-parse an oversized blob (the bytes path
+    # has no file to stat, so we check the length here). Degrades to a noted
+    # partial result rather than raising, matching the bytes-path contract.
+    if len(data) > MAX_INPUT_BYTES:
+        parsed.anomalies.append(
+            Anomaly(
+                code="input_too_large",
+                message=f"input is {len(data)} bytes, exceeding the {MAX_INPUT_BYTES}-byte limit",
+            )
+        )
+        return parsed
 
     try:
         msg = email.message_from_bytes(data)
@@ -91,9 +104,9 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
 
 
 def parse_file(path: str | Path) -> ParsedEmail:
-    """Read ``path`` and parse it as ``.eml``."""
+    """Read ``path`` and parse it as ``.eml`` (refusing oversized input)."""
     p = Path(path)
-    return parse_eml(p.read_bytes(), filename=p.name)
+    return parse_eml(read_within_limit(p), filename=p.name)
 
 
 def _guard(parsed: ParsedEmail, code: str, fn: Callable[[], T], default: T) -> T:
@@ -194,6 +207,20 @@ def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:
             parsed.anomalies.append(
                 Anomaly(code="mime_defect", message=f"{type(defect).__name__}: {defect}")
             )
+    # If the part walk hit the structural cap, body/attachment extraction dropped
+    # everything past it — note that explicitly so a malicious message can't pad
+    # thousands of harmless leaves ahead of a real attachment and have it vanish
+    # from the report with no trace (PRD §11 — degrade to a *noted* partial).
+    if parts_exceed_budget(msg):
+        parsed.anomalies.append(
+            Anomaly(
+                code="mime_truncated",
+                message=(
+                    f"message exceeds the {MAX_PARTS}-part structural cap; "
+                    "later MIME parts were not parsed"
+                ),
+            )
+        )
     if parsed.addresses.from_ is None:
         parsed.anomalies.append(
             Anomaly(code="missing_from", message="message has no parseable From address")

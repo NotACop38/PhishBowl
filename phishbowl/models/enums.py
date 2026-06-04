@@ -25,7 +25,7 @@ class AuthResultState(StrEnum):
     scorer treats differently from an explicit ``FAIL``.
     """
 
-    PASS = "pass"
+    PASS = "pass"  # nosec B105 - SPF/DKIM/DMARC result value, not a credential
     FAIL = "fail"
     SOFTFAIL = "softfail"
     NEUTRAL = "neutral"
@@ -57,4 +57,4 @@ class AttachmentFlag(StrEnum):
     EXECUTABLE = "executable"
     TYPE_MISMATCH = "type_mismatch"
     DOUBLE_EXTENSION = "double_extension"
-    PASSWORD_PROTECTED = "password_protected"
+    PASSWORD_PROTECTED = "password_protected"  # nosec B105 - attachment flag name, not a credential

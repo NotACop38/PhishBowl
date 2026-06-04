@@ -152,7 +152,7 @@ def _decode_pp_v3(url: str) -> str | None:
     for tok in _PP_V3_TOKEN.finditer(encoded_url):
         out.append(encoded_url[pos : tok.start()])
         token = tok.group(0)
-        if token == "*":
+        if token == "*":  # nosec B105 - Proofpoint v3 run-token, not a credential
             out.append(dec_bytes[marker : marker + 1])
             marker += 1
         else:  # "**x" run token: x gives the run length
