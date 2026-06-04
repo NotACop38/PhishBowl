@@ -334,13 +334,17 @@ def display_name_brand_mismatch(ctx: ScoringContext) -> list[str]:
         return []
     dn = frm.display_name
     dom = frm.domain.casefold()
+    # Check EVERY brand the display name claims, not just the first match: a
+    # legitimately-owned brand must not mask a second, unowned brand in the same
+    # display name ("PayPal Apple Support" from paypal.com still impersonates Apple).
+    hits: list[str] = []
     for brand, legit in ctx.config.brands.items():
         if not _word_in(brand, dn):
             continue
         if _domain_in_brand(dom, legit):
-            return []  # display name matches a brand the From domain legitimately owns
-        return [f'display name claims "{brand}" but From domain is {defang_domain(frm.domain)}']
-    return []
+            continue  # the From domain legitimately owns this claimed brand
+        hits.append(f'display name claims "{brand}" but From domain is {defang_domain(frm.domain)}')
+    return hits
 
 
 def freemail_brand(ctx: ScoringContext) -> list[str]:
@@ -414,15 +418,13 @@ def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
     hits: list[str] = []
     for href, text in ctx.anchors:
         href_host = url_host(href)
+        # An unparseable or raw-IP href is already owned by url.raw_ip_host; only
+        # compare named hosts here so one link can't fire both rules (no double-count).
         if not href_host or is_ip_literal(href_host):
-            # A raw-IP href is covered by url.raw_ip_host; only compare named hosts.
-            text_host = _first_host_in_text(text)
-            if not text_host or not href_host:
-                continue
-        else:
-            text_host = _first_host_in_text(text)
-            if not text_host:
-                continue
+            continue
+        text_host = _first_host_in_text(text)
+        if not text_host:
+            continue
         if registrable_domain(text_host) != registrable_domain(href_host):
             hits.append(
                 f"link text shows {defang_domain(text_host)} but href points to "
@@ -452,7 +454,13 @@ def shortener(ctx: ScoringContext) -> list[str]:
 def credential_keywords(ctx: ScoringContext) -> list[str]:
     hits: list[str] = []
     for ioc in ctx.url_iocs:
-        parts = urlsplit(ioc.value)
+        try:
+            parts = urlsplit(ioc.value)
+        except ValueError:
+            # A malformed URL (e.g. an invalid bracketed host) must degrade
+            # gracefully, never crash the run (PRD §11). Other detectors route
+            # through the guarded url_host(); this one parses path/query directly.
+            continue
         haystack = f"{parts.path}?{parts.query}".casefold()
         found = sorted({kw for kw in ctx.config.credential_keywords if kw in haystack})
         if found:

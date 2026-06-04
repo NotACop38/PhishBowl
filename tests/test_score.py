@@ -22,12 +22,14 @@ import pytest
 
 from phishbowl.extract import extract_iocs
 from phishbowl.models import (
+    IOC,
     Address,
     Addresses,
     Attachment,
     AttachmentFlag,
     EmailFormat,
     IOCs,
+    IOCType,
     ParsedEmail,
     Source,
 )
@@ -231,6 +233,24 @@ def test_display_name_brand_mismatch_fires_and_respects_legit_domain() -> None:
     assert "identity.display_name_brand_mismatch" not in _fired(legit)
 
 
+def test_display_name_brand_mismatch_catches_brand_stuffing() -> None:
+    # A sender that legitimately owns ONE claimed brand must not be able to mask a
+    # second, unowned brand stuffed into the same display name.
+    stuffed = _score_raw(
+        'From: "PayPal Apple Support" <service@paypal.com>\r\nSubject: hi\r\n\r\nbody\r\n'
+    )
+    fired = [f for f in stuffed.fired if f.id == "identity.display_name_brand_mismatch"]
+    assert fired, "brand stuffing slipped past the detector"
+    # It fires for the unowned brand (apple), not the legitimately-owned one
+    # (paypal, which only appears as the From domain, never as a claimed brand).
+    evidence = " ".join(fired[0].evidence).lower()
+    assert 'claims "apple"' in evidence
+    assert 'claims "paypal"' not in evidence
+    # A sender claiming only the brand it owns stays silent.
+    legit = _score_raw('From: "PayPal" <service@paypal.com>\r\nSubject: hi\r\n\r\nbody\r\n')
+    assert "identity.display_name_brand_mismatch" not in _fired(legit)
+
+
 def test_freemail_brand_fires() -> None:
     raw = 'From: "PayPal Support" <paypalhelp@gmail.com>\r\nSubject: hi\r\n\r\nbody\r\n'
     assert "identity.freemail_brand" in _fired(_score_raw(raw))
@@ -279,6 +299,15 @@ def test_anchor_href_mismatch_fires() -> None:
     assert "url.anchor_href_mismatch" not in _fired(_score_fixture("benign_newsletter.eml"))
 
 
+def test_anchor_mismatch_does_not_double_count_raw_ip_href() -> None:
+    # A disguised link to a raw IP (text shows a domain) is owned by
+    # url.raw_ip_host; the anchor-mismatch rule must NOT also fire on it.
+    res = _score_raw(_html_eml('<a href="http://198.51.100.23/login">www.paypal.com</a>'))
+    fired = _fired(res)
+    assert "url.raw_ip_host" in fired
+    assert "url.anchor_href_mismatch" not in fired
+
+
 def test_raw_ip_host_fires() -> None:
     res = _score_raw(_html_eml('<a href="http://198.51.100.23/payload">x</a>'))
     assert "url.raw_ip_host" in _fired(res)
@@ -295,6 +324,21 @@ def test_credential_keywords_fire() -> None:
     res = _score_raw(_html_eml('<a href="https://portal.example/secure/login">x</a>'))
     assert "url.credential_keywords" in _fired(res)
     assert "url.credential_keywords" not in _fired(_score_fixture("benign_newsletter.eml"))
+
+
+def test_credential_keywords_skips_malformed_url_without_crashing() -> None:
+    # A malformed URL IOC (invalid bracketed host) must not crash scoring — the
+    # detector degrades gracefully and just skips it (PRD §11). We feed the IOC
+    # directly since such a URL would otherwise be rejected upstream.
+    bad = IOC(
+        type=IOCType.URL,
+        value="http://[bad]/secure/login",
+        defanged="hxxp://[bad]/secure/login",
+    )
+    parsed = _model_email(from_addr=Address(addr_spec="a@example.com", domain="example.com"))
+    res = score_email(parsed, IOCs(items=[bad]))  # must not raise
+    assert isinstance(res.score, int)
+    assert "url.credential_keywords" not in _fired(res)
 
 
 def test_wrapped_divergence_fires() -> None:
