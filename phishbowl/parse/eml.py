@@ -108,21 +108,40 @@ def _guard(parsed: ParsedEmail, code: str, fn: Callable[[], T], default: T) -> T
 def _build_headers(msg: Message) -> Headers:
     items: list[Header] = []
     for name, value in msg.items():
-        decoded = decode_mime_words(_unfold(str(value)))
-        items.append(Header(name=name, value=decoded if decoded is not None else ""))
+        # Decode first (handles RFC 2047 and raw 8-bit / SMTPUTF8 headers), then
+        # unfold. Stringifying ``value`` before decoding would mangle 8-bit bytes.
+        decoded = _unfold(decode_mime_words(value) or "")
+        items.append(Header(name=name, value=decoded))
     return Headers(items=items)
 
 
+def _header_text(value: object) -> str:
+    """Raw header value as a string suitable for address splitting.
+
+    A plain ``str`` (ASCII / RFC 2047) is returned unchanged so encoded-words —
+    which may hide a comma inside a display name — stay intact for
+    ``getaddresses``. An ``email.header.Header`` (raw 8-bit / SMTPUTF8) is
+    decoded to proper text instead of being mangled by ``str()``.
+    """
+    if isinstance(value, str):
+        return value
+    return decode_mime_words(value) or ""
+
+
 def _build_addresses(msg: Message) -> Addresses:
-    # Parse from the raw header values (not the RFC 2047-decoded stored copy) so
-    # a decoded display name containing a comma can't confuse address splitting.
+    # Parse from the raw header values (not the fully RFC 2047-decoded stored
+    # copy) so an encoded display name containing a comma can't confuse address
+    # splitting; _header_text still recovers raw 8-bit (SMTPUTF8) headers.
+    def values(name: str) -> list[str]:
+        return [_header_text(v) for v in msg.get_all(name, [])]
+
     return Addresses(
-        from_=parse_single_address(msg.get_all("From", [])),
-        reply_to=parse_single_address(msg.get_all("Reply-To", [])),
-        return_path=parse_single_address(msg.get_all("Return-Path", [])),
-        sender=parse_single_address(msg.get_all("Sender", [])),
-        to=parse_address_list(msg.get_all("To", [])),
-        cc=parse_address_list(msg.get_all("Cc", [])),
+        from_=parse_single_address(values("From")),
+        reply_to=parse_single_address(values("Reply-To")),
+        return_path=parse_single_address(values("Return-Path")),
+        sender=parse_single_address(values("Sender")),
+        to=parse_address_list(values("To")),
+        cc=parse_address_list(values("Cc")),
     )
 
 
@@ -130,7 +149,7 @@ def _subject(msg: Message) -> str | None:
     raw = msg.get("Subject")
     if raw is None:
         return None
-    return decode_mime_words(_unfold(str(raw)))
+    return _unfold(decode_mime_words(raw) or "")
 
 
 def _date(msg: Message) -> datetime | None:

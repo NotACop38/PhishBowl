@@ -19,20 +19,25 @@ replacement-character decode rather than crashing the run (PRD §11).
 
 from __future__ import annotations
 
-from email.header import decode_header
+from email.header import Header, decode_header
 from email.message import Message
 
 # Fallback when a part declares no charset or declares one Python can't load.
 _FALLBACK_CHARSET = "utf-8"
 
 
-def decode_mime_words(value: str | None) -> str | None:
+def decode_mime_words(value: str | Header | None) -> str | None:
     """Decode any RFC 2047 encoded-words in a header value into plain text.
 
     Handles mixed runs of encoded and literal text (``Re: =?utf-8?q?...?=``)
-    and per-word charsets. Never raises: a malformed encoded-word or an unknown
-    charset falls back to a lenient decode so a hostile header can't crash the
-    parser.
+    and per-word charsets. Accepts the raw header value as returned by the
+    stdlib ``email`` package — a ``str`` for ASCII / RFC 2047 headers, or an
+    ``email.header.Header`` when raw 8-bit bytes are present (SMTPUTF8 /
+    RFC 6532). Passing such a ``Header`` through ``str()`` first would mangle
+    those bytes, so callers should hand the raw value straight here.
+
+    Never raises: a malformed encoded-word or an unknown charset falls back to
+    a lenient decode so a hostile header can't crash the parser.
     """
     if value is None:
         return None
@@ -40,7 +45,7 @@ def decode_mime_words(value: str | None) -> str | None:
         fragments = decode_header(value)
     except Exception:
         # Malformed encoded-word syntax — keep the raw text rather than crash.
-        return value
+        return str(value)
 
     out: list[str] = []
     for text, charset in fragments:

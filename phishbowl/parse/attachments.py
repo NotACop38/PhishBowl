@@ -21,7 +21,9 @@ Flags set (mirrors :class:`AttachmentFlag`):
 from __future__ import annotations
 
 import hashlib
+import io
 import struct
+from email.generator import BytesGenerator
 from email.message import Message
 
 from phishbowl.models import Attachment, AttachmentFlag
@@ -150,6 +152,20 @@ _DECLARED_FAMILY = {
     "application/gzip": "archive",
     "application/x-rar-compressed": "archive",
     "application/x-7z-compressed": "archive",
+    # Legacy Office (OLE/CFB containers): a declaration of these whose bytes
+    # sniff as something else (PDF, PE, …) is a spoof.
+    "application/msword": "ole",
+    "application/vnd.ms-excel": "ole",
+    "application/vnd.ms-powerpoint": "ole",
+    "application/vnd.ms-office": "ole",
+    # Modern Office Open XML (zip containers) — declaring these is consistent
+    # with zip magic on disk, so that pairing must NOT count as a mismatch.
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "zip",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "zip",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": "zip",
+    "application/vnd.ms-word.document.macroenabled.12": "zip",
+    "application/vnd.ms-excel.sheet.macroenabled.12": "zip",
+    "application/vnd.ms-powerpoint.presentation.macroenabled.12": "zip",
 }
 _DETECTED_FAMILY = {
     "application/pdf": "pdf",
@@ -282,12 +298,15 @@ def _flags(
         flags.append(AttachmentFlag.DOUBLE_EXTENSION)
 
     # TYPE_MISMATCH — declared family known and contradicts the detected family.
+    # Keyed on the DECLARED content-type (not the filename extension): OOXML and
+    # legacy Office types map to the container they're expected to be on disk
+    # (zip / ole), so a real ``.docx`` (declared OOXML, zip bytes) is consistent,
+    # while ``invoice.docx`` declared ``application/pdf`` with zip bytes still
+    # fires because the *declaration* (pdf) disagrees with the bytes (zip).
     declared_family = _DECLARED_FAMILY.get((declared_type or "").casefold())
     detected_family = _DETECTED_FAMILY.get(detected_type or "")
     if declared_family and detected_family and declared_family != detected_family:
-        # Office docs declare specific types but are zip on disk — not a mismatch.
-        if not (is_ooxml and detected_family == "zip"):
-            flags.append(AttachmentFlag.TYPE_MISMATCH)
+        flags.append(AttachmentFlag.TYPE_MISMATCH)
 
     # PASSWORD_PROTECTED — encrypted zip (best-effort, header flag only).
     if _zip_is_encrypted(data):
@@ -302,6 +321,12 @@ def _attachment_bytes(part: Message) -> bytes:
     For an attached ``message/rfc822``, ``get_payload(decode=True)`` returns
     ``None`` (it's a container), so we serialize the enclosed message instead —
     still just reading bytes, never executing or extracting anything.
+
+    The enclosed message is flattened with no header re-wrapping, no ``From``
+    mangling, and CRLF line endings — the most wire-faithful form the stdlib
+    can reproduce. (Exact original bytes aren't recoverable once the email
+    package has parsed the sub-message, since it discards the original header
+    folding; this serialization is stable and content-complete.)
     """
     try:
         data = part.get_payload(decode=True)
@@ -313,7 +338,11 @@ def _attachment_bytes(part: Message) -> bytes:
         try:
             payload = part.get_payload()
             if isinstance(payload, list) and payload:
-                return payload[0].as_bytes()
+                buf = io.BytesIO()
+                BytesGenerator(buf, mangle_from_=False, maxheaderlen=0).flatten(
+                    payload[0], linesep="\r\n"
+                )
+                return buf.getvalue()
         except Exception:
             return b""
     return b""

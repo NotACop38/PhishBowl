@@ -175,6 +175,29 @@ def test_legacy_office_extensions_flagged_macro_capable() -> None:
     assert AttachmentFlag.ARCHIVE not in docx
 
 
+def test_office_declaration_contradicting_bytes_flags_mismatch() -> None:
+    # A concrete Office declaration whose bytes sniff as another family is a
+    # spoof and must flag TYPE_MISMATCH...
+    doc_pdf = _flags("invoice.doc", "application/msword", "application/pdf", b"%PDF-")
+    assert AttachmentFlag.TYPE_MISMATCH in doc_pdf
+
+    # ...while the matching container shapes do not: a real legacy .doc (OLE)
+    # and a real .docx (zip) are both consistent declarations.
+    real_doc = _flags("memo.doc", "application/msword", "application/x-ole-storage", b"")
+    assert AttachmentFlag.TYPE_MISMATCH not in real_doc
+    ooxml = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    real_docx = _flags("memo.docx", ooxml, "application/zip", b"PK\x03\x04")
+    assert AttachmentFlag.TYPE_MISMATCH not in real_docx
+
+
+def test_mismatch_keyed_on_declaration_not_extension() -> None:
+    # invoice.docx (an OOXML extension) but declared application/pdf with zip
+    # bytes: the declaration disagrees with the bytes, so it must still fire —
+    # the OOXML *extension* must not suppress a contradicting *declaration*.
+    flags = _flags("invoice.docx", "application/pdf", "application/zip", b"PK\x03\x04")
+    assert AttachmentFlag.TYPE_MISMATCH in flags
+
+
 def test_declared_pdf_with_ole_bytes_flags_type_mismatch() -> None:
     ole = b"\xd0\xcf\x11\xe0"
     # invoice.pdf whose bytes sniff as OLE/CFB (an Office/MSI container) is a
@@ -245,6 +268,31 @@ def test_random_bytes_never_crash() -> None:
     assert parsed.source.filename == "junk.eml"
     # No From in garbage input -> noted, not raised.
     assert any(a.code == "missing_from" for a in parsed.anomalies)
+
+
+def test_smtputf8_raw_utf8_headers_decoded() -> None:
+    # Valid messages may carry raw UTF-8 in headers (SMTPUTF8 / RFC 6532)
+    # instead of RFC 2047 encoded-words. These must decode, not corrupt into
+    # replacement characters, since they're analyst-visible fields.
+    raw = (
+        'From: "café user" <a@example.com>\r\n'
+        'To: Ünal Öztürk <u@example.com>, "Smith, John" <j@example.com>\r\n'
+        "Subject: café résumé — naïve\r\n"
+        "\r\n"
+        "body\r\n"
+    ).encode()
+    parsed = parse_eml(raw, filename="smtputf8.eml")
+
+    assert parsed.subject == "café résumé — naïve"
+    assert parsed.headers.get("Subject") == "café résumé — naïve"
+    assert parsed.addresses.from_ is not None
+    assert parsed.addresses.from_.display_name == "café user"
+    # Raw-UTF8 display decodes, and a comma inside a quoted display name doesn't
+    # split the address list.
+    assert [(a.display_name, a.addr_spec) for a in parsed.addresses.to] == [
+        ("Ünal Öztürk", "u@example.com"),
+        ("Smith, John", "j@example.com"),
+    ]
 
 
 def test_charset_handling_is_centralized_and_total() -> None:
