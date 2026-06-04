@@ -97,17 +97,17 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Objective:** The screenshot-worthy, self-contained HTML report plus CLI and JSON. This is the launch-able offline product.
 
 **Decision gates:**
-- [ ] Approve report layout/visual direction before building the template (use the `frontend-design` skill).
+- [x] Approve report layout/visual direction before building the template (built with the `frontend-design` skill — light/dark-adaptive "forensic dossier": editorial-serif headings, monospace data, severity-keyed accent, CSS-only atmosphere, zero remote assets).
 
 **Tasks:**
-- [ ] **HTML report** (Jinja2, autoescape on): self-contained single file, inline CSS, **zero network egress**, no remote images/fonts/scripts, defanged display, never inject raw HTML body. Sections: verdict banner, score breakdown w/ per-rule reasons, auth results, IOC tables, routing path, attachment table. Light/dark friendly.
-- [ ] **Rich CLI** summary: verdict banner, top reasons, IOC tables, auth results.
-- [ ] **JSON** output: complete structured result (defanged + clearly-labeled raw).
-- [ ] **PII redaction** mode (recipients, internal hosts/IPs, configured fields).
-- [ ] Security test: report built from a fixture containing hostile HTML/script in subject+body produces **no executable markup and no remote loads** when opened.
-- [ ] "Under 60s" path: `phishbowl analyze tests/fixtures/<sample>` → HTML report, zero keys.
+- [x] **HTML report** (Jinja2, autoescape on): self-contained single file, inline CSS, **zero network egress**, no remote images/fonts/scripts, defanged display, never inject raw HTML body. Sections: verdict banner, score breakdown w/ per-rule reasons, auth results, IOC tables, routing path, attachment table. Light/dark friendly.
+- [x] **Rich CLI** summary: verdict banner, top reasons, IOC tables, auth results.
+- [x] **JSON** output: complete structured result (defanged + clearly-labeled raw).
+- [x] **PII redaction** mode (recipients, internal hosts/IPs, configured fields).
+- [x] Security test: report built from a fixture containing hostile HTML/script in subject+body produces **no executable markup and no remote loads** when opened.
+- [x] "Under 60s" path: `phishbowl analyze tests/fixtures/<sample>` → HTML report, zero keys.
 
-**DoD:** One command on the bundled sample produces all three outputs; the HTML renders beautifully offline, beacons nothing, and passes the hostile-content security test; redaction mode verified.
+**DoD:** One command on the bundled sample produces all three outputs; the HTML renders beautifully offline, beacons nothing, and passes the hostile-content security test; redaction mode verified. ✅ **Met** — `phishbowl analyze` renders the rich CLI summary and writes HTML/JSON; the offline pipeline needs zero API keys and runs well under 60s; hostile-content and redaction tests are green (`tests/test_report.py`).
 
 > **Ship/announce candidate.** After Phase 4 the tool is independently valuable and demo-able. Consider a soft release here.
 

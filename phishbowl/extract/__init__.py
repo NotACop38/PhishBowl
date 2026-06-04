@@ -17,6 +17,7 @@ from .defang import (
     defang_email,
     defang_ipv4,
     defang_ipv6,
+    defang_text,
     defang_url,
     refang,
 )
@@ -38,6 +39,7 @@ __all__ = [
     "defang_ipv6",
     "defang_email",
     "defang_domain",
+    "defang_text",
     "refang",
     # Unwrap
     "unwrap_url",

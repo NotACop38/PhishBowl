@@ -1,0 +1,491 @@
+{#-
+  PhishBowl HTML report — single self-contained file (PRD §10).
+
+  HARD INVARIANTS (do not break):
+    * autoescape is ON (the loader forces it); NEVER use `| safe` on any
+      email-derived value. Only the static, author-controlled CSS below is
+      allowed to be markup.
+    * ZERO network egress: no <script>, no remote <img>/<link>/<font>, no url()
+      to anything remote. All styling is inline CSS using gradients only.
+    * The raw HTML body is NEVER injected — only the escaped, defanged plaintext
+      preview the view layer prepared (`r.body_preview`).
+    * Every indicator is shown via its defanged `*_display` field.
+-#}
+<!DOCTYPE html>
+<html lang="en" class="sev-{{ r.severity }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>PhishBowl — {{ r.source.filename or "report" }}</title>
+<style>
+  :root {
+    --bg: #0a0e14; --bg-2: #0d121b; --surface: #131b27; --surface-2: #0f1620;
+    --border: #243044; --border-soft: #1a2230;
+    --text: #e7eef6; --muted: #8a98ab; --faint: #5d6b80;
+    --font-display: "Iowan Old Style","Palatino Linotype",Palatino,"Hoefler Text",Georgia,"Times New Roman",serif;
+    --font-sans: ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,sans-serif;
+    --font-mono: ui-monospace,"Cascadia Code","JetBrains Mono","SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+    --ok: #4cae8a; --warn: #d8a52a; --bad: #e0584f; --neutral: #7d8aa0;
+    --shadow: 0 1px 0 rgba(255,255,255,.03), 0 18px 40px -24px rgba(0,0,0,.8);
+    --accent: #5ed3c9;
+  }
+  /* Severity accent — drives the verdict banner and score. */
+  .sev-benign  { --sev: #4cae8a; --sev-soft: rgba(76,174,138,.14); }
+  .sev-low     { --sev: #86b54a; --sev-soft: rgba(134,181,74,.14); }
+  .sev-elevated{ --sev: #d8a52a; --sev-soft: rgba(216,165,42,.15); }
+  .sev-high    { --sev: #e08a3c; --sev-soft: rgba(224,138,60,.16); }
+  .sev-critical{ --sev: #e0584f; --sev-soft: rgba(224,88,79,.17); }
+
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #efeadd; --bg-2: #e9e2d2; --surface: #fffdf8; --surface-2: #f6f1e6;
+      --border: #ded4bf; --border-soft: #e7dfcd;
+      --text: #20242c; --muted: #6a6354; --faint: #948b78;
+      --shadow: 0 1px 0 rgba(255,255,255,.6), 0 16px 34px -26px rgba(60,50,30,.5);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font-family: var(--font-sans); font-size: 15px; line-height: 1.55;
+    /* Layered gradients give atmosphere without a single network request. */
+    background-image:
+      radial-gradient(1200px 600px at 100% -10%, var(--sev-soft), transparent 60%),
+      radial-gradient(900px 500px at -10% 0%, rgba(94,211,201,.05), transparent 55%),
+      linear-gradient(180deg, var(--bg-2), var(--bg));
+    background-attachment: fixed;
+  }
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 0 24px 72px; }
+
+  /* ---------- Masthead ---------- */
+  header.mast {
+    display: flex; flex-wrap: wrap; align-items: flex-end; gap: 18px;
+    justify-content: space-between; padding: 40px 0 26px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .brand { display: flex; align-items: baseline; gap: 14px; }
+  .mark {
+    font-family: var(--font-mono); font-weight: 700; letter-spacing: .42em;
+    font-size: 13px; text-transform: uppercase; color: var(--text);
+    padding: 7px 12px; border: 1px solid var(--border);
+    border-radius: 7px; background: var(--surface);
+  }
+  .mark b { color: var(--sev); }
+  .tagline { font-family: var(--font-display); font-style: italic; color: var(--muted); font-size: 16px; }
+  .badges { display: flex; gap: 8px; flex-wrap: wrap; }
+  .badge {
+    font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--accent);
+    border: 1px solid var(--border); border-radius: 999px;
+    padding: 5px 11px; background: var(--surface-2);
+  }
+  .srcmeta { font-family: var(--font-mono); font-size: 12px; color: var(--faint); margin-top: 14px; }
+  .srcmeta b { color: var(--muted); font-weight: 600; }
+
+  /* ---------- Verdict banner ---------- */
+  .verdict {
+    position: relative; margin: 28px 0 8px; padding: 30px 32px;
+    border: 1px solid var(--border); border-radius: 16px;
+    background:
+      linear-gradient(135deg, var(--sev-soft), transparent 70%),
+      var(--surface);
+    box-shadow: var(--shadow);
+    display: grid; grid-template-columns: auto 1fr; gap: 32px; align-items: center;
+  }
+  .verdict::before {
+    content: ""; position: absolute; inset: 0 auto 0 0; width: 5px;
+    border-radius: 16px 0 0 16px; background: var(--sev);
+  }
+  .dial { text-align: center; min-width: 132px; }
+  .dial .num {
+    font-family: var(--font-display); font-weight: 700; line-height: .9;
+    font-size: 78px; color: var(--sev); letter-spacing: -.02em;
+  }
+  .dial .den { font-family: var(--font-mono); color: var(--faint); font-size: 13px; letter-spacing: .1em; }
+  .vbody .eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .28em;
+    text-transform: uppercase; color: var(--sev); margin-bottom: 6px;
+  }
+  .vbody h1 {
+    font-family: var(--font-display); font-weight: 700; margin: 0 0 16px;
+    font-size: 30px; line-height: 1.12; letter-spacing: -.01em;
+  }
+  .meter { height: 9px; border-radius: 999px; position: relative;
+    background: linear-gradient(90deg,#4cae8a 0%,#86b54a 22%,#d8a52a 46%,#e08a3c 70%,#e0584f 92%);
+    opacity: .9; }
+  .meter .pin {
+    position: absolute; top: 50%; width: 16px; height: 16px; border-radius: 50%;
+    background: var(--text); border: 3px solid var(--surface);
+    transform: translate(-50%,-50%); box-shadow: 0 0 0 1px var(--border);
+  }
+  .meter-scale { display: flex; justify-content: space-between; margin-top: 7px;
+    font-family: var(--font-mono); font-size: 10px; color: var(--faint); letter-spacing: .08em; }
+  .vsub { margin-top: 14px; color: var(--muted); font-size: 13px; }
+  .vsub code { font-family: var(--font-mono); color: var(--text); }
+
+  /* ---------- Notices ---------- */
+  .notice {
+    margin: 16px 0; padding: 13px 16px; border-radius: 11px;
+    border: 1px solid var(--border); background: var(--surface-2);
+    font-size: 13.5px; color: var(--muted);
+    display: flex; gap: 11px; align-items: baseline;
+  }
+  .notice .tag {
+    font-family: var(--font-mono); font-size: 10px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--warn);
+    border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; white-space: nowrap;
+  }
+
+  /* ---------- Cards ---------- */
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; margin-top: 22px; }
+  .card {
+    border: 1px solid var(--border); border-radius: 14px; background: var(--surface);
+    box-shadow: var(--shadow); overflow: hidden; min-width: 0;
+  }
+  .card.span { grid-column: 1 / -1; }
+  .card-h {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 15px 20px; border-bottom: 1px solid var(--border-soft);
+    background: linear-gradient(180deg, var(--surface-2), transparent);
+  }
+  .card-h h2 {
+    margin: 0; font-family: var(--font-mono); font-size: 11.5px; font-weight: 600;
+    letter-spacing: .2em; text-transform: uppercase; color: var(--muted);
+  }
+  .card-h .count { font-family: var(--font-mono); font-size: 12px; color: var(--faint); }
+  .card-b { padding: 16px 20px 20px; }
+  .card-b.flush { padding: 4px 0 6px; }
+
+  /* ---------- Tables ---------- */
+  table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+  th { text-align: left; font-family: var(--font-mono); font-weight: 600;
+    font-size: 10.5px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--faint); padding: 9px 20px; border-bottom: 1px solid var(--border-soft); }
+  td { padding: 11px 20px; border-bottom: 1px solid var(--border-soft); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  tbody tr:nth-child(even) { background: rgba(127,140,160,.045); }
+  .mono { font-family: var(--font-mono); font-size: 12.5px; word-break: break-all; }
+  .prov { font-family: var(--font-mono); font-size: 11px; color: var(--faint); }
+
+  /* ---------- Chips ---------- */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .04em;
+    padding: 3px 9px; border-radius: 999px; border: 1px solid var(--border);
+    background: var(--surface-2); color: var(--muted); white-space: nowrap;
+  }
+  .chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--neutral); }
+  .chip.ok { color: var(--ok); } .chip.ok::before { background: var(--ok); }
+  .chip.bad { color: var(--bad); border-color: rgba(224,88,79,.4); } .chip.bad::before { background: var(--bad); }
+  .chip.warn { color: var(--warn); } .chip.warn::before { background: var(--warn); }
+  .chip.flag { color: var(--bad); } .chip.flag::before { background: var(--bad); }
+  .wt {
+    font-family: var(--font-mono); font-weight: 700; color: var(--text);
+    background: var(--sev-soft); border: 1px solid var(--border);
+    padding: 2px 8px; border-radius: 6px; font-size: 12px; white-space: nowrap;
+  }
+  .tagsrc { font-family: var(--font-mono); font-size: 10px; color: var(--faint);
+    text-transform: uppercase; letter-spacing: .1em; }
+
+  /* ---------- Auth row ---------- */
+  .authrow { display: flex; gap: 12px; flex-wrap: wrap; }
+  .authcell { flex: 1 1 150px; border: 1px solid var(--border-soft); border-radius: 10px;
+    padding: 13px 15px; background: var(--surface-2); }
+  .authcell .m { font-family: var(--font-mono); font-size: 11px; letter-spacing: .18em;
+    text-transform: uppercase; color: var(--faint); }
+  .authcell .r { font-family: var(--font-display); font-size: 22px; margin-top: 4px; font-weight: 700; }
+  .authcell.ok .r { color: var(--ok); } .authcell.bad .r { color: var(--bad); }
+  .authcell.warn .r { color: var(--warn); } .authcell.neu .r { color: var(--muted); }
+  .authcell .d { font-size: 11.5px; color: var(--faint); margin-top: 6px; line-height: 1.4; word-break: break-word; }
+
+  /* ---------- Identity / definition list ---------- */
+  .dl { display: grid; grid-template-columns: 120px 1fr; gap: 0; }
+  .dl dt { font-family: var(--font-mono); font-size: 11px; letter-spacing: .1em;
+    text-transform: uppercase; color: var(--faint); padding: 9px 0; border-bottom: 1px solid var(--border-soft); }
+  .dl dd { margin: 0; padding: 9px 0; border-bottom: 1px solid var(--border-soft); min-width: 0; }
+  .dl dd:last-of-type, .dl dt:last-of-type { border-bottom: none; }
+  .name { color: var(--text); }
+  .addr { font-family: var(--font-mono); font-size: 12.5px; color: var(--muted); word-break: break-all; }
+  .mm { margin-left: 8px; }
+
+  /* ---------- Routing timeline ---------- */
+  .hop { position: relative; padding: 0 0 16px 26px; border-left: 2px solid var(--border); margin-left: 6px; }
+  .hop:last-child { border-left-color: transparent; padding-bottom: 0; }
+  .hop::before { content: ""; position: absolute; left: -7px; top: 3px; width: 12px; height: 12px;
+    border-radius: 50%; background: var(--surface); border: 2px solid var(--sev); }
+  .hop .idx { font-family: var(--font-mono); font-size: 10px; color: var(--faint); letter-spacing: .1em; }
+  .hop .ln { font-family: var(--font-mono); font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .hop .ln b { color: var(--text); font-weight: 600; }
+  .hop .raw { font-family: var(--font-mono); font-size: 11px; color: var(--faint);
+    margin-top: 5px; word-break: break-all; line-height: 1.45; }
+
+  /* ---------- Body preview ---------- */
+  .preview {
+    font-family: var(--font-mono); font-size: 12.5px; line-height: 1.6;
+    white-space: pre-wrap; word-break: break-word; color: var(--muted);
+    background: var(--surface-2); border: 1px solid var(--border-soft);
+    border-radius: 10px; padding: 16px 18px; max-height: 460px; overflow: auto;
+  }
+  .empty { color: var(--faint); font-style: italic; font-size: 13px; }
+
+  ul.bare { list-style: none; margin: 0; padding: 0; }
+  ul.bare li { padding: 8px 0; border-bottom: 1px solid var(--border-soft); font-size: 13.5px; color: var(--muted); }
+  ul.bare li:last-child { border-bottom: none; }
+
+  /* ---------- Footer ---------- */
+  footer.foot { margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--border-soft);
+    font-size: 12px; color: var(--faint); line-height: 1.7; }
+  footer.foot b { color: var(--muted); }
+  footer.foot .inv { font-family: var(--font-mono); font-size: 11px; }
+
+  @media (max-width: 760px) {
+    .grid { grid-template-columns: 1fr; }
+    .verdict { grid-template-columns: 1fr; gap: 20px; }
+    .dl { grid-template-columns: 92px 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="mast">
+    <div>
+      <div class="brand">
+        <span class="mark">Phish<b>Bowl</b></span>
+        <span class="tagline">defensive phishing triage dossier</span>
+      </div>
+      <div class="srcmeta">
+        <b>source:</b> {{ r.source.filename or "—" }} ·
+        <b>format:</b> {{ r.source.format }} ·
+        <b>parser:</b> v{{ r.source.parser_version }} ·
+        <b>analyzed:</b> {{ r.source.parsed_at }}
+      </div>
+    </div>
+    <div class="badges">
+      <span class="badge">offline-first</span>
+      <span class="badge">zero egress</span>
+      <span class="badge">defanged</span>
+    </div>
+  </header>
+
+  <section class="verdict">
+    <div class="dial">
+      <div class="num">{{ r.score }}</div>
+      <div class="den">/ {{ r.max_score }} RISK</div>
+    </div>
+    <div class="vbody">
+      <div class="eyebrow">Verdict</div>
+      <h1>{{ r.verdict }}</h1>
+      <div class="meter"><span class="pin" style="left: {{ r.score }}%"></span></div>
+      <div class="meter-scale"><span>0 · benign</span><span>50</span><span>100 · malicious</span></div>
+      <div class="vsub">
+        Offline score <code>{{ r.offline_score }}</code> from
+        <code>{{ r.fired_rules | length }}</code> triggered rule{{ "" if r.fired_rules|length == 1 else "s" }}
+        over <code>{{ r.ioc_total }}</code> extracted indicator{{ "" if r.ioc_total == 1 else "s" }}.
+        Every point traces to a named reason below.
+      </div>
+    </div>
+  </section>
+
+  {% if r.redaction.enabled %}
+  <div class="notice">
+    <span class="tag">PII redacted</span>
+    <span>Bystander PII is withheld from this report{% if r.redaction.categories %}
+      ({{ r.redaction.categories | join(", ") }}){% endif %}.
+      Attacker-controlled indicators are shown in full.</span>
+  </div>
+  {% endif %}
+
+  <div class="grid">
+
+    {# ---------- Score breakdown ---------- #}
+    <div class="card span">
+      <div class="card-h"><h2>Score breakdown</h2>
+        <span class="count">{{ r.fired_rules | length }} rule{{ "" if r.fired_rules|length == 1 else "s" }} fired</span></div>
+      <div class="card-b flush">
+        {% if r.fired_rules %}
+        <table>
+          <thead><tr><th>Reason</th><th>Evidence</th><th>Weight</th><th>Source</th></tr></thead>
+          <tbody>
+          {% for rule in r.fired_rules %}
+            <tr>
+              <td><span class="name">{{ rule.description }}</span>
+                  <div class="prov">{{ rule.id }}</div></td>
+              <td class="mono">{% for e in rule.evidence %}{{ e }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                  {%- if not rule.evidence %}<span class="empty">—</span>{% endif %}</td>
+              <td><span class="wt">+{{ "%g"|format(rule.weight) }}</span></td>
+              <td class="tagsrc">{{ rule.source }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="card-b"><p class="empty">No scoring rules fired — no strong indicators were detected.</p></div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ---------- Authentication ---------- #}
+    <div class="card">
+      <div class="card-h"><h2>Authentication</h2></div>
+      <div class="card-b">
+        <div class="authrow">
+          {% for a in r.auth %}
+            {% set cls = "ok" if a.result == "pass" else ("bad" if a.result == "fail" else ("warn" if a.result in ("softfail","temperror","permerror") else "neu")) %}
+            <div class="authcell {{ cls }}">
+              <div class="m">{{ a.mechanism }}</div>
+              <div class="r">{{ a.result }}</div>
+              {% if a.detail %}<div class="d">{{ a.detail }}</div>{% endif %}
+            </div>
+          {% endfor %}
+        </div>
+      </div>
+    </div>
+
+    {# ---------- Identity ---------- #}
+    <div class="card">
+      <div class="card-h"><h2>Identity</h2></div>
+      <div class="card-b">
+        <dl class="dl">
+          {% macro addr(label, a, mismatch=false, mmlabel="") %}
+            {% if a %}
+            <dt>{{ label }}</dt>
+            <dd>
+              {% if a.display_name %}<span class="name">{{ a.display_name }}</span><br>{% endif %}
+              <span class="addr">{{ a.addr_spec_display or "—" }}</span>
+              {% if mismatch %}<span class="chip bad mm">{{ mmlabel }}</span>{% endif %}
+            </dd>
+            {% endif %}
+          {% endmacro %}
+          {{ addr("From", r.from_) }}
+          {{ addr("Reply-To", r.reply_to, r.reply_to_mismatch, "≠ From") }}
+          {{ addr("Return-Path", r.return_path, r.return_path_mismatch, "≠ From") }}
+          {{ addr("Sender", r.sender, r.sender_mismatch, "≠ From") }}
+          {% if r.to %}
+          <dt>To</dt><dd>{% for a in r.to %}<span class="addr">{{ a.addr_spec_display }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>
+          {% endif %}
+          {% if r.cc %}
+          <dt>Cc</dt><dd>{% for a in r.cc %}<span class="addr">{{ a.addr_spec_display }}</span>{% if not loop.last %}<br>{% endif %}{% endfor %}</dd>
+          {% endif %}
+          {% if r.subject %}<dt>Subject</dt><dd class="name">{{ r.subject }}</dd>{% endif %}
+          {% if r.date %}<dt>Date</dt><dd class="addr">{{ r.date }}</dd>{% endif %}
+        </dl>
+      </div>
+    </div>
+
+    {# ---------- IOC tables ---------- #}
+    {% for g in r.ioc_groups %}
+    <div class="card span">
+      <div class="card-h"><h2>{{ g.label }}</h2><span class="count">{{ g.items | length }}</span></div>
+      <div class="card-b flush">
+        <table>
+          <thead><tr><th>Indicator (defanged)</th><th>Seen in</th><th>Notes</th></tr></thead>
+          <tbody>
+          {% for ioc in g.items %}
+            <tr>
+              <td class="mono">{{ ioc.value_display }}</td>
+              <td class="prov">{% for p in ioc.provenance %}{{ p }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
+              <td>
+                {% if ioc.wrapper %}<span class="chip warn">wrapper: {{ ioc.wrapper }}</span>{% endif %}
+                {% if ioc.unresolved %}<span class="chip bad">unresolved</span>{% endif %}
+                {% if ioc.redacted %}<span class="chip">redacted</span>{% endif %}
+                {% if ioc.wrapped_display %}<div class="prov">wrapped: {{ ioc.wrapped_display }}</div>{% endif %}
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endfor %}
+
+    {# ---------- Routing ---------- #}
+    <div class="card span">
+      <div class="card-h"><h2>Routing path</h2><span class="count">{{ r.routing | length }} hop{{ "" if r.routing|length == 1 else "s" }}</span></div>
+      <div class="card-b">
+        {% if r.routing %}
+          {% for hop in r.routing %}
+          <div class="hop">
+            <div class="idx">HOP {{ hop.index }}</div>
+            <div class="ln">
+              {% if hop.from %}from <b>{{ hop.from }}</b>{% endif %}
+              {% if hop.by %} by <b>{{ hop.by }}</b>{% endif %}
+              {% if hop.with %} with {{ hop.with }}{% endif %}
+              {% if hop.timestamp %} · {{ hop.timestamp }}{% endif %}
+            </div>
+            <div class="raw">{{ hop.raw }}</div>
+          </div>
+          {% endfor %}
+        {% else %}
+          <p class="empty">No Received hops were parsed.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ---------- Attachments ---------- #}
+    <div class="card span">
+      <div class="card-h"><h2>Attachments</h2><span class="count">{{ r.attachments | length }}</span></div>
+      <div class="card-b flush">
+        {% if r.attachments %}
+        <table>
+          <thead><tr><th>Filename</th><th>Declared / detected</th><th>Size</th><th>SHA-256</th><th>Flags</th></tr></thead>
+          <tbody>
+          {% for att in r.attachments %}
+            <tr>
+              <td class="mono">{{ att.filename or "—" }}</td>
+              <td class="mono">{{ att.declared_type or "—" }} / {{ att.detected_type or "—" }}
+                {% if att.type_mismatch %}<span class="chip bad">mismatch</span>{% endif %}</td>
+              <td class="mono">{{ att.size_human or "—" }}</td>
+              <td class="mono" title="md5 {{ att.md5 or '' }}">{{ att.sha256 or "—" }}</td>
+              <td>{% for f in att.flags %}<span class="chip flag">{{ f }}</span> {% endfor %}
+                  {%- if not att.flags %}—{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        {% else %}
+        <div class="card-b"><p class="empty">No attachments.</p></div>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ---------- Body preview ---------- #}
+    <div class="card span">
+      <div class="card-h"><h2>Body preview</h2><span class="count">plaintext · defanged · never rendered</span></div>
+      <div class="card-b">
+        {% if r.body_preview %}<div class="preview">{{ r.body_preview }}</div>{% endif %}
+        {% if r.body_note %}<p class="prov" style="margin-top:12px">{{ r.body_note }}</p>{% endif %}
+      </div>
+    </div>
+
+    {# ---------- Anomalies ---------- #}
+    {% if r.anomalies %}
+    <div class="card span">
+      <div class="card-h"><h2>Parsing anomalies</h2><span class="count">{{ r.anomalies | length }}</span></div>
+      <div class="card-b">
+        <ul class="bare">
+          {% for a in r.anomalies %}
+          <li>{% if a.code %}<span class="prov">{{ a.code }}</span> — {% endif %}{{ a.message }}</li>
+          {% endfor %}
+        </ul>
+      </div>
+    </div>
+    {% endif %}
+
+  </div>
+
+  <footer class="foot">
+    <p class="inv">
+      PhishBowl is <b>defensive-only</b>: it never sends, never detonates, never fetches the analyzed
+      message's URLs, and never auto-remediates. This report is self-contained and performs
+      <b>zero network egress</b> when opened — no remote images, fonts, scripts, or trackers.
+    </p>
+    <p>All indicators are <b>defanged</b> for safe handling. Generated by {{ r.tool }}.</p>
+  </footer>
+
+</div>
+</body>
+</html>
