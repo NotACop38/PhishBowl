@@ -54,6 +54,29 @@ The parser defends against malicious or malformed input (`phishbowl/parse/`):
 - **Graceful degradation:** a readable-but-malformed message degrades into a
   noted partial result (recorded as an `Anomaly`) and never crashes the run.
 
+## Connector egress (SSRF guard)
+
+The optional enrichment layer (`--enrich`) is the only path that reaches the
+network, and it is deliberately narrow (`phishbowl/connectors/`):
+
+- **Allowlisted egress only.** Each connector declares the vendor host(s) it may
+  reach, and its HTTP client refuses any other host *before* connecting — so a
+  connector can never be coerced into fetching a URL taken from the analyzed
+  email (the SSRF guarantee). urlscan, the one connector whose vendor can be
+  asked to visit a URL, defaults to **private** and to passive search by domain;
+  active submission is a separate, explicit opt-in (`--urlscan-submit`).
+- **Key-gated, env-only secrets.** API keys are read from the environment only,
+  never logged, never written to an output, and defensively scrubbed from any
+  retained vendor response.
+- **Graceful degrade.** A missing key skips a connector with a note; a network or
+  API error soft-fails it with a note; nothing crashes the run. The offline
+  verdict is always computed first and never depends on enrichment.
+
+These are covered by `tests/test_enrich.py` (all with mocked HTTP — no live
+calls): the SSRF guard rejects an email-derived URL, the cache and rate-limit
+backoff paths behave, every connector degrades gracefully, and no seeded API key
+ever appears in the HTML, JSON, or CLI output.
+
 ## Static & dependency scanning
 
 Per the project's CI philosophy (`CLAUDE.md`), the routine gate is a fast

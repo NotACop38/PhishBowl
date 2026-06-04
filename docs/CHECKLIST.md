@@ -118,22 +118,22 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Objective:** Pluggable, key-gated enrichment that enhances (never gates) the verdict.
 
 **Decision gates:**
-- [ ] Approve the `Connector` interface before writing connector #1.
+- [x] Approve the `Connector` interface before writing connector #1. (ABC + normalized `EnrichmentResult` in `phishbowl/connectors/base.py`; authoring guide in `docs/CONNECTORS.md`.)
 - [x] urlscan defaults to **private** scans (locked).
 
 **Tasks:**
-- [ ] Define stable `Connector` ABC/Protocol + `EnrichmentResult` (normalized).
-- [ ] Discovery: in-repo registry **and** `phishbowl.connectors` entry-points.
-- [ ] On-disk cache keyed by `(connector, ioc_type, value)` with per-connector TTL.
-- [ ] Rate-limit handling (per documented free tiers) + backoff + global concurrency cap.
-- [ ] Graceful degrade: missing key → skipped w/ note; API/network error → soft-fail w/ note; never crash.
-- [ ] SSRF guard: connectors reach only their vendor's documented base URL; never fetch email URLs.
-- [ ] Connectors: WHOIS/RDAP (domain age), VirusTotal, AbuseIPDB, urlscan (private default), Shodan.
-- [ ] Wire enrichment signals into the scorer, each tagged `[enrichment]`; re-score after enrichment.
-- [ ] Report/CLI/JSON show enrichment status per connector (used / skipped / failed) and source-tag enrichment-derived points.
-- [ ] Tests: mocked connector responses; offline run still fully works with all connectors disabled; cache hit path; rate-limit/backoff path.
+- [x] Define stable `Connector` ABC/Protocol + `EnrichmentResult` (normalized).
+- [x] Discovery: in-repo registry **and** `phishbowl.connectors` entry-points.
+- [x] On-disk cache keyed by `(connector, ioc_type, value)` with per-connector TTL.
+- [x] Rate-limit handling (per documented free tiers) + backoff + global concurrency cap.
+- [x] Graceful degrade: missing key → skipped w/ note; API/network error → soft-fail w/ note; never crash.
+- [x] SSRF guard: connectors reach only their vendor's documented base URL; never fetch email URLs.
+- [x] Connectors: WHOIS/RDAP (domain age), VirusTotal, AbuseIPDB, urlscan (private default), Shodan.
+- [x] Wire enrichment signals into the scorer, each tagged `[enrichment]`; re-score after enrichment.
+- [x] Report/CLI/JSON show enrichment status per connector (used / skipped / failed) and source-tag enrichment-derived points.
+- [x] Tests: mocked connector responses; offline run still fully works with all connectors disabled; cache hit path; rate-limit/backoff path; SSRF guard rejects an email URL; secrets never leak.
 
-**DoD:** With keys, enrichment adds source-tagged signals and visibly enhances the verdict; with no keys, the Phase 4 experience is unchanged; a contributor could write a connector from the interface docs alone.
+**DoD:** With keys, enrichment adds source-tagged signals and visibly enhances the verdict; with no keys, the Phase 4 experience is unchanged; a contributor could write a connector from the interface docs alone. ✅ **Met** — `phishbowl analyze --enrich` augments the verdict with five allowlisted, key-gated OSINT connectors (RDAP, VirusTotal, AbuseIPDB, urlscan, Shodan), each tagged `[enrichment]` in the HTML/CLI/JSON; the offline path is byte-identical with `--enrich` absent; caching, rate-limit backoff, graceful degrade, the SSRF guard, and secret hygiene are all green (`tests/test_enrich.py`).
 
 ---
 

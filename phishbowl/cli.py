@@ -5,9 +5,14 @@ offline MVP milestone), ``analyze`` runs the full offline pipeline —
 parse → extract → defang → score → report — and prints a rich terminal summary,
 optionally writing a self-contained HTML report and/or a complete JSON result.
 
+Phase 5 adds an opt-in ``--enrich`` flag: with API keys configured (env only),
+it augments the offline verdict with allowlisted OSINT connectors and re-scores,
+tagging every added point ``[enrichment]``. Without ``--enrich`` (and without
+keys) the pipeline is entirely offline and unchanged.
+
 Phishbowl is defensive-only: it never sends, detonates, fetches the email's
-URLs, or auto-remediates (CLAUDE.md invariants). The whole pipeline is offline
-and needs zero API keys.
+URLs, or auto-remediates (CLAUDE.md invariants). Even with ``--enrich``, the only
+network egress is to allowlisted vendor APIs — never the analyzed email's URLs.
 """
 
 from __future__ import annotations
@@ -18,6 +23,7 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
+from phishbowl.connectors import EnrichmentReport, EnrichmentSettings, enrich_email
 from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse
 from phishbowl.report import (
@@ -67,13 +73,28 @@ def analyze(
         list[str] | None,
         typer.Option("--redact-field", help="Header to redact (repeatable). Implies --redact."),
     ] = None,
+    enrich: Annotated[
+        bool,
+        typer.Option(
+            "--enrich",
+            help="Augment the verdict with allowlisted OSINT connectors (needs API keys in env).",
+        ),
+    ] = False,
+    urlscan_submit: Annotated[
+        bool,
+        typer.Option(
+            "--urlscan-submit",
+            help="Allow urlscan to actively submit URLs (private by default). Implies --enrich.",
+        ),
+    ] = False,
 ) -> None:
     """Triage a suspicious email and produce a report (HTML / JSON / CLI).
 
     Runs the offline pipeline end-to-end with zero API keys and prints a rich
-    summary; pass ``--html``/``--json`` to also write those outputs. Phishbowl is
-    defensive-only: it never sends, detonates, fetches the email's URLs, or
-    auto-remediates.
+    summary; pass ``--html``/``--json`` to also write those outputs. Add
+    ``--enrich`` to layer in OSINT enrichment (key-gated, reading secrets from the
+    environment only). Phishbowl is defensive-only: it never sends, detonates,
+    fetches the email's URLs, or auto-remediates.
     """
     try:
         parsed = parse(path)
@@ -84,7 +105,16 @@ def analyze(
 
     config = load_config()
     iocs = extract_iocs(parsed)
-    result = score_email(parsed, iocs, config)
+
+    enrichment: EnrichmentReport | None = None
+    if enrich or urlscan_submit:
+        settings = EnrichmentSettings(
+            enabled=True,
+            urlscan_submit=urlscan_submit,
+        )
+        enrichment = enrich_email(parsed, iocs, settings)
+
+    result = score_email(parsed, iocs, config, enrichment=enrichment)
 
     extra_fields = tuple(redact_field or ())
     policy = (
@@ -92,7 +122,7 @@ def analyze(
         if redact or extra_fields
         else RedactionPolicy.disabled()
     )
-    view = build_report(parsed, iocs, result, policy=policy, config=config)
+    view = build_report(parsed, iocs, result, policy=policy, config=config, enrichment=enrichment)
 
     render_cli(view, Console())
 

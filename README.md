@@ -43,7 +43,7 @@
 - [How it works](#-how-it-works)
 - [Transparent scoring](#-transparent-scoring)
 - [Outputs](#-outputs)
-- [Connector roadmap](#-connector-roadmap)
+- [Connectors](#-connectors)
 - [Defensive use & safety](#-defensive-use--safety-non-negotiable)
 - [Documentation](#-documentation)
 - [Contributing](#-contributing)
@@ -71,9 +71,10 @@ single self-contained file you can attach to a ticket or share with a colleague.
 Want machine-readable output too? Add `--json result.json`.
 
 > [!NOTE]
-> **Early scaffold.** The **offline core** (parse → extract → defang → score →
-> report) is built and tested. Enrichment connectors and SOAR export are on the
-> [roadmap](#-connector-roadmap). PhishBowl is built phase-by-phase per
+> **Status.** The **offline core** (parse → extract → defang → score → report) is
+> built and tested, and **opt-in OSINT enrichment** (`--enrich`) layers on top
+> with five allowlisted, key-gated connectors. SOAR export is next on the
+> [roadmap](#-connectors). PhishBowl is built phase-by-phase per
 > [`docs/CHECKLIST.md`](docs/CHECKLIST.md).
 
 ---
@@ -195,22 +196,31 @@ Full rule catalog and tuning instructions: [`docs/SCORING.md`](docs/SCORING.md).
 
 ---
 
-## 🧩 Connector roadmap
+## 🧩 Connectors
 
 Enrichment is a **layer, not a dependency**. Connectors are pluggable, key-gated, and
 allowlisted to their vendor's documented API — they may **never** be coerced into fetching
-a URL from the analyzed email (SSRF guard). All are planned for **Phase 5**; the offline
-verdict never depends on any of them.
+a URL from the analyzed email (SSRF guard). The offline verdict never depends on any of them.
+
+Opt in with `--enrich` once you've set API keys in the environment (see
+[`.env.example`](.env.example)); every point a connector contributes is tagged `[enrichment]`
+and re-scored on top of the offline base:
+
+```bash
+phishbowl analyze suspicious.eml --enrich --html report.html
+```
 
 | Connector | IOC types | API key | OPSEC note | Status |
 |-----------|-----------|:-------:|------------|:------:|
-| **WHOIS / RDAP** | domain | — | Passive lookup; domain age < 30d is a strong phishing signal. | 🔜 Planned |
-| **VirusTotal** | url · domain · hash | required | Passive reputation lookup; respects free-tier rate limits. | 🔜 Planned |
-| **AbuseIPDB** | ip | required | Abuse confidence for the sending IP. | 🔜 Planned |
-| **Shodan** | ip | required | Exposed-service context for related IPs. | 🔜 Planned |
-| **urlscan.io** | url | required | ⚠️ Active submission *visits* the URL (on urlscan's infra). **Operator opt-in, private by default** — prefer passive search. | 🔜 Planned |
+| **WHOIS / RDAP** | domain | — | Passive lookup; domain age < 30d is a strong phishing signal. | ✅ Available |
+| **VirusTotal** | url · domain · hash | required | Passive reputation lookup; respects free-tier rate limits. | ✅ Available |
+| **AbuseIPDB** | ip | required | Abuse confidence for the sending IP. | ✅ Available |
+| **Shodan** | ip | required | Exposed-service context for related IPs. | ✅ Available |
+| **urlscan.io** | url | required | ⚠️ Active submission *visits* the URL (on urlscan's infra). **Operator opt-in (`--urlscan-submit`), private by default** — prefers passive search. | ✅ Available |
 
-Want to build one? Start with the [connector-authoring guide](docs/CONNECTORS.md).
+Discovery is via an in-repo registry **and** `phishbowl.connectors` entry-points, so you can
+ship a connector as a pip package without forking. Want to build one? Start with the
+[connector-authoring guide](docs/CONNECTORS.md).
 
 ---
 

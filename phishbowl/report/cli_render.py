@@ -42,6 +42,13 @@ _AUTH_STYLE = {
     "none": "dim",
 }
 
+# Connector outcome → Rich colour for the enrichment panel.
+_OUTCOME_STYLE = {
+    "used": "green",
+    "skipped": "dim",
+    "failed": "yellow",
+}
+
 # Keep the CLI summary tight — the HTML/JSON carry the full picture.
 _MAX_REASONS = 8
 _MAX_IOCS_PER_TYPE = 12
@@ -68,6 +75,7 @@ def render_cli(view: ReportView, console: Console | None = None) -> None:
         )
     console.print()
     _reasons(view, console)
+    _enrichment(view, console)
     _auth(view, console)
     _iocs(view, console)
     _routing(view, console)
@@ -120,6 +128,36 @@ def _reasons(view: ReportView, console: Console) -> None:
     extra = len(view.fired_rules) - len(shown)
     if extra > 0:
         console.print(Text(f"… and {extra} more reason(s) in the full report.", style="dim"))
+    console.print()
+
+
+def _enrichment(view: ReportView, console: Console) -> None:
+    enrichment = view.enrichment
+    if not enrichment.enabled:
+        return
+    table = Table(
+        title="Enrichment (OSINT connectors)",
+        title_style="bold",
+        title_justify="left",
+        expand=True,
+    )
+    table.add_column("Connector", style="cyan", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Detail", ratio=3)
+    for conn in enrichment.connectors:
+        table.add_row(
+            _t(conn.connector),
+            Text(conn.outcome, style=_OUTCOME_STYLE.get(conn.outcome, "white")),
+            _t(conn.note),
+        )
+    console.print(table)
+    console.print(
+        Text(
+            "Enrichment augments the offline verdict — it never gates it. "
+            "Points it added are tagged [enrichment] above.",
+            style="dim",
+        )
+    )
     console.print()
 
 
