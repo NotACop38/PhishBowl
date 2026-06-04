@@ -79,7 +79,9 @@ def analyze(
     """
     try:
         parsed = load_stub(path)
-    except (FileNotFoundError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
+        # Missing, unreadable (permissions/I/O), or unsupported input degrades
+        # into a clean CLI error rather than an internal traceback (PRD §11).
         raise typer.BadParameter(str(exc)) from exc
 
     typer.echo(
