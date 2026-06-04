@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "phishbowl"
+version = "0.1.0"
+description = "Self-hostable, defensive-only phishing triage: parse an email, extract and defang IOCs, risk-score it, and produce an analyst-ready report."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "Phishbowl contributors" }]
+keywords = ["phishing", "triage", "security", "soc", "dfir", "email", "ioc"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security",
+]
+
+# Runtime dependencies. Lower bounds only — Phishbowl is meant to `pip install`
+# cleanly. The offline core never reaches the network; httpx is for the
+# optional, key-gated enrichment layer (PRD §9).
+dependencies = [
+    "typer>=0.12",
+    "pydantic>=2",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "rich>=13.7",
+    "iocextract>=1.16",
+    "extract-msg>=0.48",
+]
+
+[project.optional-dependencies]
+# Dev tooling. The routine gate is `make test` (pytest) only; bandit and
+# pip-audit are run once, in the dedicated security step. build is for the
+# release step. No coverage plugin, no type-checker, no pre-commit (CLAUDE.md).
+dev = [
+    "pytest>=8",
+    "ruff>=0.5",
+    "bandit>=1.7",
+    "pip-audit>=2.7",
+    "build>=1.2",
+]
+
+[project.scripts]
+phishbowl = "phishbowl.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/notacop38/phishbowl"
+Repository = "https://github.com/notacop38/phishbowl"
+
+[tool.hatch.build.targets.wheel]
+packages = ["phishbowl"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# Pyflakes (F), pycodestyle (E/W), isort (I), pyupgrade (UP), bugbear (B).
+select = ["E", "F", "I", "UP", "B", "W"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+# Let tests import the in-repo package without requiring an editable install,
+# so the gate stays cheap even when run by an isolated tool runner.
+pythonpath = ["."]
