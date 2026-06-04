@@ -529,6 +529,56 @@ def test_msg_no_transport_headers_noted_and_mapi_used() -> None:
     assert "msg_auth_unavailable" in codes
 
 
+def test_msg_cc_filled_from_mapi_when_headers_have_only_to() -> None:
+    # Headers supply To but not Cc; the MAPI table has a Cc recipient. Each
+    # recipient list is filled independently, so cc is recovered without
+    # overwriting the header-derived to.
+    headers = (
+        "From: Bob <bob@sender.example>\r\n"
+        "To: Alice <alice@example.org>\r\n"
+        "Subject: only to\r\n"
+        "Date: Mon, 01 Jun 2026 09:00:00 +0000\r\n"
+    )
+    data = _msgbuild.build_message(
+        subject="only to",
+        body_text="body",
+        transport_headers=headers,
+        sender=("Bob", "bob@sender.example"),
+        recipients=[
+            (_msgbuild.RECIP_TO, "Alice", "alice@example.org"),
+            (_msgbuild.RECIP_CC, "Carol", "carol@example.org"),
+        ],
+    )
+    parsed = parse_msg(data, filename="onlyto.msg")
+
+    assert [a.addr_spec for a in parsed.addresses.to] == ["alice@example.org"]
+    assert [a.addr_spec for a in parsed.addresses.cc] == ["carol@example.org"]
+
+
+def test_msg_embedded_message_attachment_is_hashed_not_empty() -> None:
+    # An embedded .msg (e.g. a reported phishing email) must be serialized and
+    # hashed as evidence — not recorded as a zero-byte attachment.
+    inner = _msgbuild.embedded_message_storage(
+        subject="Reported phish", body_text="you won a prize"
+    )
+    data = _msgbuild.build_message(
+        subject="Outer",
+        body_text="see attached",
+        sender=("Bob", "bob@sender.example"),
+        embedded=[("reported.msg", inner)],
+    )
+    parsed = parse_msg(data, filename="outer.msg")
+
+    assert len(parsed.attachments) == 1
+    att = parsed.attachments[0]
+    assert att.filename == "reported.msg"
+    assert att.size > 0
+    # The serialized container sniffs as an OLE/CFB document, not empty.
+    assert att.detected_type == "application/x-ole-storage"
+    assert att.sha256 != hashlib.sha256(b"").hexdigest()
+    assert len({att.md5, att.sha1, att.sha256}) == 3
+
+
 def test_attachment_digests_are_consistent_with_each_other() -> None:
     # The three digests over the same bytes must all be valid hex of the right
     # width and mutually distinct — a cheap integrity cross-check.

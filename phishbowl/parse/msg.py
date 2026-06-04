@@ -143,17 +143,19 @@ def _populate(parsed: ParsedEmail, msg) -> None:
     # MAPI fallbacks for anything the transport headers didn't (or couldn't)
     # supply. A .msg authored in Outlook may carry no transport headers at all,
     # or carry a From but a stripped/mangled recipient block — in either case the
-    # MAPI sender/recipient table is the only source, so consult it when the
-    # sender OR the recipient fields are still empty. The fallback only fills
-    # gaps; it never overwrites anything the headers already provided.
+    # MAPI sender/recipient table is the only source. We fill each gap (sender,
+    # To, Cc) independently and only when empty, so a header that supplied just
+    # one of them still gets the others from MAPI, and nothing already present is
+    # overwritten.
     need_sender = parsed.addresses.from_ is None
-    need_recipients = not parsed.addresses.to and not parsed.addresses.cc
-    if need_sender or need_recipients:
+    need_to = not parsed.addresses.to
+    need_cc = not parsed.addresses.cc
+    if need_sender or need_to or need_cc:
         current = parsed.addresses
         parsed.addresses = _guard(
             parsed,
             "address_error",
-            lambda: _mapi_addresses(msg, current, need_sender, need_recipients),
+            lambda: _mapi_addresses(msg, current, need_sender, need_to, need_cc),
             current,
         )
     if parsed.subject is None:
@@ -195,17 +197,20 @@ def _string_stream(msg, stream_id: str) -> str | None:
     return getter(stream_id) if getter is not None else None
 
 
-def _mapi_addresses(msg, current: Addresses, fill_sender: bool, fill_recipients: bool) -> Addresses:
-    """Fill gaps in :class:`Addresses` from MAPI sender/recipient streams.
+def _mapi_addresses(
+    msg, current: Addresses, fill_sender: bool, fill_to: bool, fill_cc: bool
+) -> Addresses:
+    """Fill the requested gaps in :class:`Addresses` from MAPI streams.
 
-    Only the requested gaps are filled, so header-derived values are never
-    clobbered. ``from_`` comes from the sender name + SMTP address; ``to``/``cc``
-    from the recipient table.
+    Each of sender / To / Cc is filled independently and only when requested, so
+    header-derived values are never clobbered and a header that supplied only one
+    recipient field still gets the others. ``from_`` comes from the sender name +
+    SMTP address; ``to``/``cc`` from the recipient table.
     """
     update: dict = {}
     if fill_sender:
         update["from_"] = _mapi_sender(msg)
-    if fill_recipients:
+    if fill_to or fill_cc:
         to: list[Address] = []
         cc: list[Address] = []
         for recip in msg.recipients or []:
@@ -220,8 +225,10 @@ def _mapi_addresses(msg, current: Addresses, fill_sender: bool, fill_recipients:
                 to.append(addr)
             elif recip_type == 2:
                 cc.append(addr)
-        update["to"] = to
-        update["cc"] = cc
+        if fill_to:
+            update["to"] = to
+        if fill_cc:
+            update["cc"] = cc
     return current.model_copy(update=update)
 
 
@@ -270,21 +277,41 @@ def _build_body(msg) -> Body:
     """Collect the plain-text and HTML bodies from MAPI streams.
 
     ``html_raw`` is stored for analysis only and is NEVER rendered (PRD §10),
-    exactly as on the .eml path.
-
-    HTML is read straight from the PR_HTML stream (``__substg1.0_10130102``), not
-    from ``extract-msg``'s ``htmlBody`` convenience property: for a plain-text
-    message the property *fabricates* HTML from the text body, which would set
-    ``has_html`` and feed downstream link/HTML analysis content the original
-    message never contained. ``has_html`` therefore reflects whether a real HTML
-    part was present, matching the .eml parser's semantics.
+    exactly as on the .eml path. ``has_html`` reflects whether a *real* HTML part
+    was present (matching the .eml parser's semantics).
     """
     text = msg.body
-    html_bytes = _get_stream(msg, _HTML_BODY_ID)
-    html = None
-    if html_bytes is not None:
-        html = _decode_html(bytes(html_bytes), msg)
+    html = _real_html(msg)
     return Body(text=text, html_raw=html, has_html=html is not None)
+
+
+def _real_html(msg) -> str | None:
+    """The message's genuine HTML body, or ``None`` if it had no HTML part.
+
+    Outlook stores the HTML body either as the PR_HTML stream
+    (``__substg1.0_10130102``) or encapsulated inside the compressed-RTF body.
+    We read PR_HTML first, then fall back to RTF *only when it actually
+    encapsulates HTML* — never to ``extract-msg``'s ``htmlBody`` property, which
+    synthesizes HTML from the plain-text body when no HTML part exists. That
+    fabricated markup would set ``has_html`` and feed downstream link/HTML
+    analysis content the message never contained.
+    """
+    raw = _get_stream(msg, _HTML_BODY_ID)
+    if raw is not None:
+        return _decode_html(bytes(raw), msg)
+    # No PR_HTML stream — consult the RTF body, but accept it only if RTFDE
+    # reports it encapsulates HTML (not a text-only RTF).
+    try:
+        deencap = msg.deencapsulatedRtf
+        if deencap is not None and getattr(deencap, "content_type", None) == "html":
+            html = deencap.html
+            if isinstance(html, bytes):
+                return _decode_html(html, msg)
+            return html
+    except Exception:
+        # RTF deencapsulation is best-effort; a failure just means no HTML.
+        return None
+    return None
 
 
 def _get_stream(msg, stream_id: str) -> bytes | None:
@@ -342,16 +369,39 @@ def _build_attachments(msg) -> list[Attachment]:
     """Inspect MAPI attachments through the shared, format-agnostic inspector."""
     attachments: list[Attachment] = []
     for att in msg.attachments or []:
-        data = att.data
-        # An embedded message attachment surfaces as a nested message object
-        # rather than bytes; we don't descend into it here (no detonation, no
-        # extraction) — record it by name with empty content.
-        if not isinstance(data, (bytes, bytearray)):
-            data = b""
         filename = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None)
         declared_type = getattr(att, "mimetype", None)
+        data = att.data
+        if not isinstance(data, (bytes, bytearray)):
+            # An embedded message attachment surfaces as a nested message object,
+            # not bytes. We don't descend into it (no extraction, no detonation),
+            # but we DO serialize the message container back to bytes and hash it
+            # — so a reported phishing email attached as a .msg keeps real
+            # size/hashes/type as evidence instead of looking like an empty file.
+            data = _embedded_message_bytes(data)
+            if not declared_type:
+                declared_type = "application/vnd.ms-outlook"
+            if not filename:
+                filename = "embedded-message.msg"
         attachments.append(build_attachment_from_bytes(filename, declared_type, bytes(data)))
     return attachments
+
+
+def _embedded_message_bytes(embedded) -> bytes:
+    """Serialize an embedded ``.msg`` attachment to its container bytes for hashing.
+
+    Re-serializes the compound-file container only (``extract-msg``'s
+    ``exportBytes``); it never extracts or runs the embedded message's contents.
+    Best-effort: if serialization isn't available or fails, returns empty bytes
+    rather than raising.
+    """
+    exporter = getattr(embedded, "exportBytes", None)
+    if exporter is None:
+        return b""
+    try:
+        return exporter() or b""
+    except Exception:
+        return b""
 
 
 def _note_msg_anomalies(parsed: ParsedEmail, header_msg) -> None:

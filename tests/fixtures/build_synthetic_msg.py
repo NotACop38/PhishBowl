@@ -259,6 +259,12 @@ def _sub_properties(props: bytes) -> bytes:
     return b"\x00" * 8 + props
 
 
+def _sub_properties_embed(props: bytes) -> bytes:
+    # Embedded-message __properties: 24-byte header (reserved + next-id/count
+    # fields, all zero here) then 16-byte entries.
+    return b"\x00" * 24 + props
+
+
 # --- Fixture content (entirely synthetic) ----------------------------------
 
 _SUBJECT = "Action required: confirm your account details"
@@ -326,6 +332,7 @@ def build_message(
     sender: tuple[str, str] | None = None,
     recipients: list[tuple[int, str, str]] | None = None,
     attachments: list[tuple[str, str, bytes]] | None = None,
+    embedded: list[tuple[str, bytes]] | None = None,
     date: datetime | None = None,
 ) -> bytes:
     """Assemble a synthetic ``.msg`` from high-level parts and serialize to bytes.
@@ -333,10 +340,14 @@ def build_message(
     Everything is optional so tests can exercise specific paths (e.g. a
     plain-text-only message, or one with no transport headers). ``sender`` is a
     ``(name, smtp)`` pair; ``recipients`` are ``(RECIP_*, name, smtp)`` triples;
-    ``attachments`` are ``(filename, mimetype, data)`` triples.
+    ``attachments`` are ``(filename, mimetype, data)`` triples; ``embedded`` are
+    ``(filename, inner_storage)`` pairs for embedded-message attachments, where
+    ``inner_storage`` comes from :func:`embedded_message_storage`.
     """
     recipients = recipients or []
     attachments = attachments or []
+    embedded = embedded or []
+    attach_count = len(attachments) + len(embedded)
 
     props = _fixed_prop(0x340D, 0x0003, struct.pack("<I", 0x40000))  # STORE_UNICODE_OK
     if date is not None:
@@ -346,7 +357,7 @@ def build_message(
     tree: dict = {
         "__nameid_version1.0": dict(_EMPTY_NAMEID),
         "__properties_version1.0": _message_properties(
-            rc=len(recipients), ac=len(attachments), props=props
+            rc=len(recipients), ac=attach_count, props=props
         ),
         "__substg1.0_001A001F": _unistr("IPM.Note"),  # message class (a mail item)
     }
@@ -374,8 +385,9 @@ def build_message(
             "__substg1.0_3003001F": _unistr(smtp),
         }
 
-    for i, (filename, mimetype, data) in enumerate(attachments):
-        tree[f"__attach_version1.0_#{i:08X}"] = {
+    index = 0
+    for filename, mimetype, data in attachments:
+        tree[f"__attach_version1.0_#{index:08X}"] = {
             "__properties_version1.0": _sub_properties(
                 _fixed_prop(0x3705, 0x0003, struct.pack("<I", 1)),  # ATTACH_BY_VALUE
             ),
@@ -384,8 +396,39 @@ def build_message(
             "__substg1.0_3707001F": _unistr(filename),  # long filename
             "__substg1.0_370E001F": _unistr(mimetype),  # mime type
         }
+        index += 1
+
+    for filename, inner_storage in embedded:
+        tree[f"__attach_version1.0_#{index:08X}"] = {
+            "__properties_version1.0": _sub_properties(
+                _fixed_prop(0x3705, 0x0003, struct.pack("<I", 5)),  # afEmbeddedMessage
+            ),
+            "__substg1.0_3701000D": inner_storage,  # the embedded message storage
+            "__substg1.0_3707001F": _unistr(filename),  # long filename
+        }
+        index += 1
 
     return write_cfb(tree)
+
+
+def embedded_message_storage(*, subject: str | None = None, body_text: str | None = None) -> dict:
+    """Build the inner storage tree for an embedded-message attachment.
+
+    An embedded message carries no top-level named properties of its own (those
+    live on the outer message), so it omits ``__nameid_version1.0`` — extract-msg
+    rejects re-serializing an embedded message that has its own named streams.
+    """
+    storage: dict = {
+        "__properties_version1.0": _sub_properties_embed(
+            _fixed_prop(0x340D, 0x0003, struct.pack("<I", 0x40000)),
+        ),
+        "__substg1.0_001A001F": _unistr("IPM.Note"),
+    }
+    if subject is not None:
+        storage["__substg1.0_0037001F"] = _unistr(subject)
+    if body_text is not None:
+        storage["__substg1.0_1000001F"] = _unistr(body_text)
+    return storage
 
 
 def build_msg() -> bytes:
