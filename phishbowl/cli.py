@@ -1,40 +1,38 @@
 """Phishbowl command-line interface.
 
-Wires up the Typer surface and the ``analyze`` command. As of Phase 1,
-``analyze`` runs the real ``.eml`` parser (``.msg`` lands later in the phase)
-and prints a short summary of what was parsed. Extraction, scoring, and the
-report layer are later phases per ``docs/CHECKLIST.md``; do not jump ahead.
+Wires up the Typer surface and the ``analyze`` command. As of Phase 4 (the
+offline MVP milestone), ``analyze`` runs the full offline pipeline —
+parse → extract → defang → score → report — and prints a rich terminal summary,
+optionally writing a self-contained HTML report and/or a complete JSON result.
 
 Phishbowl is defensive-only: it never sends, detonates, fetches the email's
-URLs, or auto-remediates (CLAUDE.md invariants).
+URLs, or auto-remediates (CLAUDE.md invariants). The whole pipeline is offline
+and needs zero API keys.
 """
 
 from __future__ import annotations
 
-import re
+from pathlib import Path
+from typing import Annotated
 
 import typer
+from rich.console import Console
 
-from phishbowl.models import ParsedEmail
+from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse
+from phishbowl.report import (
+    RedactionPolicy,
+    build_report,
+    render_cli,
+    render_html,
+    render_json,
+)
+from phishbowl.score import load_config, score_email
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
-
-# C0/C1 control characters (incl. ESC, CR/LF, DEL). Email-derived text is
-# hostile input (PRD §13): a Subject carrying terminal escape/OSC sequences
-# could rewrite the analyst's terminal or forge hyperlinks, so we strip these
-# before echoing any email-controlled field.
-_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f-\x9f]")
-
-
-def _safe(text: str | None) -> str:
-    """Strip terminal control characters from an email-derived string."""
-    if not text:
-        return "(none)"
-    return _CONTROL_CHARS.sub("", text)
 
 
 @app.callback()
@@ -50,34 +48,32 @@ def main() -> None:
     """
 
 
-def _summarize(parsed: ParsedEmail) -> str:
-    """One-line-per-fact summary of a parsed message (no report layer yet)."""
-    src = parsed.source
-    from_ = parsed.addresses.from_
-    lines = [
-        f"phishbowl: parsed {src.filename} (format={src.format.value})",
-        f"  subject:     {_safe(parsed.subject)}",
-        f"  from:        {_safe(from_.addr_spec if from_ else None)}",
-        f"  spf/dkim/dmarc: "
-        f"{parsed.auth.spf.result}/{parsed.auth.dkim.result}/{parsed.auth.dmarc.result}",
-        f"  headers:     {len(parsed.headers)}",
-        f"  hops:        {len(parsed.routing)}",
-        f"  attachments: {len(parsed.attachments)}",
-        f"  anomalies:   {len(parsed.anomalies)}",
-    ]
-    return "\n".join(lines)
-
-
 @app.command()
 def analyze(
-    path: str = typer.Argument(..., help="Path to a suspicious .eml or .msg file."),
+    path: Annotated[str, typer.Argument(help="Path to a suspicious .eml or .msg file.")],
+    html: Annotated[
+        Path | None,
+        typer.Option("--html", "-H", help="Write the self-contained HTML report to this path."),
+    ] = None,
+    json_out: Annotated[
+        Path | None,
+        typer.Option("--json", "-j", help="Write the complete JSON result to this path."),
+    ] = None,
+    redact: Annotated[
+        bool,
+        typer.Option("--redact", help="Redact bystander PII (recipients, internal hosts/IPs)."),
+    ] = False,
+    redact_field: Annotated[
+        list[str] | None,
+        typer.Option("--redact-field", help="Header to redact (repeatable). Implies --redact."),
+    ] = None,
 ) -> None:
-    """Triage a suspicious email and produce a report.
+    """Triage a suspicious email and produce a report (HTML / JSON / CLI).
 
-    Phase 1: parses the file into a ``ParsedEmail`` and prints a summary. The
-    extract/score/report stages are not implemented yet. Phishbowl is
-    defensive-only: it will never send, detonate, fetch the email's URLs, or
-    auto-remediate.
+    Runs the offline pipeline end-to-end with zero API keys and prints a rich
+    summary; pass ``--html``/``--json`` to also write those outputs. Phishbowl is
+    defensive-only: it never sends, detonates, fetches the email's URLs, or
+    auto-remediates.
     """
     try:
         parsed = parse(path)
@@ -86,7 +82,26 @@ def analyze(
         # into a clean CLI error rather than an internal traceback (PRD §11).
         raise typer.BadParameter(str(exc)) from exc
 
-    typer.echo(_summarize(parsed))
+    config = load_config()
+    iocs = extract_iocs(parsed)
+    result = score_email(parsed, iocs, config)
+
+    extra_fields = tuple(redact_field or ())
+    policy = (
+        RedactionPolicy.standard(extra_fields=extra_fields)
+        if redact or extra_fields
+        else RedactionPolicy.disabled()
+    )
+    view = build_report(parsed, iocs, result, policy=policy, config=config)
+
+    render_cli(view, Console())
+
+    if html is not None:
+        html.write_text(render_html(view), encoding="utf-8")
+        typer.echo(f"phishbowl: wrote HTML report to {html}")
+    if json_out is not None:
+        json_out.write_text(render_json(view), encoding="utf-8")
+        typer.echo(f"phishbowl: wrote JSON result to {json_out}")
 
 
 if __name__ == "__main__":  # pragma: no cover

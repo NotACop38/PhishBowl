@@ -12,6 +12,7 @@ Design notes from the PRD that are load-bearing here:
 - ``Body.html_raw`` is stored but NEVER rendered (CLAUDE.md / PRD §10).
 """
 
+from ._base import PhishbowlModel
 from .addresses import Address, Addresses
 from .attachments import Attachment
 from .auth import Auth, AuthResult
@@ -24,6 +25,8 @@ from .routing import ReceivedHop, Routing
 from .source import Source
 
 __all__ = [
+    # Shared base
+    "PhishbowlModel",
     # Top-level contract
     "ParsedEmail",
     # Sub-models
