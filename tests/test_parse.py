@@ -28,6 +28,21 @@ from phishbowl.parse.attachments import _flags
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+def _load_msg_builder():
+    """Load the synthetic .msg generator so tests can build .msg variants in-memory."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "build_synthetic_msg", FIXTURES / "build_synthetic_msg.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_msgbuild = _load_msg_builder()
+
+
 def _parse(name: str) -> ParsedEmail:
     return parse(FIXTURES / name)
 
@@ -428,6 +443,90 @@ def test_msg_parse_bytes_direct_matches_dispatch() -> None:
     assert direct.subject == viapath.subject
     assert direct.source.format is EmailFormat.MSG
     assert [a.addr_spec for a in direct.addresses.to] == [a.addr_spec for a in viapath.addresses.to]
+
+
+def test_msg_plain_text_only_does_not_fabricate_html() -> None:
+    # extract-msg's htmlBody convenience property synthesizes HTML from the text
+    # body when no real HTML part exists; we must read the raw PR_HTML stream so a
+    # plain-text .msg reports has_html=False and never feeds downstream link/HTML
+    # analysis fabricated markup (matching the .eml parser's semantics).
+    data = _msgbuild.build_message(
+        subject="Plain only",
+        body_text="just text, no html part",
+        sender=("Bob Sender", "bob@sender.example"),
+        recipients=[(_msgbuild.RECIP_TO, "Alice", "alice@example.org")],
+    )
+    parsed = parse_msg(data, filename="plain.msg")
+
+    assert parsed.body.text is not None and "just text" in parsed.body.text
+    assert parsed.body.has_html is False
+    assert parsed.body.html_raw is None
+
+
+def test_msg_bcc_recipient_not_classified_as_to() -> None:
+    # A saved Bcc recipient must not appear as a To/Cc: the model has no Bcc
+    # field, and misfiling it would mislead the report. Only To and Cc map.
+    data = _msgbuild.build_message(
+        subject="Recipients",
+        body_text="body",
+        sender=("Bob", "bob@sender.example"),
+        recipients=[
+            (_msgbuild.RECIP_TO, "Alice", "alice@example.org"),
+            (_msgbuild.RECIP_CC, "Carol", "carol@example.org"),
+            (_msgbuild.RECIP_BCC, "Eve", "eve@secret.example"),
+        ],
+    )
+    parsed = parse_msg(data, filename="recips.msg")
+
+    assert [a.addr_spec for a in parsed.addresses.to] == ["alice@example.org"]
+    assert [a.addr_spec for a in parsed.addresses.cc] == ["carol@example.org"]
+    # The Bcc address appears in neither list.
+    all_specs = [a.addr_spec for a in (*parsed.addresses.to, *parsed.addresses.cc)]
+    assert "eve@secret.example" not in all_specs
+
+
+def test_msg_recipients_filled_from_mapi_when_headers_omit_them() -> None:
+    # Transport headers with a From but no To/Cc must still get recipients from
+    # the MAPI table — the fallback fills gaps, it doesn't only run when From is
+    # missing. (It must not clobber the header-derived From.)
+    headers = (
+        "From: Bob Sender <bob@sender.example>\r\n"
+        "Subject: gappy headers\r\n"
+        "Date: Mon, 01 Jun 2026 09:00:00 +0000\r\n"
+    )
+    data = _msgbuild.build_message(
+        subject="gappy headers",
+        body_text="body",
+        transport_headers=headers,
+        sender=("MAPI Sender", "mapi@sender.example"),
+        recipients=[(_msgbuild.RECIP_TO, "Alice", "alice@example.org")],
+    )
+    parsed = parse_msg(data, filename="gappy.msg")
+
+    # From came from the headers and was not overwritten by the MAPI sender...
+    assert parsed.addresses.from_ is not None
+    assert parsed.addresses.from_.addr_spec == "bob@sender.example"
+    # ...while the recipients the headers lacked were recovered from MAPI.
+    assert [a.addr_spec for a in parsed.addresses.to] == ["alice@example.org"]
+
+
+def test_msg_no_transport_headers_noted_and_mapi_used() -> None:
+    # With no transport headers at all, routing/auth are unavailable (noted), and
+    # sender/recipients come entirely from MAPI.
+    data = _msgbuild.build_message(
+        subject="No headers",
+        body_text="body",
+        sender=("Bob", "bob@sender.example"),
+        recipients=[(_msgbuild.RECIP_TO, "Alice", "alice@example.org")],
+    )
+    parsed = parse_msg(data, filename="noheaders.msg")
+
+    assert parsed.addresses.from_ is not None
+    assert parsed.addresses.from_.addr_spec == "bob@sender.example"
+    assert len(parsed.routing) == 0
+    codes = {a.code for a in parsed.anomalies}
+    assert "msg_no_transport_headers" in codes
+    assert "msg_auth_unavailable" in codes
 
 
 def test_attachment_digests_are_consistent_with_each_other() -> None:

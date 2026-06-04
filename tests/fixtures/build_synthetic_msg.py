@@ -302,53 +302,104 @@ _PDF = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
 _DATE = datetime(2026, 6, 1, 9, 29, 55, tzinfo=UTC)
 
 
-def build_msg() -> bytes:
-    """Assemble the synthetic message's MAPI tree and serialize it to CFB bytes."""
-    message_props = _message_properties(
-        rc=1,
-        ac=1,
-        props=(
-            # PR_STORE_SUPPORT_MASK with STORE_UNICODE_OK (0x40000) so the
-            # reader treats string streams as UTF-16 (...001F).
-            _fixed_prop(0x340D, 0x0003, struct.pack("<I", 0x40000))
-            + _fixed_prop(0x0E06, 0x0040, _filetime(_DATE))  # delivery time
-            + _fixed_prop(0x0E07, 0x0003, struct.pack("<I", 0x01))  # msg flags: read
-        ),
-    )
+# RecipientType MAPI values (PR_RECIPIENT_TYPE, 0x0C15): To / Cc / Bcc.
+RECIP_TO = 1
+RECIP_CC = 2
+RECIP_BCC = 3
 
-    recipient = {
-        "__properties_version1.0": _sub_properties(
-            _fixed_prop(0x0C15, 0x0003, struct.pack("<I", 1)),  # recipient type: TO
-        ),
-        "__substg1.0_3001001F": _unistr("Security Analyst"),
-        "__substg1.0_39FE001F": _unistr("analyst@example.org"),
-        "__substg1.0_3003001F": _unistr("analyst@example.org"),
-    }
+# The named-properties storage. Modern extract-msg (>=0.48) requires the
+# GUID/entry/names streams to be present to open the file at all; an empty set of
+# all three is the valid "no named properties" state.
+_EMPTY_NAMEID = {
+    "__substg1.0_00020102": b"",  # GUID stream
+    "__substg1.0_00030102": b"",  # entry stream
+    "__substg1.0_00040102": b"",  # names stream
+}
 
-    attachment = {
-        "__properties_version1.0": _sub_properties(
-            _fixed_prop(0x3705, 0x0003, struct.pack("<I", 1)),  # ATTACH_BY_VALUE
-        ),
-        "__substg1.0_37010102": _PDF,  # attachment data (binary)
-        "__substg1.0_3704001F": _unistr("statement.pdf"),  # short filename
-        "__substg1.0_3707001F": _unistr("statement.pdf"),  # long filename
-        "__substg1.0_370E001F": _unistr("application/pdf"),  # mime type
-    }
 
-    tree = {
-        "__properties_version1.0": message_props,
+def build_message(
+    *,
+    subject: str | None = None,
+    body_text: str | None = None,
+    html: bytes | None = None,
+    transport_headers: str | None = None,
+    sender: tuple[str, str] | None = None,
+    recipients: list[tuple[int, str, str]] | None = None,
+    attachments: list[tuple[str, str, bytes]] | None = None,
+    date: datetime | None = None,
+) -> bytes:
+    """Assemble a synthetic ``.msg`` from high-level parts and serialize to bytes.
+
+    Everything is optional so tests can exercise specific paths (e.g. a
+    plain-text-only message, or one with no transport headers). ``sender`` is a
+    ``(name, smtp)`` pair; ``recipients`` are ``(RECIP_*, name, smtp)`` triples;
+    ``attachments`` are ``(filename, mimetype, data)`` triples.
+    """
+    recipients = recipients or []
+    attachments = attachments or []
+
+    props = _fixed_prop(0x340D, 0x0003, struct.pack("<I", 0x40000))  # STORE_UNICODE_OK
+    if date is not None:
+        props += _fixed_prop(0x0E06, 0x0040, _filetime(date))  # delivery time
+        props += _fixed_prop(0x0E07, 0x0003, struct.pack("<I", 0x01))  # msg flags: read
+
+    tree: dict = {
+        "__nameid_version1.0": dict(_EMPTY_NAMEID),
+        "__properties_version1.0": _message_properties(
+            rc=len(recipients), ac=len(attachments), props=props
+        ),
         "__substg1.0_001A001F": _unistr("IPM.Note"),  # message class (a mail item)
-        "__substg1.0_0037001F": _unistr(_SUBJECT),  # subject
-        "__substg1.0_1000001F": _unistr(_BODY_TEXT),  # plain body
-        "__substg1.0_10130102": _BODY_HTML,  # html body (binary)
-        "__substg1.0_007D001F": _unistr(_TRANSPORT_HEADERS),  # transport headers
-        "__substg1.0_0C1A001F": _unistr("Account Services"),  # sender name
-        "__substg1.0_5D01001F": _unistr("support@account-verify.example"),  # sender smtp
-        "__substg1.0_0C1F001F": _unistr("support@account-verify.example"),  # sender email
-        "__recip_version1.0_#00000000": recipient,
-        "__attach_version1.0_#00000000": attachment,
     }
+    if subject is not None:
+        tree["__substg1.0_0037001F"] = _unistr(subject)
+    if body_text is not None:
+        tree["__substg1.0_1000001F"] = _unistr(body_text)
+    if html is not None:
+        tree["__substg1.0_10130102"] = html
+    if transport_headers is not None:
+        tree["__substg1.0_007D001F"] = _unistr(transport_headers)
+    if sender is not None:
+        name, smtp = sender
+        tree["__substg1.0_0C1A001F"] = _unistr(name)
+        tree["__substg1.0_5D01001F"] = _unistr(smtp)
+        tree["__substg1.0_0C1F001F"] = _unistr(smtp)
+
+    for i, (rtype, name, smtp) in enumerate(recipients):
+        tree[f"__recip_version1.0_#{i:08X}"] = {
+            "__properties_version1.0": _sub_properties(
+                _fixed_prop(0x0C15, 0x0003, struct.pack("<I", rtype)),
+            ),
+            "__substg1.0_3001001F": _unistr(name),
+            "__substg1.0_39FE001F": _unistr(smtp),
+            "__substg1.0_3003001F": _unistr(smtp),
+        }
+
+    for i, (filename, mimetype, data) in enumerate(attachments):
+        tree[f"__attach_version1.0_#{i:08X}"] = {
+            "__properties_version1.0": _sub_properties(
+                _fixed_prop(0x3705, 0x0003, struct.pack("<I", 1)),  # ATTACH_BY_VALUE
+            ),
+            "__substg1.0_37010102": data,  # attachment data (binary)
+            "__substg1.0_3704001F": _unistr(filename),  # short filename
+            "__substg1.0_3707001F": _unistr(filename),  # long filename
+            "__substg1.0_370E001F": _unistr(mimetype),  # mime type
+        }
+
     return write_cfb(tree)
+
+
+def build_msg() -> bytes:
+    """The committed synthetic phishing fixture (sender, recipient, body, PDF)."""
+    return build_message(
+        subject=_SUBJECT,
+        body_text=_BODY_TEXT,
+        html=_BODY_HTML,
+        transport_headers=_TRANSPORT_HEADERS,
+        sender=("Account Services", "support@account-verify.example"),
+        recipients=[(RECIP_TO, "Security Analyst", "analyst@example.org")],
+        attachments=[("statement.pdf", "application/pdf", _PDF)],
+        date=_DATE,
+    )
 
 
 def main() -> None:

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import email
 import io
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -56,6 +57,7 @@ from phishbowl.models import (
 from .addresses import parse_single_address
 from .attachments import build_attachment_from_bytes
 from .auth import parse_auth
+from .charset import _decode_bytes
 from .eml import _build_addresses, _build_headers, _date, _guard, _subject
 from .routing import parse_routing
 
@@ -63,12 +65,16 @@ from .routing import parse_routing
 # received, when Outlook preserved it. Read sans the type suffix per extract-msg.
 _TRANSPORT_HEADERS_ID = "__substg1.0_007D"
 
+# PR_HTML — the real HTML body part, as raw bytes in the message's code page.
+_HTML_BODY_ID = "__substg1.0_10130102"
+
 # MAPI property/stream ids we fall back to when transport headers are absent.
 _SENDER_NAME_ID = "__substg1.0_0C1A"
 _SENDER_SMTP_ID = "__substg1.0_5D01"
 _SENDER_EMAIL_ID = "__substg1.0_0C1F"
 _DELIVERY_TIME_PROP = "0E060040"  # PR_MESSAGE_DELIVERY_TIME
 _SUBMIT_TIME_PROP = "00390040"  # PR_CLIENT_SUBMIT_TIME
+_INTERNET_CPID_PROP = "3FDE0003"  # PR_INTERNET_CPID (code page of the HTML body)
 
 
 def parse_msg(data: bytes, filename: str | None = None) -> ParsedEmail:
@@ -136,11 +142,19 @@ def _populate(parsed: ParsedEmail, msg) -> None:
 
     # MAPI fallbacks for anything the transport headers didn't (or couldn't)
     # supply. A .msg authored in Outlook may carry no transport headers at all,
-    # in which case these MAPI streams are the only source for these fields.
-    if parsed.addresses.from_ is None:
+    # or carry a From but a stripped/mangled recipient block — in either case the
+    # MAPI sender/recipient table is the only source, so consult it when the
+    # sender OR the recipient fields are still empty. The fallback only fills
+    # gaps; it never overwrites anything the headers already provided.
+    need_sender = parsed.addresses.from_ is None
+    need_recipients = not parsed.addresses.to and not parsed.addresses.cc
+    if need_sender or need_recipients:
         current = parsed.addresses
         parsed.addresses = _guard(
-            parsed, "address_error", lambda: _mapi_addresses(msg, current), current
+            parsed,
+            "address_error",
+            lambda: _mapi_addresses(msg, current, need_sender, need_recipients),
+            current,
         )
     if parsed.subject is None:
         parsed.subject = _guard(parsed, "subject_error", lambda: msg.subject, None)
@@ -161,7 +175,7 @@ def _transport_headers(msg):
     fabricate one from MAPI fields (inventing a placeholder
     ``Authentication-Results``), which we must not mistake for received auth data.
     """
-    text = msg._getStringStream(_TRANSPORT_HEADERS_ID)
+    text = _string_stream(msg, _TRANSPORT_HEADERS_ID)
     if not text:
         return None
     # Headers only — there is no body in this stream. ``message_from_string`` is
@@ -169,30 +183,51 @@ def _transport_headers(msg):
     return email.message_from_string(text)
 
 
-def _mapi_addresses(msg, current: Addresses) -> Addresses:
-    """Build :class:`Addresses` from MAPI sender/recipient streams.
+def _string_stream(msg, stream_id: str) -> str | None:
+    """Read a MAPI string stream, preferring extract-msg's public accessor.
 
-    Used only when transport headers were absent. ``from_`` comes from the
-    sender name + SMTP address; ``to``/``cc`` from the recipient table.
+    ``extract-msg`` >= 0.48 (the declared dependency) exposes ``getStringStream``;
+    older releases only had the private ``_getStringStream``. We prefer the
+    public name and fall back to the private one so a stream isn't silently
+    dropped on either API.
     """
-    from_ = _mapi_sender(msg)
-    to: list[Address] = []
-    cc: list[Address] = []
-    for recip in msg.recipients or []:
-        addr = _recipient_address(recip)
-        if addr is None:
-            continue
-        # RecipientType.CC == 2; everything else is treated as a primary (To).
-        if int(getattr(recip.type, "value", recip.type)) == 2:
-            cc.append(addr)
-        else:
-            to.append(addr)
-    return current.model_copy(update={"from_": from_, "to": to, "cc": cc})
+    getter = getattr(msg, "getStringStream", None) or getattr(msg, "_getStringStream", None)
+    return getter(stream_id) if getter is not None else None
+
+
+def _mapi_addresses(msg, current: Addresses, fill_sender: bool, fill_recipients: bool) -> Addresses:
+    """Fill gaps in :class:`Addresses` from MAPI sender/recipient streams.
+
+    Only the requested gaps are filled, so header-derived values are never
+    clobbered. ``from_`` comes from the sender name + SMTP address; ``to``/``cc``
+    from the recipient table.
+    """
+    update: dict = {}
+    if fill_sender:
+        update["from_"] = _mapi_sender(msg)
+    if fill_recipients:
+        to: list[Address] = []
+        cc: list[Address] = []
+        for recip in msg.recipients or []:
+            addr = _recipient_address(recip)
+            if addr is None:
+                continue
+            # Map only To (1) and Cc (2). Bcc (3) and other types are deliberately
+            # omitted: the ParsedEmail model has no Bcc field, and a saved Bcc
+            # must not masquerade as a To recipient (it would mislead the report).
+            recip_type = int(getattr(recip.type, "value", recip.type))
+            if recip_type == 1:
+                to.append(addr)
+            elif recip_type == 2:
+                cc.append(addr)
+        update["to"] = to
+        update["cc"] = cc
+    return current.model_copy(update=update)
 
 
 def _mapi_sender(msg) -> Address | None:
-    name = msg._getStringStream(_SENDER_NAME_ID)
-    email_addr = msg._getStringStream(_SENDER_SMTP_ID) or msg._getStringStream(_SENDER_EMAIL_ID)
+    name = _string_stream(msg, _SENDER_NAME_ID)
+    email_addr = _string_stream(msg, _SENDER_SMTP_ID) or _string_stream(msg, _SENDER_EMAIL_ID)
     if not name and not email_addr:
         return None
     return _address(name, email_addr)
@@ -236,13 +271,71 @@ def _build_body(msg) -> Body:
 
     ``html_raw`` is stored for analysis only and is NEVER rendered (PRD §10),
     exactly as on the .eml path.
+
+    HTML is read straight from the PR_HTML stream (``__substg1.0_10130102``), not
+    from ``extract-msg``'s ``htmlBody`` convenience property: for a plain-text
+    message the property *fabricates* HTML from the text body, which would set
+    ``has_html`` and feed downstream link/HTML analysis content the original
+    message never contained. ``has_html`` therefore reflects whether a real HTML
+    part was present, matching the .eml parser's semantics.
     """
     text = msg.body
-    html_bytes = msg.htmlBody
+    html_bytes = _get_stream(msg, _HTML_BODY_ID)
     html = None
     if html_bytes is not None:
-        html = html_bytes.decode("utf-8", errors="replace")
-    return Body(text=text, html_raw=html, has_html=bool(html))
+        html = _decode_html(bytes(html_bytes), msg)
+    return Body(text=text, html_raw=html, has_html=html is not None)
+
+
+def _get_stream(msg, stream_id: str) -> bytes | None:
+    """Read a raw MAPI stream, preferring extract-msg's public accessor."""
+    getter = getattr(msg, "getStream", None) or getattr(msg, "_getStream", None)
+    return getter(stream_id) if getter is not None else None
+
+
+# Scan the leading bytes of an HTML part for a declared charset (``<meta>``),
+# matching how the .eml path honours the part's declared charset.
+_META_CHARSET = re.compile(rb"""charset\s*=\s*["']?\s*([A-Za-z0-9_\-]+)""", re.IGNORECASE)
+
+
+def _decode_html(raw: bytes, msg) -> str:
+    """Decode PR_HTML bytes using the message's actual charset, leniently.
+
+    The PR_HTML stream is bytes in the message's code page (commonly
+    Windows-1252 or UTF-16, not UTF-8). We resolve the charset from a declared
+    ``<meta charset>`` first, then the message's internet code page, and decode
+    through the same lenient helper the .eml path uses — so non-ASCII text and
+    URLs survive intact for downstream IOC analysis instead of being mangled by
+    an unconditional UTF-8 decode.
+    """
+    return _decode_bytes(raw, _html_charset(raw, msg))
+
+
+def _html_charset(raw: bytes, msg) -> str | None:
+    match = _META_CHARSET.search(raw[:2048])
+    if match:
+        return match.group(1).decode("ascii", errors="replace")
+    cpid = getattr(msg.props.get(_INTERNET_CPID_PROP), "value", None)
+    if isinstance(cpid, int):
+        return _codepage_charset(cpid)
+    return None
+
+
+def _codepage_charset(cpid: int) -> str:
+    """Map a Windows code-page id (PR_INTERNET_CPID) to a Python codec name."""
+    special = {
+        65001: "utf-8",
+        1200: "utf-16-le",
+        1201: "utf-16-be",
+        20127: "ascii",
+        12000: "utf-32-le",
+        12001: "utf-32-be",
+    }
+    if cpid in special:
+        return special[cpid]
+    if 28591 <= cpid <= 28605:
+        return f"iso-8859-{cpid - 28590}"
+    return f"cp{cpid}"
 
 
 def _build_attachments(msg) -> list[Attachment]:
