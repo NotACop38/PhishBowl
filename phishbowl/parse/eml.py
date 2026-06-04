@@ -42,10 +42,10 @@ from phishbowl.models import (
 )
 
 from .addresses import parse_address_list, parse_single_address
-from .attachments import build_attachment, is_attachment, iter_parts
+from .attachments import build_attachment, is_attachment, iter_parts, parts_exceed_budget
 from .auth import parse_auth
 from .charset import decode_mime_words, decode_payload
-from .limits import MAX_INPUT_BYTES, read_within_limit
+from .limits import MAX_INPUT_BYTES, MAX_PARTS, read_within_limit
 from .routing import parse_routing
 
 T = TypeVar("T")
@@ -207,6 +207,20 @@ def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:
             parsed.anomalies.append(
                 Anomaly(code="mime_defect", message=f"{type(defect).__name__}: {defect}")
             )
+    # If the part walk hit the structural cap, body/attachment extraction dropped
+    # everything past it — note that explicitly so a malicious message can't pad
+    # thousands of harmless leaves ahead of a real attachment and have it vanish
+    # from the report with no trace (PRD §11 — degrade to a *noted* partial).
+    if parts_exceed_budget(msg):
+        parsed.anomalies.append(
+            Anomaly(
+                code="mime_truncated",
+                message=(
+                    f"message exceeds the {MAX_PARTS}-part structural cap; "
+                    "later MIME parts were not parsed"
+                ),
+            )
+        )
     if parsed.addresses.from_ is None:
         parsed.anomalies.append(
             Anomaly(code="missing_from", message="message has no parseable From address")

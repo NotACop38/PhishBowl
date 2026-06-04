@@ -31,6 +31,9 @@ MAX_INPUT_BYTES = 50 * 1024 * 1024
 # than chase an unbounded part explosion.
 MAX_PARTS = 2000
 
+# Chunk size for the bounded file read below.
+_READ_CHUNK = 1024 * 1024
+
 
 class InputTooLargeError(ValueError):
     """Raised when an input exceeds :data:`MAX_INPUT_BYTES`.
@@ -51,15 +54,29 @@ def _too_large(size: int) -> InputTooLargeError:
 def read_within_limit(path: Path) -> bytes:
     """Read ``path`` as bytes, refusing anything over :data:`MAX_INPUT_BYTES`.
 
-    The size is checked from ``stat`` *before* the file is read, so an
-    oversized input is rejected without being loaded into memory. The decoded
-    length is re-checked after reading to close any stat/read race (e.g. a
-    symlinked or growing file).
+    ``stat`` is checked first as a cheap early reject, but it is not trusted as
+    the final word: a symlink, a special file (e.g. a FIFO that reports size 0
+    but streams forever), or a file that grows between ``stat`` and the read
+    could otherwise slurp an unbounded stream into memory. So the bytes are read
+    in bounded chunks up to exactly one byte past the cap and rejected if that
+    much arrives — the input is never fully loaded before the limit is enforced.
     """
     size = path.stat().st_size
     if size > MAX_INPUT_BYTES:
         raise _too_large(size)
-    data = path.read_bytes()
+
+    # Read at most MAX_INPUT_BYTES + 1 bytes: enough to know the input is over
+    # the cap, never more.
+    remaining = MAX_INPUT_BYTES + 1
+    chunks: list[bytes] = []
+    with path.open("rb") as fh:
+        while remaining > 0:
+            chunk = fh.read(min(_READ_CHUNK, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    data = b"".join(chunks)
     if len(data) > MAX_INPUT_BYTES:
         raise _too_large(len(data))
     return data

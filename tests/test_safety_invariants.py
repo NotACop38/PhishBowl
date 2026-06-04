@@ -315,7 +315,9 @@ def test_secret_check_would_catch_a_leak() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_oversized_file_is_refused_before_being_read(tmp_path: Path) -> None:
+def test_oversized_file_is_refused_before_being_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from phishbowl.parse import limits
 
     big = tmp_path / "huge.eml"
@@ -323,13 +325,30 @@ def test_oversized_file_is_refused_before_being_read(tmp_path: Path) -> None:
     # Shrink the limit instead of writing a 50 MiB file: the guard must reject
     # any input whose size exceeds the cap, cleanly (a ValueError the CLI turns
     # into a friendly message), without slurping it into memory.
-    monkey = pytest.MonkeyPatch()
-    monkey.setattr(limits, "MAX_INPUT_BYTES", 4)
-    try:
-        with pytest.raises(ValueError):
-            limits.read_within_limit(big)
-    finally:
-        monkey.undo()
+    monkeypatch.setattr(limits, "MAX_INPUT_BYTES", 4)
+    with pytest.raises(ValueError):
+        limits.read_within_limit(big)
+
+
+def test_oversized_input_rejected_even_when_stat_under_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A special/symlinked/growing file can report a tiny size from stat() yet
+    # stream far more bytes. The bounded chunked read must still reject it rather
+    # than slurp the whole stream: here stat() is forced to lie (size 0) while the
+    # real file is well over the (shrunk) cap.
+    import types
+
+    from phishbowl.parse import limits
+
+    f = tmp_path / "liar.eml"
+    f.write_bytes(b"A" * 64)
+    monkeypatch.setattr(limits, "MAX_INPUT_BYTES", 8)
+    # read_within_limit only reads st_size; force it to under-report.
+    monkeypatch.setattr(Path, "stat", lambda self, *a, **k: types.SimpleNamespace(st_size=0))
+
+    with pytest.raises(ValueError):
+        limits.read_within_limit(f)
 
 
 def test_oversized_bytes_degrade_to_noted_partial(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -343,32 +362,51 @@ def test_oversized_bytes_degrade_to_noted_partial(monkeypatch: pytest.MonkeyPatc
     assert any(a.code == "input_too_large" for a in parsed.anomalies)
 
 
-def test_deeply_nested_multipart_is_walked_under_a_bound() -> None:
-    # A pathological multipart tree (a "MIME bomb") must be parsed under the part
-    # cap rather than walked unbounded — and never crash the pipeline.
-    from phishbowl.parse.attachments import iter_parts
-
+def _fan_out_multipart(n: int) -> bytes:
+    """A multipart/mixed message with ``n`` sibling text leaves under one container."""
     raw = [
         b"From: a@example.com\r\n",
         b"Subject: nested\r\n",
         b'Content-Type: multipart/mixed; boundary="b0"\r\n\r\n',
     ]
-    # 200 sibling text parts under one multipart container.
-    for i in range(200):
+    for i in range(n):
         raw.append(b"--b0\r\nContent-Type: text/plain\r\n\r\npart %d\r\n" % i)
     raw.append(b"--b0--\r\n")
-    parsed = parse_eml_bytes(b"".join(raw))
-    assert parsed.subject == "nested"
+    return b"".join(raw)
 
-    # The bounded walker yields at most `max_parts` leaves on a hostile tree.
+
+def test_deeply_nested_multipart_is_walked_under_a_bound() -> None:
+    # A pathological multipart tree (a "MIME bomb") must be parsed under the part
+    # cap rather than walked unbounded — and never crash the pipeline.
     import email as _email
 
-    msg = _email.message_from_bytes(b"".join(raw))
-    capped = list(iter_parts(msg, max_parts=5))
-    assert len(capped) == 5
-
-
-def parse_eml_bytes(data: bytes):
     from phishbowl.parse import parse_eml
+    from phishbowl.parse.attachments import iter_parts, parts_exceed_budget
 
-    return parse_eml(data, filename="nested.eml")
+    blob = _fan_out_multipart(200)
+    parsed = parse_eml(blob, filename="nested.eml")
+    assert parsed.subject == "nested"
+
+    # The bounded walker counts *every* node (the container included) toward the
+    # budget and stops, so a hostile tree yields no more than `max_parts` parts —
+    # truncated well short of the 200 leaves it actually contains.
+    msg = _email.message_from_bytes(blob)
+    capped = list(iter_parts(msg, max_parts=5))
+    assert 0 < len(capped) <= 5
+    # And the truncation is detectable, so the parser can note it.
+    assert parts_exceed_budget(msg, max_parts=5) is True
+    assert parts_exceed_budget(msg, max_parts=500) is False
+
+
+def test_truncated_mime_tree_is_noted_as_an_anomaly(monkeypatch: pytest.MonkeyPatch) -> None:
+    # When the structural cap drops parts, the parser must record it — an attacker
+    # padding thousands of harmless leaves ahead of a real attachment must not be
+    # able to make parsing silently truncate with no trace (PRD §11).
+    from phishbowl.parse import attachments, parse_eml
+
+    monkeypatch.setattr(attachments, "MAX_PARTS", 5)
+    parsed = parse_eml(_fan_out_multipart(50), filename="bomb.eml")
+    assert any(a.code == "mime_truncated" for a in parsed.anomalies)
+    # A small, in-bounds message is NOT flagged.
+    ok = parse_eml(_fan_out_multipart(2), filename="ok.eml")
+    assert not any(a.code == "mime_truncated" for a in ok.anomalies)

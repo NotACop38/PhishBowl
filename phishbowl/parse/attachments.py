@@ -218,40 +218,66 @@ def is_attachment(part: Message) -> bool:
     return maintype != "text"
 
 
-def iter_parts(part: Message, *, max_parts: int = MAX_PARTS):
+def iter_parts(part: Message, *, max_parts: int | None = None):
     """Walk a message, treating ``message/*`` parts as opaque attachment leaves.
 
     Unlike :meth:`email.message.Message.walk`, this does not descend into an
     attached ``message/rfc822``: the enclosed email is yielded whole (so it is
     hashed as one attachment) and its inner parts never leak into the outer
-    body or attachment set.
+    body or attachment set. Parts are yielded in document order (depth-first,
+    pre-order).
 
-    Defensive cap: at most ``max_parts`` leaves are yielded, so a multipart tree
-    engineered to explode into millions of parts (a "MIME bomb") is truncated
-    rather than walked unbounded (see :mod:`phishbowl.parse.limits`).
+    Defensive cap: the walk is **iterative** (no recursion) and counts *every*
+    node it visits — multipart containers included — toward ``max_parts``, then
+    stops. That bounds both a high-fan-out tree and a deeply *nested* one (a
+    "MIME bomb"), neither of which can drive unbounded work or blow the recursion
+    limit (see :mod:`phishbowl.parse.limits`). ``max_parts`` defaults to
+    :data:`MAX_PARTS`, read dynamically so tests can lower it.
     """
-    yielded = 0
-
-    def _walk(node: Message):
-        nonlocal yielded
-        if yielded >= max_parts:
+    limit = MAX_PARTS if max_parts is None else max_parts
+    visited = 0
+    stack: list[Message] = [part]
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > limit:
             return
         if node.get_content_maintype() == "message":
-            yielded += 1
+            # Opaque attachment leaf — yield whole, never descend into it.
             yield node
-            return
+            continue
         if node.is_multipart():
             payload = node.get_payload()
             if isinstance(payload, list):
-                for sub in payload:
-                    if yielded >= max_parts:
-                        return
-                    yield from _walk(sub)
-                return
-        yielded += 1
+                # Push children reversed so popping restores document order.
+                stack.extend(reversed(payload))
+                continue
         yield node
 
-    yield from _walk(part)
+
+def parts_exceed_budget(part: Message, *, max_parts: int | None = None) -> bool:
+    """True if the MIME tree visits more than ``max_parts`` nodes.
+
+    Mirrors :func:`iter_parts`' node accounting exactly, so it answers "did (or
+    would) the walk truncate?" — letting the parser record a structural anomaly
+    when parts are dropped rather than silently losing them. Bounded and
+    iterative: it stops counting one past the cap.
+    """
+    limit = MAX_PARTS if max_parts is None else max_parts
+    visited = 0
+    stack: list[Message] = [part]
+    while stack:
+        node = stack.pop()
+        visited += 1
+        if visited > limit:
+            return True
+        if node.get_content_maintype() == "message":
+            continue
+        if node.is_multipart():
+            payload = node.get_payload()
+            if isinstance(payload, list):
+                stack.extend(payload)
+    return False
 
 
 def detect_type(data: bytes) -> str | None:
