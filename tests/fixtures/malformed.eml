@@ -1,0 +1,10 @@
+From: "Broken Sender" <sender@example.com>
+To: analyst@example.org
+Subject: =?utf-8?B?not-valid-base64-here?=
+Date: not a real date
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="never-appears-0000"
+
+This synthetic sample is intentionally malformed: it declares a multipart
+boundary that never appears, an unparseable Date, and a broken encoded-word
+Subject. Phishbowl must degrade into a noted partial result, never crash.

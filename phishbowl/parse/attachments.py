@@ -1,0 +1,277 @@
+"""Attachment inspection (PRD §6.1 / §7 — *Attachments*).
+
+Attachments are described by **metadata and hashes only**. Phishbowl never
+executes an attachment and never extracts an archive (CLAUDE.md defensive
+invariants): we read the bytes, hash them, sniff a handful of magic-byte
+signatures, and set structural red-flags from the filename + declared type +
+detected type. Nothing here opens, runs, or unpacks anything.
+
+Flags set (mirrors :class:`AttachmentFlag`):
+
+- ``ARCHIVE`` — detected as a real archive container (zip/rar/7z/gz/…), but not
+  an Office Open XML document (those are zip-based yet aren't "archives").
+- ``MACRO_CAPABLE`` — macro-enabled Office extension (``.docm`` / ``.xlsm`` / …).
+- ``EXECUTABLE`` — executable / script / installer / LNK / ISO / disk-image, by
+  magic bytes or extension.
+- ``TYPE_MISMATCH`` — declared content-type disagrees with the detected family.
+- ``DOUBLE_EXTENSION`` — ``invoice.pdf.exe``-style trailing dangerous extension.
+- ``PASSWORD_PROTECTED`` — zip with its encryption bit set (best-effort).
+"""
+
+from __future__ import annotations
+
+import hashlib
+import struct
+from email.message import Message
+
+from phishbowl.models import Attachment, AttachmentFlag
+
+from .charset import decode_mime_words
+
+# --- Magic-byte signatures -------------------------------------------------
+# (prefix, detected content-type). Order matters: more specific first. We only
+# ever read the leading bytes; we never interpret or run the content.
+_SIGNATURES: list[tuple[bytes, str]] = [
+    (b"%PDF-", "application/pdf"),
+    (b"\x89PNG\r\n\x1a\n", "image/png"),
+    (b"\xff\xd8\xff", "image/jpeg"),
+    (b"GIF87a", "image/gif"),
+    (b"GIF89a", "image/gif"),
+    (b"\x7fELF", "application/x-executable"),
+    (b"MZ", "application/x-dosexec"),
+    (b"PK\x03\x04", "application/zip"),
+    (b"PK\x05\x06", "application/zip"),  # empty archive
+    (b"Rar!\x1a\x07", "application/x-rar-compressed"),
+    (b"7z\xbc\xaf\x27\x1c", "application/x-7z-compressed"),
+    (b"\x1f\x8b", "application/gzip"),
+    (b"BZh", "application/x-bzip2"),
+    (b"\xfd7zXZ\x00", "application/x-xz"),
+    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "application/x-ole-storage"),
+    (b"{\\rtf", "application/rtf"),
+]
+
+# Detected types that are archive containers.
+_ARCHIVE_TYPES = {
+    "application/zip",
+    "application/x-rar-compressed",
+    "application/x-7z-compressed",
+    "application/gzip",
+    "application/x-bzip2",
+    "application/x-xz",
+}
+
+# Detected types that are executable / runnable.
+_EXECUTABLE_TYPES = {"application/x-dosexec", "application/x-executable"}
+
+# Extensions that make an attachment directly dangerous (executable / script /
+# installer / shortcut / disk image), used for the EXECUTABLE and
+# DOUBLE_EXTENSION flags (PRD §8).
+_DANGEROUS_EXTS = {
+    "exe",
+    "scr",
+    "com",
+    "pif",
+    "bat",
+    "cmd",
+    "msi",
+    "dll",
+    "cpl",
+    "js",
+    "jse",
+    "vbs",
+    "vbe",
+    "wsf",
+    "wsh",
+    "hta",
+    "ps1",
+    "psm1",
+    "jar",
+    "lnk",
+    "iso",
+    "img",
+    "vhd",
+    "vhdx",
+}
+
+# Macro-enabled Office Open XML extensions.
+_MACRO_EXTS = {
+    "docm",
+    "dotm",
+    "xlsm",
+    "xltm",
+    "xlam",
+    "pptm",
+    "potm",
+    "ppam",
+    "sldm",
+}
+
+# Office Open XML (zip-based) extensions — zip magic on these is expected and
+# must NOT be flagged ARCHIVE or as a type mismatch.
+_OOXML_EXTS = {
+    "docx",
+    "dotx",
+    "xlsx",
+    "xltx",
+    "pptx",
+    "potx",
+    "ppsx",
+} | _MACRO_EXTS
+
+# Map declared content-types and detected types to a coarse "family" for the
+# mismatch check. ``None`` means "ambiguous — don't judge".
+_DECLARED_FAMILY = {
+    "application/pdf": "pdf",
+    "application/rtf": "rtf",
+    "text/rtf": "rtf",
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/gif": "image",
+    "application/zip": "zip",
+    "application/x-zip-compressed": "zip",
+    "application/gzip": "archive",
+    "application/x-rar-compressed": "archive",
+    "application/x-7z-compressed": "archive",
+}
+_DETECTED_FAMILY = {
+    "application/pdf": "pdf",
+    "application/rtf": "rtf",
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/gif": "image",
+    "application/zip": "zip",
+    "application/x-rar-compressed": "archive",
+    "application/x-7z-compressed": "archive",
+    "application/gzip": "archive",
+    "application/x-bzip2": "archive",
+    "application/x-xz": "archive",
+    "application/x-dosexec": "executable",
+    "application/x-executable": "executable",
+}
+
+
+def is_attachment(part: Message) -> bool:
+    """True if ``part`` is an attachment rather than a body part.
+
+    A part counts as an attachment when it is explicitly dispositioned as one,
+    carries a filename, or is a non-text leaf (e.g. an inline image). Multipart
+    containers and plain text/html body parts are not attachments.
+    """
+    if part.is_multipart():
+        return False
+    # A part that declares multipart but failed to split (malformed boundary)
+    # is a parse artifact, not a real attachment.
+    if part.get_content_maintype() == "multipart":
+        return False
+    disposition = part.get_content_disposition()
+    if disposition == "attachment":
+        return True
+    if part.get_filename() is not None:
+        return True
+    if disposition == "inline":
+        return True
+    return part.get_content_maintype() != "text"
+
+
+def detect_type(data: bytes) -> str | None:
+    """Sniff a content-type from leading magic bytes, or ``None`` if unknown."""
+    for prefix, content_type in _SIGNATURES:
+        if data.startswith(prefix):
+            return content_type
+    return None
+
+
+def _extensions(filename: str | None) -> list[str]:
+    """Lowercased extension tokens of ``filename`` (``a.pdf.exe`` → pdf, exe)."""
+    if not filename:
+        return []
+    name = filename.strip().rstrip(".")
+    parts = name.split(".")
+    return [p.casefold() for p in parts[1:]] if len(parts) > 1 else []
+
+
+def _zip_is_encrypted(data: bytes) -> bool:
+    """Best-effort: is bit 0 of the zip local-file general-purpose flag set?
+
+    We only read the fixed local file header — never inflate or extract.
+    """
+    if not data.startswith(b"PK\x03\x04") or len(data) < 8:
+        return False
+    try:
+        (flags,) = struct.unpack_from("<H", data, 6)
+    except struct.error:
+        return False
+    return bool(flags & 0x0001)
+
+
+def _flags(
+    filename: str | None,
+    declared_type: str | None,
+    detected_type: str | None,
+    data: bytes,
+) -> list[AttachmentFlag]:
+    flags: list[AttachmentFlag] = []
+    exts = _extensions(filename)
+    last_ext = exts[-1] if exts else None
+    is_ooxml = bool(exts) and last_ext in _OOXML_EXTS
+
+    # ARCHIVE — a real archive container, but not a zip-based Office document.
+    if detected_type in _ARCHIVE_TYPES and not is_ooxml:
+        flags.append(AttachmentFlag.ARCHIVE)
+    elif last_ext in {"zip", "rar", "7z", "gz", "tar", "bz2", "xz", "cab"}:
+        flags.append(AttachmentFlag.ARCHIVE)
+
+    # MACRO_CAPABLE — macro-enabled Office extension.
+    if last_ext in _MACRO_EXTS:
+        flags.append(AttachmentFlag.MACRO_CAPABLE)
+
+    # EXECUTABLE — by magic bytes or by dangerous extension.
+    if detected_type in _EXECUTABLE_TYPES or last_ext in _DANGEROUS_EXTS:
+        flags.append(AttachmentFlag.EXECUTABLE)
+
+    # DOUBLE_EXTENSION — two-plus extensions ending in a dangerous one.
+    if len(exts) >= 2 and last_ext in _DANGEROUS_EXTS:
+        flags.append(AttachmentFlag.DOUBLE_EXTENSION)
+
+    # TYPE_MISMATCH — declared family known and contradicts the detected family.
+    declared_family = _DECLARED_FAMILY.get((declared_type or "").casefold())
+    detected_family = _DETECTED_FAMILY.get(detected_type or "")
+    if declared_family and detected_family and declared_family != detected_family:
+        # Office docs declare specific types but are zip on disk — not a mismatch.
+        if not (is_ooxml and detected_family == "zip"):
+            flags.append(AttachmentFlag.TYPE_MISMATCH)
+
+    # PASSWORD_PROTECTED — encrypted zip (best-effort, header flag only).
+    if _zip_is_encrypted(data):
+        flags.append(AttachmentFlag.PASSWORD_PROTECTED)
+
+    return flags
+
+
+def build_attachment(part: Message) -> Attachment:
+    """Hash and inspect one attachment part into an :class:`Attachment`.
+
+    Reads the bytes to hash and sniff them — never executes, never extracts.
+    """
+    filename = decode_mime_words(part.get_filename())
+    declared_type = part.get_content_type()
+
+    try:
+        data = part.get_payload(decode=True)
+    except Exception:
+        data = None
+    if data is None:
+        data = b""
+
+    detected_type = detect_type(data) if data else None
+
+    return Attachment(
+        filename=filename,
+        declared_type=declared_type,
+        detected_type=detected_type,
+        size=len(data),
+        md5=hashlib.md5(data).hexdigest(),
+        sha1=hashlib.sha1(data).hexdigest(),
+        sha256=hashlib.sha256(data).hexdigest(),
+        flags=_flags(filename, declared_type, detected_type, data),
+    )

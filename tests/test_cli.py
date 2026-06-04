@@ -1,52 +1,44 @@
-"""Tests for the stub ``analyze`` CLI command (Phase 0).
+"""Tests for the ``analyze`` CLI command (Phase 1).
 
-The pipeline isn't built yet; all we assert is that the command loads the
-synthetic fixture into a ``ParsedEmail`` with a populated ``Source`` and
-rejects bad input gracefully (no crash, no parsing).
+``analyze`` now runs the real ``.eml`` parser and prints a summary. We assert
+the command parses the synthetic fixture and surfaces key facts, and that bad
+input degrades into a clean CLI error rather than a traceback.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 from typer.testing import CliRunner
 
-from phishbowl.cli import app, load_stub
-from phishbowl.models import EmailFormat, ParsedEmail
+from phishbowl.cli import app
 
 FIXTURE = Path(__file__).parent / "fixtures" / "benign_newsletter.eml"
 
 runner = CliRunner()
 
 
-def test_load_stub_returns_parsed_email_with_source() -> None:
-    parsed = load_stub(FIXTURE)
-
-    assert isinstance(parsed, ParsedEmail)
-    assert parsed.source.filename == "benign_newsletter.eml"
-    assert parsed.source.format is EmailFormat.EML
-    assert parsed.source.parser_version
-    # Stub only: nothing downstream of Source is populated yet.
-    assert len(parsed.headers) == 0
-    assert parsed.subject is None
-
-
-def test_load_stub_rejects_unsupported_suffix(tmp_path: Path) -> None:
-    bogus = tmp_path / "notes.txt"
-    bogus.write_text("not an email")
-    with pytest.raises(ValueError):
-        load_stub(bogus)
-
-
-def test_load_stub_missing_file() -> None:
-    with pytest.raises(FileNotFoundError):
-        load_stub("/does/not/exist.eml")
-
-
-def test_analyze_command_runs_on_fixture() -> None:
+def test_analyze_command_parses_fixture() -> None:
     result = runner.invoke(app, ["analyze", str(FIXTURE)])
 
     assert result.exit_code == 0
     assert "benign_newsletter.eml" in result.stdout
     assert "format=eml" in result.stdout
+    # The summary reflects real parsing, not a stub.
+    assert "Your weekly Example.com community digest" in result.stdout
+    assert "newsletter@example.com" in result.stdout
+
+
+def test_analyze_command_rejects_unsupported_suffix(tmp_path: Path) -> None:
+    bogus = tmp_path / "notes.txt"
+    bogus.write_text("not an email")
+
+    result = runner.invoke(app, ["analyze", str(bogus)])
+
+    assert result.exit_code != 0
+
+
+def test_analyze_command_missing_file() -> None:
+    result = runner.invoke(app, ["analyze", "/does/not/exist.eml"])
+
+    assert result.exit_code != 0

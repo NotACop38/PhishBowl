@@ -1,0 +1,46 @@
+Return-Path: <accounts@example.com>
+Received: from mail.example.com (mail.example.com [192.0.2.10])
+	by mx.example.org (Postfix) with ESMTPS id GHI789
+	for <analyst@example.org>; Wed, 03 Jun 2026 14:20:11 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=pass smtp.mailfrom=example.com;
+	dkim=pass header.d=example.com header.s=selector1;
+	dmarc=pass header.from=example.com
+From: "Example Accounts" <accounts@example.com>
+To: "Analyst" <analyst@example.org>
+Subject: Your June statement and a flagged update
+Date: Wed, 03 Jun 2026 14:20:00 +0000
+Message-ID: <20260603142000.0007@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="attach-boundary-0007"
+
+This is a multi-part message in MIME format.
+--attach-boundary-0007
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Hello,
+
+Attached is your synthetic June statement (report.pdf). This is an
+obviously-benign Phishbowl test sample using reserved example-only values.
+
+A second attachment is included purely to exercise structural detection: it
+uses a double extension and is NOT a real executable.
+
+-- The Example.com accounts team
+--attach-boundary-0007
+Content-Type: application/pdf; name="report.pdf"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="report.pdf"
+
+JVBERi0xLjQKMSAwIG9iaiA8PCAvVHlwZSAvQ2F0YWxvZyAvUGFnZXMgMiAwIFIgPj4gZW5kb2Jq
+CiUgU3ludGhldGljIFBoaXNoYm93bCB0ZXN0IFBERiAtIG5vdCBhIHJlYWwgZG9jdW1lbnQuCnRy
+YWlsZXIgPDwgL1Jvb3QgMSAwIFIgPj4KJSVFT0YK
+--attach-boundary-0007
+Content-Type: application/octet-stream; name="ledger-update.pdf.exe"
+Content-Transfer-Encoding: base64
+Content-Disposition: attachment; filename="ledger-update.pdf.exe"
+
+TVqQAAMAAAAEAFBISVNIQk9XTC1TWU5USEVUSUMtTk9ULUEtUkVBTC1CSU5BUlkAUEhJU0hCT1dM
+LVNZTlRIRVRJQy1OT1QtQS1SRUFMLUJJTkFSWQA=
+--attach-boundary-0007--
