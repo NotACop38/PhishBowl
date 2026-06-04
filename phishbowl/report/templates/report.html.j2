@@ -328,6 +328,34 @@
       </div>
     </div>
 
+    {# ---------- Enrichment (OSINT connectors) ---------- #}
+    {% if r.enrichment.enabled %}
+    <div class="card span">
+      <div class="card-h"><h2>Enrichment · OSINT</h2>
+        <span class="count">{{ r.enrichment.used }} of {{ r.enrichment.connectors | length }} connector{{ "" if r.enrichment.connectors|length == 1 else "s" }} used</span></div>
+      <div class="card-b flush">
+        <table>
+          <thead><tr><th>Connector</th><th>Status</th><th>Detail</th><th>References (defanged)</th></tr></thead>
+          <tbody>
+          {% for c in r.enrichment.connectors %}
+            {% set ocls = "ok" if c.outcome == "used" else ("warn" if c.outcome == "failed" else "") %}
+            <tr>
+              <td><span class="name">{{ c.connector }}</span><div class="prov">v{{ c.version }}</div></td>
+              <td><span class="chip {{ ocls }}">{{ c.outcome }}</span></td>
+              <td>{{ c.note }}</td>
+              <td class="mono">
+                {%- for ref in c.references %}{{ ref }}{% if not loop.last %}<br>{% endif %}{% endfor %}
+                {%- if not c.references %}<span class="empty">—</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="card-b"><p class="prov">Enrichment augments the offline verdict — it never gates it.
+        Points it contributed appear in the score breakdown above, tagged <b>enrichment</b>.</p></div>
+    </div>
+    {% endif %}
+
     {# ---------- Authentication ---------- #}
     <div class="card">
       <div class="card-h"><h2>Authentication</h2></div>

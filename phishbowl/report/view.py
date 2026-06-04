@@ -23,14 +23,18 @@ Guarantees baked into the view:
 from __future__ import annotations
 
 import re
+from typing import TYPE_CHECKING
 
 from pydantic import Field
 
-from phishbowl.extract import defang, defang_text
+from phishbowl.extract import defang, defang_text, defang_url
 from phishbowl.models import IOCs, IOCType, ParsedEmail, PhishbowlModel
 from phishbowl.score import ScoreResult, ScoringConfig, load_config
 
 from .redact import RedactionPolicy, Redactor
+
+if TYPE_CHECKING:
+    from phishbowl.connectors import EnrichmentReport
 
 __version__ = "phishbowl/0.1.0"
 
@@ -150,6 +154,37 @@ class RedactionView(PhishbowlModel):
     categories: list[str] = Field(default_factory=list)
 
 
+class ConnectorStatusView(PhishbowlModel):
+    """One connector's outcome for the run (PRD §9): used / skipped / failed."""
+
+    connector: str
+    version: str
+    outcome: str  # used | skipped | failed
+    note: str
+    queried: int = 0
+    cache_hits: int = 0
+    flagged: int = 0  # how many enriched indicators carried a scoring signal
+    references: list[str] = Field(default_factory=list)  # defanged for display
+    references_raw: list[str] = Field(default_factory=list)  # clearly-labelled raw, for tooling
+
+
+class EnrichmentView(PhishbowlModel):
+    """The enrichment summary shown in every output (PRD §9).
+
+    ``enabled`` is ``False`` for the default offline run (no connectors invoked),
+    in which case renderers omit the section entirely. The enrichment-derived
+    *points* live in ``fired_rules`` tagged ``enrichment``; this is the
+    per-connector status panel (who was used, skipped, or failed, and why).
+    """
+
+    enabled: bool = False
+    connectors: list[ConnectorStatusView] = Field(default_factory=list)
+
+    @property
+    def used(self) -> int:
+        return sum(1 for c in self.connectors if c.outcome == "used")
+
+
 class ReportView(PhishbowlModel):
     """Everything a renderer needs, already defanged, redacted, and labelled."""
 
@@ -188,6 +223,7 @@ class ReportView(PhishbowlModel):
 
     anomalies: list[AnomalyView] = Field(default_factory=list)
     redaction: RedactionView
+    enrichment: EnrichmentView = Field(default_factory=EnrichmentView)
 
 
 # IOC type → display order and human label.
@@ -288,6 +324,46 @@ def _body(parsed: ParsedEmail) -> tuple[str | None, str | None]:
     return None, "No body content was parsed from this message."
 
 
+def _enrichment_view(enrichment: EnrichmentReport | None) -> EnrichmentView:
+    """Prepare the per-connector enrichment summary, references defanged (PRD §9, §10).
+
+    References (vendor pivot links) are defanged for human-facing display just
+    like every other indicator, with the raw form kept in a clearly-labelled
+    field for tooling — the same dual-channel contract the IOC tables use. Notes
+    are control-stripped; they are tool-authored, not email-derived, but the
+    strip is cheap insurance.
+    """
+    if enrichment is None or not enrichment.enabled:
+        return EnrichmentView(enabled=False)
+    connectors: list[ConnectorStatusView] = []
+    for status in enrichment.statuses:
+        raw_refs = _dedup_refs(ref for result in status.results for ref in result.references)
+        connectors.append(
+            ConnectorStatusView(
+                connector=status.connector,
+                version=status.version,
+                outcome=status.outcome.value,
+                note=_clean(status.note) or "",
+                queried=status.queried,
+                cache_hits=status.cache_hits,
+                flagged=sum(1 for result in status.results if result.signals),
+                references=[defang_url(ref) for ref in raw_refs],
+                references_raw=list(raw_refs),
+            )
+        )
+    return EnrichmentView(enabled=True, connectors=connectors)
+
+
+def _dedup_refs(refs) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for ref in refs:
+        if ref and ref not in seen:
+            seen.add(ref)
+            out.append(ref)
+    return out
+
+
 def build_report(
     parsed: ParsedEmail,
     iocs: IOCs,
@@ -295,12 +371,16 @@ def build_report(
     *,
     policy: RedactionPolicy | None = None,
     config: ScoringConfig | None = None,
+    enrichment: EnrichmentReport | None = None,
 ) -> ReportView:
     """Assemble the single, fully-prepared :class:`ReportView` (PRD §10).
 
     All defanging, control-stripping, and redaction happen here so the three
     renderers downstream are pure presentation. ``config`` (the scoring config)
     supplies the org-domain set redaction needs; it is loaded if not provided.
+    ``enrichment`` (when supplied) drives the per-connector status panel; its
+    scored points already arrive folded into ``result.fired`` tagged
+    ``enrichment``.
     """
     policy = policy or RedactionPolicy.disabled()
     config = config or load_config()
@@ -401,4 +481,5 @@ def build_report(
             enabled=redactor.active,
             categories=sorted(redactor.triggered),
         ),
+        enrichment=_enrichment_view(enrichment),
     )

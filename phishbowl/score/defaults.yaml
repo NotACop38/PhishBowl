@@ -40,9 +40,10 @@
 #   * Content/urgency keywords are deliberately the weakest (4): high
 #     false-positive rate, so they only ever nudge a verdict, never make it.
 #
-# Enrichment weights (VirusTotal, urlscan, ...) are NOT defined here yet: they
-# land in Phase 5 and will be tagged [enrichment]. The offline verdict is always
-# computed independently of them (PRD §8 combination rule).
+# Enrichment weights (VirusTotal, urlscan, ...) live under `weights:` below,
+# tagged [enrichment] in every output and only ever ADDED on top of the offline
+# base. The offline verdict is always computed independently of them (PRD §8
+# combination rule), so a zero-key run is unaffected.
 
 weights:
   # --- Authentication (PRD §8) ---
@@ -80,6 +81,19 @@ weights:
 
   # --- Weak content signals (PRD §8 — deliberately low) ---
   content.urgency_keywords: 4
+
+  # --- Enrichment (PRD §8/§9) — only ever ADD on top of the offline base, and
+  # only when the operator opts in with API keys. Each is tagged [enrichment] in
+  # every output. Signals whose magnitude is "scaled" multiply the base weight by
+  # a 0..1 factor the connector computes (a VirusTotal detection ratio, an
+  # AbuseIPDB confidence fraction); fixed signals use the full base weight. The
+  # offline verdict is always computed independently of every one of these, and
+  # setting any to 0 disables that enrichment signal without touching code.
+  enrichment.virustotal.detections: 45    # scaled by detection ratio
+  enrichment.urlscan.malicious: 20        # urlscan judged a prior scan malicious
+  enrichment.abuseipdb.confidence: 25     # scaled by abuse-confidence fraction
+  enrichment.rdap.young_domain: 18        # domain registered < 30 days ago (strong)
+  enrichment.shodan.exposed: 6            # exposed services on a related IP (contextual)
 
 # Verdict bands (PRD §8). The first band whose ``max`` the score is <= wins, so
 # these MUST be listed low-to-high and the last one MUST be 100.

@@ -170,9 +170,24 @@ Default weights from [`defaults.yaml`](../phishbowl/score/defaults.yaml). All ar
 |---------|:------:|------------|
 | `content.urgency_keywords` | 4 | Urgency / financial-pressure phrases. Low weight on purpose — high false-positive rate, so it only ever *nudges*. |
 
-> **Enrichment rules** (VirusTotal, urlscan, AbuseIPDB, RDAP domain-age, Shodan)
-> are **not** in `defaults.yaml` yet — they land in Phase 5 and will be tagged
-> `[enrichment]`. The offline verdict is always computed independently of them.
+### Enrichment (opt-in, key-gated)
+
+These fire only when you run with `--enrich` and the relevant API key is set.
+Every one is tagged `[enrichment]` in all outputs and only ever **adds** on top
+of the offline base — the offline verdict is always computed independently
+(PRD §8 combination rule), so a zero-key run is unaffected. A signal marked
+*scaled* multiplies its base weight by a `0..1` factor the connector computes.
+
+| Rule ID | Default | Fires when |
+|---------|:------:|------------|
+| `enrichment.virustotal.detections` | 45 | VirusTotal engines flag the URL/domain/hash (*scaled* by detection ratio). |
+| `enrichment.urlscan.malicious` | 20 | urlscan judged a prior scan of the host malicious. |
+| `enrichment.abuseipdb.confidence` | 25 | AbuseIPDB abuse confidence over threshold for the sending IP (*scaled* by confidence). |
+| `enrichment.rdap.young_domain` | 18 | Domain registered < 30 days ago — a strong phishing signal. |
+| `enrichment.shodan.exposed` | 6 | Related IP exposes admin/remote-access services (contextual). |
+
+Disable any of them — like any rule — by setting its weight to `0`. See the
+[connector-authoring guide](CONNECTORS.md) to add your own.
 
 ---
 
