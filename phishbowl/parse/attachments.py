@@ -348,17 +348,18 @@ def _attachment_bytes(part: Message) -> bytes:
     return b""
 
 
-def build_attachment(part: Message) -> Attachment:
-    """Hash and inspect one attachment part into an :class:`Attachment`.
+def build_attachment_from_bytes(
+    filename: str | None, declared_type: str | None, data: bytes
+) -> Attachment:
+    """Hash and inspect raw attachment ``data`` into an :class:`Attachment`.
 
-    Reads the bytes to hash and sniff them — never executes, never extracts.
+    The format-agnostic core of attachment inspection: it works purely from a
+    filename, a declared content-type, and the bytes, so both the ``.eml`` (MIME
+    part) and ``.msg`` (MAPI stream) paths produce identical :class:`Attachment`
+    shapes — same hashes, same magic-byte detection, same structural flags.
+    Reads the bytes only to hash and sniff them — never executes, never extracts.
     """
-    filename = decode_mime_words(part.get_filename())
-    declared_type = part.get_content_type()
-
-    data = _attachment_bytes(part)
     detected_type = detect_type(data) if data else None
-
     return Attachment(
         filename=filename,
         declared_type=declared_type,
@@ -368,4 +369,16 @@ def build_attachment(part: Message) -> Attachment:
         sha1=hashlib.sha1(data).hexdigest(),
         sha256=hashlib.sha256(data).hexdigest(),
         flags=_flags(filename, declared_type, detected_type, data),
+    )
+
+
+def build_attachment(part: Message) -> Attachment:
+    """Hash and inspect one MIME attachment ``part`` into an :class:`Attachment`.
+
+    Reads the bytes to hash and sniff them — never executes, never extracts.
+    """
+    return build_attachment_from_bytes(
+        filename=decode_mime_words(part.get_filename()),
+        declared_type=part.get_content_type(),
+        data=_attachment_bytes(part),
     )
