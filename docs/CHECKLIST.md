@@ -76,17 +76,17 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 
 **Decision gates:**
 - [x] YAML-defined additive weighted rules (locked).
-- [ ] **Calibrate starting weights + verdict bands** against the synthetic fixture set (this is the right phase to set numbers).
+- [x] **Calibrate starting weights + verdict bands** against the synthetic fixture set (this is the right phase to set numbers).
 - [x] Org-domain config ships now (PRD §12, locked).
 
 **Tasks:**
-- [ ] Rule engine: each rule = `{id, description, weight, source: offline|enrichment, detector}`.
-- [ ] Implement offline detectors from the §8 catalog (auth, identity/spoofing, domain/URL incl. punycode + IDN homograph + lookalike, attachments, weak content signals).
-- [ ] YAML weights file + loader + override mechanism.
-- [ ] Scorer: sum triggered weights → 0–100 → verdict band; emit per-rule reasons with evidence; tag each by source.
-- [ ] Guards: no double-counting; offline verdict always computed independent of enrichment.
-- [ ] Calibrate weights/bands against fixtures; document rationale.
-- [ ] Tests: each detector fires on a crafted fixture and stays silent otherwise; benign sample scores low; crafted-malicious sample scores high.
+- [x] Rule engine: each rule = `{id, description, weight, source: offline|enrichment, detector}`.
+- [x] Implement offline detectors from the §8 catalog (auth, identity/spoofing, domain/URL incl. punycode + IDN homograph + lookalike, attachments, weak content signals).
+- [x] YAML weights file + loader + override mechanism.
+- [x] Scorer: sum triggered weights → 0–100 → verdict band; emit per-rule reasons with evidence; tag each by source.
+- [x] Guards: no double-counting; offline verdict always computed independent of enrichment.
+- [x] Calibrate weights/bands against fixtures; document rationale.
+- [x] Tests: each detector fires on a crafted fixture and stays silent otherwise; benign sample scores low; crafted-malicious sample scores high.
 
 **DoD:** Running the scorer on fixtures yields sensible verdicts with traceable reasons; weights editable via YAML; every reason cites its evidence and source.
 
