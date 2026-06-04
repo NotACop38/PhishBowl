@@ -1,0 +1,29 @@
+Return-Path: <bounce@evil.example>
+Received: from unknown (unknown [203.0.113.66])
+	by mx.example.org (Postfix) with ESMTP id BAD666
+	for <analyst@example.org>; Wed, 03 Jun 2026 02:05:09 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=fail (example.org: domain of example.com does not designate 203.0.113.66 as permitted sender) smtp.mailfrom=example.com;
+	dkim=fail (signature verification failed) header.d=example.com header.s=selector1;
+	dmarc=fail (p=reject) header.from=example.com
+Received-SPF: fail (example.org: domain of example.com does not designate 203.0.113.66 as permitted sender) client-ip=203.0.113.66;
+From: =?utf-8?B?RXhhbXBsw6kgU2VjdXJpdHkgVGVhbQ==?= <security@example.com>
+Reply-To: "Account Recovery" <recovery@evil.example>
+Sender: <relay@evil.example>
+To: "Analyst" <analyst@example.org>
+Subject: =?utf-8?Q?Account_suspended_=E2=80=94_verify_now?=
+Date: Wed, 03 Jun 2026 02:05:00 +0000
+Message-ID: <20260603020500.0666@evil.example>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+This is a synthetic, obviously-fake phishing-style sample for Phishbowl's test
+suite. All authentication results fail and the Reply-To / Return-Path / Sender
+domains diverge from the From domain on purpose.
+
+Every indicator uses reserved values: example.com / example.org (RFC 2606) and
+evil.example, with 203.0.113.66 from TEST-NET-3 (RFC 5737). Nothing here is
+real and there is nothing to action.
+
+-- Not really the Example.com security team
