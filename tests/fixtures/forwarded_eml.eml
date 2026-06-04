@@ -1,0 +1,40 @@
+Return-Path: <soc@example.org>
+Received: from mail.example.org (mail.example.org [192.0.2.30])
+	by mx.example.org (Postfix) with ESMTPS id JKL012
+	for <analyst@example.org>; Wed, 03 Jun 2026 16:00:05 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=pass smtp.mailfrom=example.org;
+	dkim=pass header.d=example.org;
+	dmarc=pass header.from=example.org
+From: "SOC Mailbox" <soc@example.org>
+To: "Analyst" <analyst@example.org>
+Subject: Fwd: reported message for triage
+Date: Wed, 03 Jun 2026 16:00:00 +0000
+Message-ID: <20260603160000.0012@example.org>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="fwd-boundary-0012"
+
+This is a multi-part message in MIME format.
+--fwd-boundary-0012
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+A user forwarded the attached message for triage. The original email is
+attached as a message/rfc822 part and should be captured as one attachment,
+not flattened into this body.
+
+-- SOC
+--fwd-boundary-0012
+Content-Type: message/rfc822
+Content-Disposition: attachment; filename="reported.eml"
+
+From: "Totally Legit" <noreply@evil.example>
+To: <victim@example.org>
+Subject: You have won a prize
+Date: Wed, 03 Jun 2026 15:40:00 +0000
+Message-ID: <inner-0001@evil.example>
+Content-Type: text/plain; charset="utf-8"
+
+This inner body must NOT become the outer message body.
+Visit the totally-not-suspicious link to claim your synthetic prize.
+--fwd-boundary-0012--
