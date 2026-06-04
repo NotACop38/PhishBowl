@@ -1,0 +1,55 @@
+Return-Path: <bounce@evil.example>
+Received: from unknown (unknown [203.0.113.99])
+	by mx.example.org (Postfix) with ESMTP id MAL999
+	for <analyst@example.org>; Wed, 03 Jun 2026 03:33:09 +0000 (UTC)
+Authentication-Results: mx.example.org;
+	spf=fail (example.org: domain of example.com does not designate 203.0.113.99 as permitted sender) smtp.mailfrom=example.com;
+	dkim=fail (signature verification failed) header.d=example.com header.s=selector1;
+	dmarc=fail (p=reject) header.from=example.com
+From: "Microsoft Account Team" <security@account-secure.example>
+Reply-To: "Recovery" <recovery@reply-catcher.example>
+Sender: <relay@evil.example>
+To: "Analyst" <analyst@example.org>
+Subject: URGENT: your account has been suspended - verify immediately
+Date: Wed, 03 Jun 2026 03:33:00 +0000
+Message-ID: <20260603033300.0999@evil.example>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="mal-boundary-0999"
+
+This is a multi-part message in MIME format.
+--mal-boundary-0999
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+This is a SYNTHETIC, obviously-fake phishing sample for Phishbowl's test suite.
+All indicators use reserved example-only values (RFC 2606 / RFC 5737) or
+obviously-fake typosquat markers, and nothing here is ever fetched.
+
+URGENT: your account has been suspended. You must verify immediately or your
+account will be permanently locked.
+
+Confirm here:
+  - http://198.51.100.99/account/login
+  - https://examp1e.com/account/verify
+  - http://xn--mple-0na.com/secure
+  - https://bit.ly/synthetic-test
+
+-- Not really the Microsoft account team
+--mal-boundary-0999
+Content-Type: text/html; charset="utf-8"
+Content-Transfer-Encoding: 8bit
+
+<!DOCTYPE html>
+<html>
+  <body>
+    <p>URGENT: your account has been suspended. Verify immediately.</p>
+    <ul>
+      <li><a href="http://198.51.100.99/account/login">https://www.example.com/account</a></li>
+      <li><a href="https://examp1e.com/account/verify">Confirm your account</a></li>
+      <li><a href="http://xn--mple-0na.com/secure">Secure your account</a></li>
+      <li><a href="https://bit.ly/synthetic-test">Click to verify</a></li>
+    </ul>
+    <p>&mdash; Not really the Microsoft account team</p>
+  </body>
+</html>
+--mal-boundary-0999--

@@ -34,6 +34,7 @@ dependencies = [
     "rich>=13.7",
     "iocextract>=1.16",
     "extract-msg>=0.48",
+    "pyyaml>=6",
 ]
 
 [project.optional-dependencies]
