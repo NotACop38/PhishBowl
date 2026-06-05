@@ -195,15 +195,16 @@ def serve(
     """
     try:
         import uvicorn
+
+        # Import lazily so the offline CLI never hard-requires FastAPI just to
+        # run ``analyze``. Keep it in the same optional-extra guard as uvicorn:
+        # an environment can have one web dependency but not the other.
+        from phishbowl.web import app as web_app
     except ImportError as exc:  # pragma: no cover - exercised via the install path
         raise typer.BadParameter(
             "the upload UI needs the optional 'web' extra — "
             "install it with: pip install 'phishbowl[web]'"
         ) from exc
-
-    # Import lazily (and only after the uvicorn check) so the offline CLI never
-    # hard-requires FastAPI just to run ``analyze``.
-    from phishbowl.web import app as web_app
 
     typer.echo(f"phishbowl: serving the upload UI on http://{host}:{port} (Ctrl-C to stop)")
     uvicorn.run(web_app, host=host, port=port)

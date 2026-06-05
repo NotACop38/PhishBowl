@@ -20,13 +20,19 @@ import re
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
 
 from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse_bytes
 from phishbowl.report import build_report, render_html
 from phishbowl.score import load_config, score_email
-from phishbowl.web import app
+
+fastapi_testclient = pytest.importorskip(
+    "fastapi.testclient",
+    reason="optional web extra is not installed",
+)
+TestClient = fastapi_testclient.TestClient
+
+from phishbowl.web import app  # noqa: E402
 
 # The submodule that holds MAX_INPUT_BYTES (the package's ``app`` name is the
 # FastAPI instance above, so reach the module object explicitly to monkeypatch it).
