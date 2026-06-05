@@ -35,6 +35,13 @@ dependencies = [
     "iocextract>=1.16",
     "extract-msg>=0.48",
     "pyyaml>=6",
+    # iocextract imports `requests` unconditionally at module load but does not
+    # declare it (its metadata lists only `regex`), so a clean install of
+    # Phishbowl would otherwise break on first import with
+    # `ModuleNotFoundError: No module named 'requests'`. We declare it here to
+    # keep `pip install phishbowl` working; the offline core never uses it to
+    # reach the network. Floor is the CVE-2024-47081 (.netrc credential leak) fix.
+    "requests>=2.32.4",
     # Security floors for transitive deps (see SECURITY.md / the one-time
     # pip-audit). Not imported directly — pinned only to keep a fresh install off
     # versions with known CVEs: `cryptography` arrives via
