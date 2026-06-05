@@ -35,12 +35,23 @@ dependencies = [
     "iocextract>=1.16",
     "extract-msg>=0.48",
     "pyyaml>=6",
+    # iocextract imports `requests` unconditionally at module load but does not
+    # declare it (its metadata lists only `regex`), so a clean install of
+    # Phishbowl would otherwise break on first import with
+    # `ModuleNotFoundError: No module named 'requests'`. We declare it here to
+    # keep `pip install phishbowl` working; the offline core never uses it to
+    # reach the network. Floor stays off the temp-file extraction CVE
+    # (CVE-2026-25645, fixed in 2.33.0) and the .netrc leak (CVE-2024-47081).
+    "requests>=2.33.0",
     # Security floors for transitive deps (see SECURITY.md / the one-time
     # pip-audit). Not imported directly — pinned only to keep a fresh install off
     # versions with known CVEs: `cryptography` arrives via
-    # extract-msg → msoffcrypto-tool; `idna` via httpx.
+    # extract-msg → msoffcrypto-tool; `idna` via httpx; `urllib3` via requests
+    # (CVE-2025-50181/50182 redirect handling fixed in 2.5.0, CVE-2025-66418
+    # decompression-chain DoS fixed in 2.6.0).
     "cryptography>=46.0.6",
     "idna>=3.15",
+    "urllib3>=2.6.0",
 ]
 
 [project.optional-dependencies]

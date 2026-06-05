@@ -99,11 +99,14 @@ pip-audit
   name, a Proofpoint run-token) annotated inline — Phishbowl holds no passwords
   in code, as API keys come only from the environment.
 - **pip-audit:** the transitive dependencies in Phishbowl's runtime closure
-  (`cryptography` via `extract-msg` → `msoffcrypto-tool`, and `idna` via `httpx`)
-  are pinned to non-vulnerable floors in `pyproject.toml`. Any other findings in
-  a given environment come from build/CI tooling (`pip`, `wheel`, `setuptools`)
-  or unrelated pre-installed packages (`pyjwt`, `urllib3` via `conan`/`requests`/
-  `oauthlib`) that are **not** part of Phishbowl's dependency graph.
+  (`cryptography` via `extract-msg` → `msoffcrypto-tool`, `idna` via `httpx`, and
+  `urllib3` via `requests`) are pinned to non-vulnerable floors in
+  `pyproject.toml`. (`requests` is a direct dependency because `iocextract`
+  imports it without declaring it; it pulls `urllib3` into the closure, hence the
+  `urllib3>=2.6.0` floor.) Any other findings in a given environment come from
+  build/CI tooling (`pip`, `wheel`, `setuptools`) or unrelated pre-installed
+  packages (`pyjwt`, `urllib3` via `conan`/`oauthlib`) that are **not** part of
+  Phishbowl's dependency graph.
 
 ## Reporting a vulnerability
 
