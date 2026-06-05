@@ -47,14 +47,20 @@ _VIEW_TEMPLATE = '{{"position":{{"x":450,"y":{y}}}}}'
 
 def _task(
     *,
+    seed: str,
     seq: int,
     task_type: str,
     name: str,
     description: str,
     next_seq: int | None,
 ) -> dict[str, Any]:
-    """One playbook task. Always manual: ``iscommand`` is false, ``brand`` empty."""
-    uid = stable_uuid("xsoar-task", str(seq), name)
+    """One playbook task. Always manual: ``iscommand`` is false, ``brand`` empty.
+
+    ``taskid`` folds in the analysis ``seed`` so tasks from different drafts never
+    share a global id — XSOAR treats ``taskid`` as a task identifier, so reusing it
+    across messages would let it conflate distinct per-message tasks.
+    """
+    uid = stable_uuid("xsoar-task", seed, str(seq), name)
     task: dict[str, Any] = {
         "id": str(seq),
         "taskid": uid,
@@ -149,6 +155,7 @@ def _description(core: TriageCore) -> str:
 def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
     """Build the XSOAR playbook artifact (a dict) from a prepared report view."""
     core = triage_core(view)
+    seed = core.analysis_seed()
 
     # A linear chain of manual tasks: start → title → review steps. Each step is a
     # checklist item; none binds a command, so the playbook is inert on import.
@@ -181,8 +188,9 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
 
     tasks: dict[str, dict[str, Any]] = {}
     # Task 0 is the mandatory start node, flowing into the title.
-    tasks["0"] = _task(seq=0, task_type="start", name="", description="", next_seq=1)
+    tasks["0"] = _task(seed=seed, seq=0, task_type="start", name="", description="", next_seq=1)
     tasks["1"] = _task(
+        seed=seed,
         seq=1,
         task_type="title",
         name="Phishbowl Triage (DRAFT — review before acting)",
@@ -193,6 +201,7 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
         seq = 2 + offset
         next_seq = seq + 1 if offset < len(steps) - 1 else None
         tasks[str(seq)] = _task(
+            seed=seed,
             seq=seq,
             task_type="regular",
             name=name,
@@ -201,7 +210,7 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
         )
 
     return {
-        "id": stable_uuid("xsoar-playbook", core.source_filename or "message", core.verdict),
+        "id": stable_uuid("xsoar-playbook", seed),
         "version": -1,
         "name": f"Phishbowl Triage — {core.verdict} (DRAFT)",
         "description": _description(core),

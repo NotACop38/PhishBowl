@@ -47,7 +47,8 @@
     },
     "task": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
+      "description": "A playbook task. The shape is locked (additionalProperties false) so a tampered draft cannot smuggle in extra automation-bearing fields; every task is a manual task.",
       "required": ["id", "taskid", "type", "task"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
@@ -61,13 +62,20 @@
             "items": { "type": "string" }
           }
         },
-        "separatecontext": { "type": "boolean" }
+        "separatecontext": { "type": "boolean" },
+        "continueonerrortype": { "type": "string" },
+        "view": { "type": "string" },
+        "timertriggers": { "type": "array" },
+        "ignoreworker": { "type": "boolean" },
+        "skipunavailable": { "type": "boolean" },
+        "quietmode": { "type": "integer" },
+        "isautoswitchedtoquietmode": { "type": "boolean" }
       }
     },
     "taskdef": {
       "type": "object",
-      "additionalProperties": true,
-      "description": "The inner task definition. iscommand is const false and brand const empty: a draft export contains only manual tasks and never binds an automation command, so import cannot trigger remediation.",
+      "additionalProperties": false,
+      "description": "The inner task definition, with a locked shape (additionalProperties false). iscommand is const false and brand const empty, AND no script/automation fields (scriptName, scriptId, scriptarguments, …) are permitted at all — so a draft cannot run an integration command OR an automation script. The schema therefore proves the task is manual-only, not merely command-free.",
       "required": ["id", "version", "name", "iscommand", "brand"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },

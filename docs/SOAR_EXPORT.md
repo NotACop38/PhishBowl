@@ -104,12 +104,15 @@ trigger, with only inert `Compose` actions that hold the triage data.
    ```bash
    az deployment group create \
      --resource-group <your-rg> \
-     --template-file azuredeploy.json \
-     --parameters PlaybookName=Phishbowl-Triage-Draft
+     --template-file azuredeploy.json
    ```
-   (Or **Sentinel → Automation → Create → Playbook with Logic App**, then paste
-   the workflow definition; or use **Template spec / Deploy a custom template** in
-   the portal.)
+   The template's default `PlaybookName` is **unique per analysis**
+   (`Phishbowl-Triage-Draft-<analysis-seed>`), so deploying drafts for several
+   messages into the same resource group creates distinct Logic Apps instead of
+   overwriting one another. Pass `--parameters PlaybookName=<your-name>` to
+   override. (Or **Sentinel → Automation → Create → Playbook with Logic App**,
+   then paste the workflow definition; or use **Template spec / Deploy a custom
+   template** in the portal.)
 3. The Logic App is created **Disabled**. Open it in the Logic App designer,
    review every action, and replace the inert `Compose` steps with your own
    (reviewed) response actions if you choose to.
@@ -123,7 +126,9 @@ trigger, with only inert `Compose` actions that hold the triage data.
 | `parameters.PlaybookName` | Logic App name (default `Phishbowl-Triage-Draft`) |
 | `resources[0].type` | `Microsoft.Logic/workflows` |
 | `resources[0].properties.state` | Always `"Disabled"` — **ships off** |
-| `…definition.triggers.manual` | A manual HTTP `Request` trigger — **not** an automatic Sentinel alert/incident trigger |
+| `parameters.PlaybookName.defaultValue` | `Phishbowl-Triage-Draft-<analysis-seed>` — unique per analysis |
+| `…definition.triggers` | Exactly one manual HTTP `Request` trigger — **not** an automatic Sentinel alert/incident trigger |
+| `…actions` | Inert `Compose` actions only (each `type` is `Compose`) |
 | `…actions.Compose_Phishbowl_Triage_DRAFT.inputs` | The full triage object (below) |
 | `…actions.Compose_Draft_Notice` | The never-acts disclaimer, surfaced on its own |
 | `…outputs.PhishbowlVerdict` | `"<verdict> (<score>/100)"` |
@@ -150,13 +155,20 @@ The "never acts" invariant is enforced **three ways** — in code, in the prose
 stamped into each artifact, and **structurally in the expected schema** — so a
 future change that tried to make an export *act* would fail the validation tests:
 
-- **XSOAR:** every task's `task.iscommand` is `const false` in
-  [`xsoar_playbook.schema.json`](../phishbowl/export/schemas/xsoar_playbook.schema.json).
-  A playbook with an auto-running command task cannot validate.
-- **Sentinel:** the workflow's `properties.state` is `const "Disabled"`, and the
-  only trigger is a manual `Request`, in
+- **XSOAR:** every task's `task.iscommand` is `const false`, and the task shape is
+  *locked* (`additionalProperties: false`) in
+  [`xsoar_playbook.schema.json`](../phishbowl/export/schemas/xsoar_playbook.schema.json),
+  so a task can bind neither an integration command **nor** an automation script
+  (`scriptName`/`scriptId`/`scriptarguments` and any other extra field are
+  rejected). The schema proves the playbook is *manual-only*, not merely
+  command-free.
+- **Sentinel:** the workflow's `properties.state` is `const "Disabled"`, the
+  `triggers` object permits **only** a manual `Request` trigger
+  (`additionalProperties: false` — no recurrence or auto Sentinel-alert trigger),
+  and every action's `type` must be the inert `Compose`
+  (a connector / `Http` / `ApiConnection` action is rejected), in
   [`sentinel_playbook.schema.json`](../phishbowl/export/schemas/sentinel_playbook.schema.json).
-  An enabled or auto-triggered workflow cannot validate.
+  An enabled, auto-triggered, or remediating workflow cannot validate.
 
 Each export is validated against its schema on every bundled fixture in
 [`tests/test_export.py`](../tests/test_export.py) (the Phase 6 DoD), and the same

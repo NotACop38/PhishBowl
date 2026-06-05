@@ -40,7 +40,9 @@ _WORKFLOW_DEFINITION_SCHEMA = (
     "2016-06-01/workflowdefinition.json#"
 )
 _LOGIC_APPS_API_VERSION = "2017-07-01"
-_DEFAULT_PLAYBOOK_NAME = "Phishbowl-Triage-Draft"
+# Prefix for the default Logic App name; the per-analysis seed is appended so two
+# drafts deployed into the same resource group don't overwrite one another.
+_DEFAULT_PLAYBOOK_PREFIX = "Phishbowl-Triage-Draft"
 
 
 def _trigger() -> dict[str, Any]:
@@ -88,10 +90,17 @@ def _actions(core: TriageCore) -> dict[str, Any]:
 
 
 def build_sentinel_playbook(
-    view: ReportView, *, playbook_name: str = _DEFAULT_PLAYBOOK_NAME
+    view: ReportView, *, playbook_name: str | None = None
 ) -> dict[str, Any]:
-    """Build the Sentinel playbook ARM template (a dict) from a prepared view."""
+    """Build the Sentinel playbook ARM template (a dict) from a prepared view.
+
+    ``playbook_name`` defaults to ``Phishbowl-Triage-Draft-<analysis-seed>`` — a
+    per-analysis name — so deploying drafts for several messages into the same
+    resource group creates distinct Logic Apps instead of overwriting one another.
+    Pass an explicit name to override.
+    """
     core = triage_core(view)
+    playbook_name = playbook_name or f"{_DEFAULT_PLAYBOOK_PREFIX}-{core.analysis_seed()}"
 
     workflow = {
         "type": "Microsoft.Logic/workflows",
@@ -149,7 +158,7 @@ def build_sentinel_playbook(
     }
 
 
-def render_sentinel(view: ReportView, *, playbook_name: str = _DEFAULT_PLAYBOOK_NAME) -> str:
+def render_sentinel(view: ReportView, *, playbook_name: str | None = None) -> str:
     """Render the Sentinel playbook as a JSON string (the ARM deployment template)."""
     template = build_sentinel_playbook(view, playbook_name=playbook_name)
     # Deterministic, human-diffable JSON; insertion order preserved.

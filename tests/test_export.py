@@ -238,6 +238,36 @@ def test_validation_rejects_a_sentinel_playbook_that_ships_enabled() -> None:
     assert errors and any("state" in e or "Disabled" in e for e in errors)
 
 
+def test_validation_rejects_a_sentinel_action_that_could_egress() -> None:
+    # An action other than an inert Compose (e.g. a connector / HTTP action that
+    # could block, quarantine, or call out) must fail — schema proves inertness.
+    template = build_sentinel_playbook(_view(MALICIOUS))
+    template["resources"][0]["properties"]["definition"]["actions"]["Block_Sender"] = {
+        "type": "ApiConnection",
+        "inputs": {"host": {"connection": {"name": "office365"}}},
+    }
+    assert validate_export(template, SENTINEL_SCHEMA_NAME) != []
+
+
+def test_validation_rejects_an_extra_automatic_sentinel_trigger() -> None:
+    # A second, automatic trigger (recurrence or a Sentinel alert trigger) alongside
+    # the manual one must fail — an auto-firing draft can never validate.
+    template = build_sentinel_playbook(_view(MALICIOUS))
+    template["resources"][0]["properties"]["definition"]["triggers"]["Recurrence"] = {
+        "type": "Recurrence"
+    }
+    assert validate_export(template, SENTINEL_SCHEMA_NAME) != []
+
+
+def test_validation_rejects_an_xsoar_task_that_runs_a_script() -> None:
+    # iscommand:false only rules out an integration command; an automation script
+    # binds via fields like scriptName. The locked task shape must reject those, so
+    # validation proves the task is manual-only (not merely command-free).
+    playbook = build_xsoar_playbook(_view(MALICIOUS))
+    playbook["tasks"]["2"]["task"]["scriptName"] = "DeleteContext"
+    assert validate_export(playbook, XSOAR_SCHEMA_NAME) != []
+
+
 # --------------------------------------------------------------------------- #
 # PII redaction carries through to both exports                                #
 # --------------------------------------------------------------------------- #
@@ -272,6 +302,25 @@ def test_exports_are_deterministic_for_a_given_analysis() -> None:
     view = _view(MALICIOUS)  # one view → fixed parse time and stable ids
     assert render_xsoar(view) == render_xsoar(view)
     assert render_sentinel(view) == render_sentinel(view)
+
+
+def test_export_ids_are_analysis_specific_to_avoid_import_collisions() -> None:
+    # Two different analyses must not share XSOAR playbook/task IDs or the default
+    # Sentinel playbook name — otherwise importing the second draft would collide
+    # with or overwrite the first in the platform.
+    mal, ben = _view(MALICIOUS), _view(BENIGN)
+    xmal, xben = build_xsoar_playbook(mal), build_xsoar_playbook(ben)
+    smal, sben = build_sentinel_playbook(mal), build_sentinel_playbook(ben)
+
+    assert xmal["id"] != xben["id"]
+    assert xmal["tasks"]["2"]["taskid"] != xben["tasks"]["2"]["taskid"]
+
+    def name(t):
+        return t["parameters"]["PlaybookName"]["defaultValue"]
+
+    assert name(smal) != name(sben)
+    # …while a given analysis is still reproducible (same view → same id).
+    assert build_xsoar_playbook(mal)["id"] == xmal["id"]
 
 
 # --------------------------------------------------------------------------- #

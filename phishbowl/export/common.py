@@ -24,6 +24,7 @@ export; Phishbowl proposes a human-review playbook and never acts (CLAUDE.md).
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass
@@ -155,6 +156,34 @@ class TriageCore:
 
     def raw_indicator_count(self) -> int:
         return sum(len(values) for values in self.raw_buckets().values())
+
+    def analysis_seed(self) -> str:
+        """A stable, analysis-specific digest used to make exported IDs unique.
+
+        Derived from the salient triage content (parse time, verdict/score, subject,
+        source, indicators, and the rules that fired). It is deterministic for a
+        given analysis — re-exporting the same result yields the same seed (so
+        artifacts stay reproducible) — yet two different messages produce different
+        seeds even when they share a filename and verdict. XSOAR playbook/task IDs
+        and the default Sentinel playbook name fold it in so importing two drafts
+        never collides or overwrites a prior one.
+        """
+        payload = json.dumps(
+            {
+                "generated_at": self.generated_at,
+                "source": self.source_filename,
+                "verdict": self.verdict,
+                "score": self.score,
+                "offline_score": self.offline_score,
+                "subject": self.subject,
+                "indicators": self.raw_buckets(),
+                "indicators_defanged": self.defanged_buckets(),
+                "reasons": [r["id"] for r in self.reasons],
+            },
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
     # --- human channel (defanged) ------------------------------------------ #
     def defanged_buckets(self) -> dict[str, list[str]]:

@@ -54,14 +54,27 @@
           "pattern": "workflowdefinition\\.json"
         },
         "triggers": { "$ref": "#/$defs/triggers" },
-        "actions": { "type": "object", "minProperties": 1 }
+        "actions": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/action" }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Every action must be an inert Compose step (type is const \"Compose\"). A Compose action only emits a constant value — it calls no connector and cannot egress, block, quarantine, or remediate — so this constraint is what makes schema validation prove the workflow stays inert. An ApiConnection / Http / connector action would fail here.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "Compose" }
       }
     },
     "triggers": {
       "type": "object",
       "minProperties": 1,
-      "additionalProperties": true,
-      "description": "A single manual request trigger. A draft export deliberately avoids an automatic Microsoft Sentinel incident/alert trigger, so import never wires the playbook to fire on its own.",
+      "additionalProperties": false,
+      "description": "Exactly one manual request trigger is allowed — additional properties are forbidden, so a template wired to an automatic Microsoft Sentinel incident/alert or recurrence trigger cannot validate and can never fire on its own.",
       "required": ["manual"],
       "properties": {
         "manual": {
