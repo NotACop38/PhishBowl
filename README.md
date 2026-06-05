@@ -225,6 +225,25 @@ ship a connector as a pip package without forking. Want to build one? Start with
 
 ---
 
+## 🌐 Upload UI (optional)
+
+Prefer a browser to the terminal? An optional FastAPI front door runs the **same** offline
+pipeline and returns the **same** self-contained, zero-egress report — no logic fork. It's
+behind an extra so the offline install stays lean:
+
+```bash
+pip install -e ".[web]"
+phishbowl serve                 # → http://127.0.0.1:8000  (or: uvicorn phishbowl.web:app)
+```
+
+Drop in a `.eml`/`.msg` and you get the identical report `analyze --html` produces. Uploads
+are hardened: type-checked (`.eml`/`.msg` only) and size-capped **before** parsing, analyzed
+in memory (never written to disk, executed, or contacted), and served with a strict
+`Content-Security-Policy`. It binds to localhost by default — a self-hosted analyst tool, not
+a public service. The defensive invariants below hold here exactly as on the CLI.
+
+---
+
 ## 🛡 Defensive use & safety (non-negotiable)
 
 PhishBowl analyzes emails you **received or were forwarded**, for triage. This boundary is

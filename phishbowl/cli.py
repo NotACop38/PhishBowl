@@ -15,6 +15,11 @@ XSOAR playbook and a Microsoft Sentinel playbook (Logic App ARM template)
 respectively. These are **drafts** — every XSOAR task is manual and the Sentinel
 workflow ships disabled — so importing one triggers no automation.
 
+Phase 7 (stretch) adds ``serve``: an optional FastAPI upload UI that runs the
+**same** offline pipeline and renders the **same** zero-egress report — no logic
+fork. It lives behind the ``web`` extra and is imported lazily, so the offline
+CLI never hard-requires FastAPI.
+
 Phishbowl is defensive-only: it never sends, detonates, fetches the email's
 URLs, or auto-remediates (CLAUDE.md invariants). Even with ``--enrich``, the only
 network egress is to allowlisted vendor APIs — never the analyzed email's URLs.
@@ -166,6 +171,42 @@ def analyze(
             f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
             "(ships disabled — review and enable manually; Phishbowl never acts)"
         )
+
+
+@app.command()
+def serve(
+    host: Annotated[
+        str,
+        typer.Option("--host", help="Interface to bind. Defaults to localhost only."),
+    ] = "127.0.0.1",
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", help="Port to listen on."),
+    ] = 8000,
+) -> None:
+    """Run the optional FastAPI upload UI (PRD §15 stretch).
+
+    Serves a minimal browser front door that runs the **same** offline pipeline
+    as ``analyze`` and renders the identical self-contained, zero-egress report —
+    no logic fork. Uploads are hardened (size + type limits, analyzed in memory,
+    never written to disk/executed/fetched). Binds to localhost by default; this
+    is a self-hosted analyst tool, not a public service. Requires the ``web``
+    extra: ``pip install 'phishbowl[web]'``.
+    """
+    try:
+        import uvicorn
+    except ImportError as exc:  # pragma: no cover - exercised via the install path
+        raise typer.BadParameter(
+            "the upload UI needs the optional 'web' extra — "
+            "install it with: pip install 'phishbowl[web]'"
+        ) from exc
+
+    # Import lazily (and only after the uvicorn check) so the offline CLI never
+    # hard-requires FastAPI just to run ``analyze``.
+    from phishbowl.web import app as web_app
+
+    typer.echo(f"phishbowl: serving the upload UI on http://{host}:{port} (Ctrl-C to stop)")
+    uvicorn.run(web_app, host=host, port=port)
 
 
 if __name__ == "__main__":  # pragma: no cover

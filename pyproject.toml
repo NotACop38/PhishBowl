@@ -55,15 +55,27 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional FastAPI upload UI (PRD §15 stretch). Additive only — the offline core,
+# CLI, and report layer never import these; `phishbowl serve` and the web app
+# fail with a clear hint if the extra isn't installed. python-multipart is what
+# FastAPI uses to parse the file upload; uvicorn is the ASGI server.
+web = [
+    "fastapi>=0.110",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.30",
+]
+
 # Dev tooling. The routine gate is `make test` (pytest) only; bandit and
 # pip-audit are run once, in the dedicated security step. build is for the
 # release step. No coverage plugin, no type-checker, no pre-commit (CLAUDE.md).
+# Includes the web extra so the upload-UI tests run under `make test`.
 dev = [
     "pytest>=8",
     "ruff>=0.5",
     "bandit>=1.7",
     "pip-audit>=2.7",
     "build>=1.2",
+    "phishbowl[web]",
 ]
 
 [project.scripts]

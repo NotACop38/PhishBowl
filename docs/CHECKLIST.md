@@ -157,15 +157,24 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Objective:** Minimal browser upload → report, additive to the existing contract.
 
 **Decision gates:**
-- [ ] Confirm we're doing the stretch and its scope.
+- [x] Confirm we're doing the stretch and its scope. (Additive only: a thin
+  `phishbowl/web/` FastAPI app behind an optional `web` extra; the offline core,
+  CLI, and report layer are untouched.)
 
 **Tasks:**
-- [ ] FastAPI app: upload `.eml`/`.msg` → run pipeline → render HTML report.
-- [ ] Reuse `ParsedEmail` + report layer unchanged (no logic fork).
-- [ ] Upload hardening: size limits, type checks, **never** auto-open/fetch; same no-egress report guarantees.
-- [ ] Tests: upload happy path + rejection of oversized/wrong-type input.
+- [x] FastAPI app: upload `.eml`/`.msg` → run pipeline → render HTML report.
+- [x] Reuse `ParsedEmail` + report layer unchanged (no logic fork). The upload
+  bytes go through the same parse → extract → score → `build_report` →
+  `render_html` path the CLI uses (via a shared `parse_bytes` dispatcher); a test
+  asserts the served report is byte-identical to the CLI's (timestamps aside).
+- [x] Upload hardening: size limit (`413`, bounded chunked read capped at
+  `MAX_INPUT_BYTES`, never buffered whole) and type check (`415`, `.eml`/`.msg`
+  only, checked before any parsing); **never** auto-opens/fetches/writes to disk;
+  same no-egress report guarantees, reinforced with a strict `Content-Security-Policy`.
+- [x] Tests: upload happy path + rejection of oversized/wrong-type input
+  (`tests/test_web.py`).
 
-**DoD:** Local server accepts a sample upload and renders the same report the CLI produces, with upload hardening verified.
+**DoD:** Local server accepts a sample upload and renders the same report the CLI produces, with upload hardening verified. ✅ **Met** — `phishbowl serve` (or `uvicorn phishbowl.web:app`) exposes an upload form that runs the **same** offline pipeline and returns the identical self-contained, zero-egress report; the upload path is hardened against oversized (`413`) and wrong-type (`415`) input, analyzes bytes in memory only, and never sends/detonates/fetches/auto-remediates. Behind the optional `web` extra so the offline install is unchanged (`tests/test_web.py`).
 
 ---
 
