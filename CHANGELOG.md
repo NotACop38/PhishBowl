@@ -24,8 +24,11 @@ with zero API keys; enrichment only augments.
   traceback. (Phases 0–1)
 - **IOC extraction, unwrapping & defang** — pull URLs, domains, IPs, and emails;
   unwrap common link wrappers (e.g. Proofpoint, Safe Links) to reveal the true
-  target; defang every indicator (`example[.]com`, `hxxps://…`) in all outputs
-  so reports are safe to share. (Phase 2)
+  target; defang every indicator (`example[.]com`, `hxxps://…`) in the
+  human-facing HTML and CLI so they are safe to read and share. The JSON output
+  carries both the defanged value and a clearly-labelled raw field for tooling,
+  so it is *not* defanged-only — strip or redact the `*_raw` fields before
+  sharing JSON. (Phase 2)
 - **Transparent offline risk scoring** — a configurable, fully offline rule
   engine (`score/defaults.yaml`) producing a 0–100 score, a verdict, and a
   per-rule breakdown with evidence and weights — no black box. (Phase 3)
@@ -51,8 +54,9 @@ with zero API keys; enrichment only augments.
   never auto-remediates. The HTML report performs zero network egress when
   opened — no remote images, fonts, scripts, or trackers. Only synthetic sample
   emails are committed.
-- Pinned security floors for transitive dependencies (`cryptography`, `idna`) to
-  keep a fresh install off versions with known CVEs.
+- Pinned security floors for transitive dependencies (`cryptography`, `idna`,
+  and `urllib3` via `requests`) to keep a fresh install off versions with known
+  CVEs.
 
 ### Fixed
 
@@ -60,7 +64,10 @@ with zero API keys; enrichment only augments.
   unconditionally at module load but does not declare it, so a clean
   `pip install phishbowl` would otherwise fail on first import with
   `ModuleNotFoundError: No module named 'requests'`. The offline core never uses
-  it to reach the network; the floor (`>=2.32.4`) picks up the
-  CVE-2024-47081 `.netrc` credential-leak fix.
+  it to reach the network; the floor (`>=2.33.0`) keeps fresh installs off the
+  `extract_zipped_paths` temp-file CVE (CVE-2026-25645) and the earlier
+  `.netrc` credential-leak (CVE-2024-47081). Because `requests` pulls `urllib3`
+  into the runtime closure, a `urllib3>=2.6.0` floor was added too
+  (CVE-2025-50181/50182 redirect handling, CVE-2025-66418 decompression DoS).
 
 [0.1.0]: https://github.com/notacop38/phishbowl/releases/tag/v0.1.0
