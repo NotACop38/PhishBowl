@@ -1,0 +1,91 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phishbowl.dev/schemas/sentinel_playbook.schema.json",
+  "title": "Phishbowl Microsoft Sentinel playbook (draft export)",
+  "description": "Schema for the Microsoft Sentinel playbook artifact Phishbowl emits: an Azure Resource Manager deployment template for a Logic App workflow. DRAFT / EXPORT ONLY: the workflow ships disabled (properties.state is const \"Disabled\") behind a manual request trigger and carries only inert Compose actions that hold the triage verdict and indicators. Importing it never auto-runs, and Phishbowl never quarantines, blocks, sends, or acts.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["$schema", "contentVersion", "parameters", "resources"],
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "pattern": "deploymentTemplate\\.json"
+    },
+    "contentVersion": { "type": "string", "minLength": 1 },
+    "parameters": { "type": "object" },
+    "variables": { "type": "object" },
+    "resources": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/workflow" }
+    }
+  },
+  "$defs": {
+    "workflow": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["type", "apiVersion", "name", "location", "properties"],
+      "properties": {
+        "type": { "const": "Microsoft.Logic/workflows" },
+        "apiVersion": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "location": { "type": "string", "minLength": 1 },
+        "tags": { "type": "object" },
+        "properties": { "$ref": "#/$defs/workflowProperties" }
+      }
+    },
+    "workflowProperties": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "state is const \"Disabled\": a draft playbook is never imported in a running state, so it cannot fire until an analyst reviews and enables it.",
+      "required": ["state", "definition"],
+      "properties": {
+        "state": { "const": "Disabled" },
+        "definition": { "$ref": "#/$defs/definition" }
+      }
+    },
+    "definition": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["$schema", "triggers", "actions"],
+      "properties": {
+        "$schema": {
+          "type": "string",
+          "pattern": "workflowdefinition\\.json"
+        },
+        "triggers": { "$ref": "#/$defs/triggers" },
+        "actions": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/action" }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Every action must be an inert Compose step (type is const \"Compose\"). A Compose action only emits a constant value — it calls no connector and cannot egress, block, quarantine, or remediate — so this constraint is what makes schema validation prove the workflow stays inert. An ApiConnection / Http / connector action would fail here.",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "Compose" }
+      }
+    },
+    "triggers": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "description": "Exactly one manual request trigger is allowed — additional properties are forbidden, so a template wired to an automatic Microsoft Sentinel incident/alert or recurrence trigger cannot validate and can never fire on its own.",
+      "required": ["manual"],
+      "properties": {
+        "manual": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["type"],
+          "properties": {
+            "type": { "const": "Request" }
+          }
+        }
+      }
+    }
+  }
+}

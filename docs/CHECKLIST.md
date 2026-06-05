@@ -142,13 +142,13 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Objective:** Export triage results as XSOAR and Sentinel playbook artifacts (draft/export only — no remediation execution).
 
 **Tasks:**
-- [ ] Define export schema mapping `ParsedEmail` + verdict + IOCs → XSOAR playbook artifact.
-- [ ] Define export mapping → Microsoft Sentinel playbook artifact.
-- [ ] CLI flags to emit each; documented field mappings.
-- [ ] Reinforce in code/docs: export is a draft; Phishbowl never quarantines/blocks/acts.
-- [ ] Tests: exports validate against expected schema on a fixture.
+- [x] Define export schema mapping `ParsedEmail` + verdict + IOCs → XSOAR playbook artifact.
+- [x] Define export mapping → Microsoft Sentinel playbook artifact.
+- [x] CLI flags to emit each; documented field mappings.
+- [x] Reinforce in code/docs: export is a draft; Phishbowl never quarantines/blocks/acts.
+- [x] Tests: exports validate against expected schema on a fixture.
 
-**DoD:** Both exports generate from a fixture and validate; docs explain how to import into each platform.
+**DoD:** Both exports generate from a fixture and validate; docs explain how to import into each platform. ✅ **Met** — `phishbowl analyze --xsoar` / `--sentinel` emit a Cortex XSOAR playbook (all-manual tasks) and a Microsoft Sentinel playbook (a disabled Logic App ARM template), both mapped from one prepared report view so defanging/redaction stay consistent. The never-acts invariant is enforced in code, in the disclaimer stamped into every artifact, **and** structurally by each export's bundled JSON Schema (`task.iscommand` is `const false`; workflow `state` is `const "Disabled"`). Each export validates against its schema on every fixture, the validator is proven non-vacuous (it rejects a tampered acting artifact), and `docs/SOAR_EXPORT.md` documents the field mappings and per-platform import steps (`tests/test_export.py`).
 
 ---
 

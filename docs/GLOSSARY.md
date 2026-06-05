@@ -162,8 +162,10 @@ against the registry, not the suspicious site.
 
 Platforms (e.g. Cortex XSOAR, Microsoft Sentinel) that automate incident
 response with playbooks. PhishBowl can *export* its triage result as a playbook
-**draft/artifact** for these systems (planned) — but it never executes
-remediation itself: no quarantine, no block, no action.
+**draft/artifact** for these systems (`--xsoar` / `--sentinel`; see
+[`SOAR_EXPORT.md`](SOAR_EXPORT.md)) — but it never executes remediation itself:
+the XSOAR draft is all manual tasks and the Sentinel draft ships disabled, so
+importing one triggers no quarantine, no block, no action.
 
 ### SSRF — Server-Side Request Forgery
 
