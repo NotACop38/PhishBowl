@@ -13,13 +13,15 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+REPO_ROOT="$(pwd)"
 
 FIXTURE="${FIXTURE:-tests/fixtures/crafted_malicious.eml}"
-TAPE="scripts/demo.tape"
+TAPE="$REPO_ROOT/scripts/demo.tape"
+GIF="$REPO_ROOT/docs/assets/demo.gif"
 
 if ! command -v vhs >/dev/null 2>&1; then
   cat <<'EOF'
-phishbowl/demo: vhs not found — cannot render docs/assets/demo.gif.
+phishbowl/demo: vhs not found, cannot render docs/assets/demo.gif.
 
 Install the recorder (all three are needed):
   go install github.com/charmbracelet/vhs@latest   # the recorder
@@ -31,16 +33,15 @@ EOF
   exit 0
 fi
 
-# The tape types a clean `phishbowl analyze crafted_malicious.eml`, so stage the
-# synthetic fixture under that bare name in the repo root for the recording and
-# remove it (and the report the demo writes) afterwards.
-STAGED="crafted_malicious.eml"
-REPORT="report.html"
-cleanup() { rm -f "$STAGED" "$REPORT"; }
-trap cleanup EXIT
+# The tape types a clean `phishbowl analyze crafted_malicious.eml` and writes
+# report.html. Record entirely inside a throwaway temp dir so the staged fixture
+# and that report never touch (or clobber) anything in the repo root, then point
+# VHS's output at the real docs/assets path with -o. The trap removes only the
+# temp dir we created.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+cp "$FIXTURE" "$WORK/crafted_malicious.eml"
 
-cp "$FIXTURE" "$STAGED"
-
-echo "phishbowl/demo: recording $TAPE -> docs/assets/demo.gif"
-vhs "$TAPE"
+echo "phishbowl/demo: recording scripts/demo.tape -> docs/assets/demo.gif"
+( cd "$WORK" && vhs -o "$GIF" "$TAPE" )
 echo "phishbowl/demo: wrote docs/assets/demo.gif"
