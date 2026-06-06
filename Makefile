@@ -2,7 +2,7 @@
 # keep it cheap and fast. Heavier checks (bandit, pip-audit, release build)
 # are run once, in their dedicated phases — never wired in here.
 
-.PHONY: format lint test screenshot
+.PHONY: format lint test screenshot demo
 
 format:
 	ruff format .
@@ -19,3 +19,10 @@ test:
 # manual-capture instructions. See scripts/screenshot.sh.
 screenshot:
 	bash scripts/screenshot.sh
+
+# Regenerate the README's terminal demo GIF from a synthetic fixture. Docs
+# helper only — deliberately NOT part of `make test`. Drives scripts/demo.tape
+# with VHS (needs vhs, ttyd, ffmpeg); prints install hints if VHS is absent.
+# See scripts/demo.sh.
+demo:
+	bash scripts/demo.sh
