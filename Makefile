@@ -4,14 +4,19 @@
 
 .PHONY: format lint test screenshot demo
 
+# Run tools via `$(PYTHON) -m` so they always come from the interpreter that
+# has Phishbowl's dependencies installed — a bare `pytest`/`ruff` on PATH may
+# live in an unrelated, isolated tool environment and fail to import them.
+PYTHON ?= python3
+
 format:
-	ruff format .
+	$(PYTHON) -m ruff format .
 
 lint:
-	ruff check .
+	$(PYTHON) -m ruff check .
 
 test:
-	pytest -q
+	$(PYTHON) -m pytest -q
 
 # Regenerate the README's HTML-report screenshot from a synthetic fixture.
 # Docs helper only — deliberately NOT part of `make test`. Renders to PNG via a

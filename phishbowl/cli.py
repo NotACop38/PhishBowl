@@ -27,6 +27,7 @@ network egress is to allowlisted vendor APIs — never the analyzed email's URLs
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated
 
@@ -36,7 +37,8 @@ from rich.console import Console
 from phishbowl.connectors import EnrichmentReport, EnrichmentSettings, enrich_email
 from phishbowl.export import render_sentinel, render_xsoar
 from phishbowl.extract import extract_iocs
-from phishbowl.parse import parse
+from phishbowl.parse import parse, parse_bytes, sniff_suffix
+from phishbowl.parse.limits import read_stream_within_limit
 from phishbowl.report import (
     RedactionPolicy,
     build_report,
@@ -65,9 +67,29 @@ def main() -> None:
     """
 
 
+def _parse_stdin():
+    """Read an email from stdin (``analyze -``) and parse it (PRD §6.1).
+
+    Stdin has no filename to dispatch on, so the format is sniffed from the
+    bytes (OLE2 magic → ``.msg``, else ``.eml``) and handed to the very same
+    :func:`parse_bytes` path the upload UI uses. The read is bounded by the
+    parse layer's size cap, so a runaway pipe can never be slurped whole, and
+    an empty stream is a clean usage error rather than a meaningless report.
+    """
+    data = read_stream_within_limit(sys.stdin.buffer)
+    if not data:
+        raise ValueError(
+            "no input on stdin; pipe a .eml/.msg, e.g. `phishbowl analyze - < mail.eml`"
+        )
+    return parse_bytes(data, filename=f"stdin{sniff_suffix(data)}")
+
+
 @app.command()
 def analyze(
-    path: Annotated[str, typer.Argument(help="Path to a suspicious .eml or .msg file.")],
+    path: Annotated[
+        str,
+        typer.Argument(help="Path to a suspicious .eml or .msg file, or '-' to read from stdin."),
+    ],
     html: Annotated[
         Path | None,
         typer.Option("--html", "-H", help="Write the self-contained HTML report to this path."),
@@ -124,7 +146,7 @@ def analyze(
     to review, never executed automation.
     """
     try:
-        parsed = parse(path)
+        parsed = _parse_stdin() if path == "-" else parse(path)
     except (OSError, ValueError) as exc:
         # Missing, unreadable (permissions/I/O), or unsupported input degrades
         # into a clean CLI error rather than an internal traceback (PRD §11).

@@ -351,6 +351,21 @@ def test_oversized_input_rejected_even_when_stat_under_reports(
         limits.read_within_limit(f)
 
 
+def test_oversized_stdin_stream_is_rejected_without_slurping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The stdin path (`analyze -`) drains an unbounded stream through the same
+    # bounded chunked read as files and uploads: one byte past the cap and the
+    # stream is rejected with a clean ValueError, never buffered whole.
+    import io
+
+    from phishbowl.parse import limits
+
+    monkeypatch.setattr(limits, "MAX_INPUT_BYTES", 8)
+    with pytest.raises(ValueError):
+        limits.read_stream_within_limit(io.BytesIO(b"A" * 64))
+
+
 def test_oversized_bytes_degrade_to_noted_partial(monkeypatch: pytest.MonkeyPatch) -> None:
     from phishbowl.parse import eml
 

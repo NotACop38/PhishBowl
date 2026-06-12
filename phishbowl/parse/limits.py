@@ -20,6 +20,7 @@ Two complementary guards:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import BinaryIO
 
 # Largest message we will read/parse. 50 MiB comfortably exceeds real-world mail
 # (providers cap attachments around 25–35 MB) while refusing the multi-gigabyte
@@ -65,17 +66,27 @@ def read_within_limit(path: Path) -> bytes:
     if size > MAX_INPUT_BYTES:
         raise _too_large(size)
 
-    # Read at most MAX_INPUT_BYTES + 1 bytes: enough to know the input is over
-    # the cap, never more.
+    with path.open("rb") as fh:
+        return read_stream_within_limit(fh)
+
+
+def read_stream_within_limit(stream: BinaryIO) -> bytes:
+    """Drain ``stream``, refusing anything over :data:`MAX_INPUT_BYTES`.
+
+    The byte-stream counterpart of :func:`read_within_limit` (and the same
+    guard the upload UI applies to request bodies): the stream is read in
+    bounded chunks up to exactly one byte past the cap and rejected if that
+    much arrives, so an unbounded source — stdin, a pipe, a FIFO — can never
+    be slurped whole into memory before the limit is enforced.
+    """
     remaining = MAX_INPUT_BYTES + 1
     chunks: list[bytes] = []
-    with path.open("rb") as fh:
-        while remaining > 0:
-            chunk = fh.read(min(_READ_CHUNK, remaining))
-            if not chunk:
-                break
-            chunks.append(chunk)
-            remaining -= len(chunk)
+    while remaining > 0:
+        chunk = stream.read(min(_READ_CHUNK, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
     data = b"".join(chunks)
     if len(data) > MAX_INPUT_BYTES:
         raise _too_large(len(data))
