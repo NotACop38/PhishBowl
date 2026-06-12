@@ -268,7 +268,10 @@ def _address_view(addr, redactor: Redactor, *, recipient: bool) -> AddressView |
     raw = addr.addr_spec
     return AddressView(
         # Display names are attacker-chosen free text and can themselves carry a
-        # URL/address ("paypal.com Security <…>") — defang like any other text.
+        # URL/email/IP — defang like any other free text. Bare domains follow the
+        # same free-text policy as subjects (left legible; not one-click); a brand
+        # domain in a display name is the *scorer's* job
+        # (identity.display_name_brand_mismatch), not the defanger's.
         display_name=_safe_text(addr.display_name),
         addr_spec_display=defang(raw, IOCType.EMAIL) if raw else None,
         addr_spec_raw=raw,

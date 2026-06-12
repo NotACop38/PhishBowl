@@ -266,8 +266,18 @@ class Connector(ABC):
     rate_limit_per_min: float = 60.0
     #: Cap on indicators enriched per run (protects free tiers from a big mailbox).
     max_indicators: int = 16
-    #: Whether the HTTP client may follow cross-host redirects (RDAP needs it).
+    #: Whether the HTTP client may follow redirects. Every hop is re-checked
+    #: against ``allowed_hosts`` before any connection (the SSRF guard holds
+    #: across the whole chain).
     follow_redirects: bool = False
+    #: Whether the vendor's allowlisted host is a *bootstrap redirector* whose
+    #: documented job is to designate the real host (RDAP's ``rdap.org`` →
+    #: authoritative registry). When ``True``, exactly one redirect issued by an
+    #: allowlisted host may leave the allowlist — https only — and the
+    #: designated host gets exactly one request: any further redirect soft-fails.
+    #: Implies ``follow_redirects``. The redirect target is chosen by the
+    #: allowlisted vendor, never by email content.
+    bootstrap_redirect: bool = False
 
     @abstractmethod
     async def enrich(self, indicator: Indicator, ctx: EnrichContext) -> EnrichmentResult:

@@ -88,10 +88,27 @@ class _SecretScrubFilter(logging.Filter):
         return True
 
 
+def _http_logger_names() -> set[str]:
+    """The HTTP loggers to scrub: the parents plus every existing descendant.
+
+    A :class:`logging.Filter` on a parent logger does **not** apply to records
+    emitted through child loggers (``httpcore.http11``, ``httpcore.connection``,
+    …) — propagation runs ancestor *handlers*, not ancestor filters — so each
+    descendant needs the filter too. Both libraries create their loggers at
+    import time, which has happened by the time enrichment runs.
+    """
+    prefixes = tuple(f"{name}." for name in _HTTP_LOGGERS)
+    names = set(_HTTP_LOGGERS)
+    names.update(n for n in logging.Logger.manager.loggerDict if n.startswith(prefixes))
+    return names
+
+
 @contextmanager
 def _scrubbed_http_logs(secrets: frozenset[str]):
     """Attach the secret-scrub filter to the HTTP loggers; always detach after."""
-    pairs = [(logging.getLogger(name), _SecretScrubFilter(secrets)) for name in _HTTP_LOGGERS]
+    pairs = [
+        (logging.getLogger(name), _SecretScrubFilter(secrets)) for name in _http_logger_names()
+    ]
     for logger, filt in pairs:
         logger.addFilter(filt)
     try:
@@ -196,6 +213,7 @@ async def _run_one_connector(
         transport=settings.transport,
         sleep=settings.sleep,
         follow_redirects=connector.follow_redirects,
+        bootstrap_redirect=connector.bootstrap_redirect,
     )
     ctx = EnrichContext(http=client, settings=settings, api_key=api_key, now=settings.clock())
 

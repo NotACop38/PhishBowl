@@ -67,11 +67,13 @@ class AllowlistedClient:
         transport: Any = None,
         sleep: Callable[[float], Awaitable[None]] | None = None,
         follow_redirects: bool = False,
+        bootstrap_redirect: bool = False,
     ) -> None:
         self._allowed = frozenset(h.strip().casefold().rstrip(".") for h in allowed_hosts if h)
         self._max_retries = max(0, max_retries)
         self._sleep = sleep or _async_sleep
-        self._follow_redirects = follow_redirects
+        self._follow_redirects = follow_redirects or bootstrap_redirect
+        self._bootstrap_redirect = bootstrap_redirect
         # Redirect-following is NEVER delegated to httpx: it would chase a 3xx
         # internally without re-checking the allowlist, so a vendor (or anyone
         # who can influence a vendor's redirect chain) could bounce the request
@@ -110,23 +112,43 @@ class AllowlistedClient:
         same :meth:`_guard` as the original URL *before* any connection attempt,
         so the allowlist holds across the whole redirect chain — the SSRF
         guarantee httpx's internal following would silently bypass.
+
+        With ``bootstrap_redirect=True`` (RDAP), exactly one hop issued by an
+        allowlisted host may leave the allowlist — https only — because the
+        vendor's documented job is to designate the authoritative host. The
+        designated host gets exactly one request: a further redirect from it
+        soft-fails, so a registrant-chosen second hop can never be followed.
         """
         self._guard(url)
         request = self._client.build_request(method, url, **kwargs)
         redirects = 0
+        off_allowlist = False
         while True:
             response = await self._send_with_backoff(request)
             next_request = response.next_request
             if not (self._follow_redirects and response.is_redirect and next_request is not None):
                 return response
+            if off_allowlist:
+                # The bootstrap-designated host got its one request; it may not
+                # forward us anywhere else (e.g. a registry bouncing to the
+                # registrant-chosen registrar RDAP) — soft-fail instead.
+                raise SSRFGuardError("refused redirect issued by a bootstrap-designated host")
             if redirects >= _MAX_REDIRECTS:
                 # Soft-fail (never names the path/query, which can carry
                 # per-victim data): the orchestrator notes it and moves on.
                 raise ConnectorError(f"gave up after {_MAX_REDIRECTS} redirects")
             await response.aclose()
             # The load-bearing re-check: the redirect target is allowlist-guarded
-            # exactly like the original URL before a single byte leaves.
-            self._guard(str(next_request.url))
+            # exactly like the original URL before a single byte leaves. The one
+            # exception: a bootstrap redirector's designated host (https only).
+            try:
+                self._guard(str(next_request.url))
+            except SSRFGuardError:
+                if not self._bootstrap_redirect:
+                    raise
+                if next_request.url.scheme != "https":
+                    raise SSRFGuardError("refused non-https bootstrap redirect target") from None
+                off_allowlist = True
             request = next_request
             redirects += 1
 

@@ -22,7 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   redirects are followed hop-by-hop with the host allowlist re-applied to every
   redirect target before any connection, and a chain longer than 5 hops
   soft-fails. Previously a vendor 3xx could bounce the one redirect-following
-  connector (RDAP) to a non-allowlisted host unchecked.
+  connector (RDAP) to a non-allowlisted host unchecked. RDAP's legitimate
+  bootstrap flow (`rdap.org` → authoritative registry) still works via a
+  narrow, declared exception: exactly one redirect issued by the allowlisted
+  redirector may leave the allowlist (https only), and the designated registry
+  may not redirect again.
+- **API keys are scrubbed from descendant HTTP loggers too** (e.g.
+  `httpcore.http11`): logging filters on a parent logger do not apply to
+  child-logger records, so each existing `httpx.*`/`httpcore.*` logger gets
+  the scrub filter for the duration of an enrichment run.
 - **API keys are scrubbed from HTTP debug logs.** httpx logs every request URL
   at INFO/DEBUG, and Shodan's API key rides in the query string — with verbose
   logging enabled, the key landed in the operator's logs. Known key values

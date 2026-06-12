@@ -65,7 +65,12 @@ network, and it is deliberately narrow (`phishbowl/connectors/`):
   email (the SSRF guarantee). Redirects are never delegated to the HTTP library:
   they are followed hop-by-hop with the same allowlist check applied to every
   redirect target, so a vendor 3xx cannot bounce a request to a non-allowlisted
-  host either. urlscan, the one connector whose vendor can be
+  host either. The one calibrated exception is RDAP's *bootstrap redirect*:
+  `rdap.org`'s documented job is to designate the authoritative registry, so
+  exactly one redirect it issues may leave the allowlist (https only), and the
+  designated registry gets exactly one request — any further redirect (e.g. to
+  a registrant-chosen registrar RDAP) is refused. urlscan, the one connector
+  whose vendor can be
   asked to visit a URL, defaults to **private** and to passive search by domain;
   active submission is a separate, explicit opt-in (`--urlscan-submit`).
 - **Key-gated, env-only secrets.** API keys are read from the environment only,

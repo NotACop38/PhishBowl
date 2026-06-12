@@ -9,11 +9,15 @@ days.
 RDAP is **keyless** and a *passive registry lookup*: it queries the registry's
 RDAP service for the domain, never the suspicious site itself. Discovery goes
 through ``rdap.org``, the community RDAP redirector, which forwards to the
-authoritative registry for the TLD. Because RDAP bootstrapping is inherently a
-cross-host redirect to the *registry* (never the registrant), this is the one
-connector that follows redirects — but the request target is always an RDAP
-service with the domain only in the URL *path*; the email's own URL is never
-fetched, so the SSRF guarantee holds (PRD §9).
+authoritative registry for the TLD (per the IANA bootstrap registry). Because
+RDAP bootstrapping is inherently a cross-host redirect to the *registry*, this
+is the one connector with ``bootstrap_redirect``: exactly one redirect issued
+by ``rdap.org`` may leave the allowlist (https only), and the designated
+registry gets exactly one request — a further redirect (e.g. a registry
+bouncing to the registrant-chosen registrar's RDAP) is refused. The redirect
+target is chosen by rdap.org from IANA data, never by email content; the
+queried domain only ever appears in the URL *path*; the email's own URL is
+never fetched. The SSRF guarantee holds (PRD §9).
 """
 
 from __future__ import annotations
@@ -67,7 +71,9 @@ class RDAPConnector(Connector):
     cache_ttl = 24 * 3600  # registration dates change slowly — cache generously
     rate_limit_per_min = 30
     max_indicators = 12
-    follow_redirects = True  # RDAP bootstrap redirects to the authoritative registry
+    # RDAP bootstrap: rdap.org designates the authoritative registry via one
+    # cross-host redirect (https only, exactly one request, no further hops).
+    bootstrap_redirect = True
 
     async def enrich(self, indicator: Indicator, ctx: EnrichContext) -> EnrichmentResult:
         response = await ctx.http.get(f"{self.base_url}/domain/{indicator.value}")

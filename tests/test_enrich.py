@@ -443,6 +443,87 @@ def test_redirect_chain_past_cap_soft_fails() -> None:
     assert len(calls) == _MAX_REDIRECTS + 1
 
 
+def test_rdap_bootstrap_redirect_to_registry_completes_the_lookup() -> None:
+    # The real RDAP flow: rdap.org answers with a cross-host 302 to the
+    # authoritative registry (off the static allowlist). With
+    # bootstrap_redirect, that one vendor-designated https hop is followed and
+    # the lookup completes — the regression a strict per-hop allowlist would
+    # otherwise cause (every RDAP lookup soft-failing).
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        if request.url.host == "rdap.org":
+            return httpx.Response(
+                302,
+                headers={"Location": f"https://rdap.registry.example{request.url.path}"},
+            )
+        return httpx.Response(
+            200,
+            json={"events": [{"eventAction": "registration", "eventDate": "2026-05-30T00:00:00Z"}]},
+        )
+
+    target = Indicator("domain", "fresh-phish.example", "fresh-phish[.]example")
+    status = run_one("rdap", target, handler)
+
+    assert seen_hosts == ["rdap.org", "rdap.registry.example"]
+    assert status.outcome is ConnectorOutcome.USED
+    assert status.results[0].signals[0].id == "enrichment.rdap.young_domain"
+
+
+def test_bootstrap_designated_host_may_not_redirect_again() -> None:
+    # The registry got its one request; a second hop (e.g. to the
+    # registrant-chosen registrar's RDAP) is exactly the attacker-influenced
+    # path the guard exists to block.
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        if request.url.host == "rdap.org":
+            return httpx.Response(302, headers={"Location": "https://rdap.registry.example/d"})
+        return httpx.Response(
+            302, headers={"Location": "https://rdap.attacker-registrar.example/d"}
+        )
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+    )
+
+    async def go() -> None:
+        with pytest.raises(SSRFGuardError):
+            await client.get("https://rdap.org/domain/x.example")
+        await client.aclose()
+
+    import asyncio
+
+    asyncio.run(go())
+    # The registrar host was never contacted.
+    assert seen_hosts == ["rdap.org", "rdap.registry.example"]
+
+
+def test_bootstrap_redirect_must_be_https() -> None:
+    # A plaintext designated host would be MITM-able; refuse it outright.
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "http://rdap.registry.example/d"})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+    )
+
+    async def go() -> None:
+        with pytest.raises(SSRFGuardError):
+            await client.get("https://rdap.org/domain/x.example")
+        await client.aclose()
+
+    import asyncio
+
+    asyncio.run(go())
+
+
 def test_redirects_not_followed_unless_opted_in() -> None:
     # Connectors that don't declare follow_redirects get the 3xx back verbatim —
     # nothing is chased on their behalf.
@@ -658,6 +739,26 @@ def test_connector_crash_log_never_carries_a_secret(caplog: pytest.LogCaptureFix
     assert status.outcome is ConnectorOutcome.FAILED
     assert "RuntimeError" in caplog.text  # the traceback is retained…
     assert _SENTINEL not in caplog.text  # …but the key never is
+
+
+def test_descendant_http_logger_records_are_scrubbed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # Filters on a parent logger do NOT apply to records emitted through child
+    # loggers (httpcore.http11, httpcore.connection, …) — each descendant gets
+    # the filter, so a child trace carrying the key is scrubbed too.
+    import logging
+
+    from phishbowl.connectors.engine import _scrubbed_http_logs
+
+    # Materialize a child logger the way httpcore does at import time.
+    child = logging.getLogger("httpcore.http11")
+    with caplog.at_level(logging.DEBUG):
+        with _scrubbed_http_logs(frozenset({_SENTINEL})):
+            child.debug("send_request_headers.started target=/host?key=%s", _SENTINEL)
+
+    assert "send_request_headers" in caplog.text  # the trace itself survives…
+    assert _SENTINEL not in caplog.text  # …the key does not
 
 
 def test_scrub_secrets_strips_an_echoed_key() -> None:
