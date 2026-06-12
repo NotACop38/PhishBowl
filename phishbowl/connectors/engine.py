@@ -77,7 +77,10 @@ class _SecretScrubFilter(logging.Filter):
         self._secrets = secrets
 
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - a malformed record must not break the caller
+            return True
         scrubbed = scrub_secrets(message, self._secrets)
         if scrubbed != message:
             record.msg = scrubbed

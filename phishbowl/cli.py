@@ -37,6 +37,7 @@ from rich.console import Console
 from phishbowl.connectors import EnrichmentReport, EnrichmentSettings, enrich_email
 from phishbowl.export import render_sentinel, render_xsoar
 from phishbowl.extract import extract_iocs
+from phishbowl.models import ParsedEmail
 from phishbowl.parse import parse, parse_bytes, sniff_suffix
 from phishbowl.parse.limits import read_stream_within_limit
 from phishbowl.report import (
@@ -67,7 +68,7 @@ def main() -> None:
     """
 
 
-def _parse_stdin():
+def _parse_stdin() -> ParsedEmail:
     """Read an email from stdin (``analyze -``) and parse it (PRD §6.1).
 
     Stdin has no filename to dispatch on, so the format is sniffed from the
