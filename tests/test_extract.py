@@ -151,11 +151,21 @@ def test_defang_dispatch_matches_typed_helpers() -> None:
         ("2001:db8::6660", IOCType.IPV6),
         ("user@evil.example", IOCType.EMAIL),
         ("evil.example", IOCType.DOMAIN),
+        # Dangerous code/data URI schemes: the colon is bracketed once (never
+        # doubled), and the round-trip recovers the original exactly.
+        ("javascript:alert(1)", IOCType.URL),
+        ("data:text/html;base64,AAAA", IOCType.URL),
+        ("vbscript:MsgBox(1)", IOCType.URL),
     ],
 )
 def test_defang_round_trips(value: str, ioc_type: IOCType) -> None:
     # Defang then refang must recover the original indicator exactly.
     assert refang(defang(value, ioc_type)) == value
+
+
+def test_dangerous_scheme_defang_brackets_the_colon_once() -> None:
+    assert defang_url("javascript:alert(1)") == "javascript[:]alert(1)"
+    assert defang_url("data:text/html;base64,AAAA") == "data[:]text/html;base64,AAAA"
 
 
 # --- End-to-end extraction over the synthetic fixture ----------------------

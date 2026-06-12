@@ -223,6 +223,28 @@ def test_cache_respects_ttl(tmp_path: Path) -> None:
     assert cache.get("rdap", "domain", "other.example", ttl=24 * 3600) is None
 
 
+def test_cache_entries_are_private_to_the_operator(tmp_path: Path) -> None:
+    # The cache holds the analyzed email's indicators; on a shared host another
+    # local user must not be able to read which samples were triaged. The tree
+    # we own is 0700 and each entry 0600.
+    import stat
+
+    cache = EnrichmentCache(tmp_path / "enrichment", enabled=True, now=_fixed_now)
+    cache.put(
+        EnrichmentResult(
+            connector="rdap",
+            ioc_type="domain",
+            indicator="d.example",
+            verdict=EnrichmentVerdict.BENIGN,
+        )
+    )
+
+    entry = next((tmp_path / "enrichment").rglob("*.json"))
+    assert stat.S_IMODE(entry.stat().st_mode) == 0o600
+    assert stat.S_IMODE((tmp_path / "enrichment").stat().st_mode) == 0o700
+    assert stat.S_IMODE(entry.parent.stat().st_mode) == 0o700
+
+
 # --------------------------------------------------------------------------- #
 # 3. Rate-limit / backoff path                                                 #
 # --------------------------------------------------------------------------- #
@@ -324,6 +346,119 @@ def test_ssrf_guard_rejects_an_email_derived_url() -> None:
         # The vendor's own API is allowed.
         ok = await client.get("https://www.virustotal.com/api/v3/domains/x")
         assert ok.status_code == 200
+        await client.aclose()
+
+    asyncio.run(go())
+
+
+def test_redirect_to_non_allowlisted_host_is_blocked() -> None:
+    # The allowlist must hold across the WHOLE redirect chain: httpx's internal
+    # following would chase a 3xx without re-checking, so redirects are followed
+    # hop-by-hop with the guard re-run on every target. A vendor 302 pointing at
+    # a non-allowlisted host (here the cloud metadata endpoint) is refused
+    # before any connection attempt.
+    import asyncio
+
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        return httpx.Response(
+            302, headers={"Location": "https://169.254.169.254/latest/meta-data/"}
+        )
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+
+    async def go() -> None:
+        with pytest.raises(SSRFGuardError) as excinfo:
+            await client.get("https://rdap.org/domain/x.example")
+        assert "169.254.169.254" in str(excinfo.value)
+        await client.aclose()
+
+    asyncio.run(go())
+    # The hostile redirect target was never contacted.
+    assert seen_hosts == ["rdap.org"]
+
+
+def test_redirect_within_allowlist_is_followed() -> None:
+    # Legitimate vendor chains (RDAP bootstrap → authoritative registry) still
+    # work: every hop passes the guard, so the chain completes.
+    import asyncio
+
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        if request.url.host == "rdap.org":
+            return httpx.Response(
+                302, headers={"Location": "https://rdap.verisign.com/com/v1/domain/x"}
+            )
+        return httpx.Response(200, json={"events": []})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org", "rdap.verisign.com"}),
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+
+    async def go() -> None:
+        response = await client.get("https://rdap.org/domain/x.example")
+        assert response.status_code == 200
+        await client.aclose()
+
+    asyncio.run(go())
+    assert seen_hosts == ["rdap.org", "rdap.verisign.com"]
+
+
+def test_redirect_chain_past_cap_soft_fails() -> None:
+    # An endless (even allowlisted) redirect loop is given up on with a clean
+    # ConnectorError — a soft-fail note, never a hang or a crash.
+    import asyncio
+
+    from phishbowl.connectors.errors import ConnectorError
+    from phishbowl.connectors.http import _MAX_REDIRECTS
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(302, headers={"Location": "https://rdap.org/loop"})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        follow_redirects=True,
+    )
+
+    async def go() -> None:
+        with pytest.raises(ConnectorError):
+            await client.get("https://rdap.org/domain/x.example")
+        await client.aclose()
+
+    asyncio.run(go())
+    assert len(calls) == _MAX_REDIRECTS + 1
+
+
+def test_redirects_not_followed_unless_opted_in() -> None:
+    # Connectors that don't declare follow_redirects get the 3xx back verbatim —
+    # nothing is chased on their behalf.
+    import asyncio
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"Location": "https://anywhere.example/"})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+    )
+
+    async def go() -> None:
+        response = await client.get("https://rdap.org/domain/x.example")
+        assert response.status_code == 302
         await client.aclose()
 
     asyncio.run(go())
@@ -460,6 +595,69 @@ def test_api_keys_never_leak_into_any_output(
         assert _SENTINEL not in text, f"secret leaked into {channel}"
     # And enrichment really did run (so the assertions aren't vacuous).
     assert report.status_for("abuseipdb").outcome is ConnectorOutcome.USED
+
+
+def test_api_keys_never_leak_into_cache_files_or_logs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # The path that actually handles the secret — connector request, scrub,
+    # cache write, logging — must never persist or log it, even when the vendor
+    # echoes the key back in its response body.
+    import logging
+
+    monkeypatch.setenv("SHODAN_API_KEY", _SENTINEL)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ports": [3389], "echoed_key": _SENTINEL})
+
+    target = Indicator("ipv4", "8.8.8.8", "8[.]8[.]8[.]8")
+    with caplog.at_level(logging.DEBUG):
+        status = run_one(
+            "shodan", target, handler, api_keys={}, cache_enabled=True, cache_dir=tmp_path
+        )
+
+    assert status.outcome is ConnectorOutcome.USED
+    entries = list(tmp_path.rglob("*.json"))
+    assert entries  # non-vacuous: a result really was cached
+    for entry in entries:
+        assert _SENTINEL not in entry.read_text(encoding="utf-8")
+    assert _SENTINEL not in caplog.text
+
+
+def test_connector_crash_log_never_carries_a_secret(caplog: pytest.LogCaptureFixture) -> None:
+    # The last-resort crash log keeps the traceback for debuggability — but if a
+    # buggy connector embeds its key in the exception message, the log is
+    # scrubbed before it is emitted (PRD §11: secrets are never logged).
+    import asyncio
+    import logging
+
+    from phishbowl.connectors.engine import _run_one_connector
+
+    class _LeakyBoomConnector(Connector):
+        name = "leaky-boom-test"
+        supported_ioc_types = frozenset({"domain"})
+        requires_api_key = False
+        allowed_hosts = frozenset({"api.boom.example"})
+
+        async def enrich(self, indicator: Indicator, ctx) -> EnrichmentResult:
+            raise RuntimeError(f"request failed: key={_SENTINEL}")
+
+    async def go():
+        return await _run_one_connector(
+            _LeakyBoomConnector(),
+            [Indicator("domain", "d.example", "d[.]example")],
+            make_settings(lambda r: httpx.Response(200)),
+            EnrichmentCache(enabled=False),
+            asyncio.Semaphore(2),
+            frozenset({_SENTINEL}),
+        )
+
+    with caplog.at_level(logging.WARNING):
+        status = asyncio.run(go())
+
+    assert status.outcome is ConnectorOutcome.FAILED
+    assert "RuntimeError" in caplog.text  # the traceback is retained…
+    assert _SENTINEL not in caplog.text  # …but the key never is
 
 
 def test_scrub_secrets_strips_an_echoed_key() -> None:

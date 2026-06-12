@@ -163,6 +163,46 @@ def test_no_redaction_by_default_keeps_full_fidelity() -> None:
     assert "[redacted" not in render_json(_report(MALICIOUS))
 
 
+def test_hop_text_display_names_and_auth_detail_are_defanged() -> None:
+    # Received-hop text, address display names, and auth details all quote
+    # attacker-influenced header content; the view contract says every
+    # free-text field is defanged, so a copy-paste from the report can never
+    # hand an analyst a live URL/IP from any of them.
+    from phishbowl.parse import parse_eml
+
+    raw = (
+        b"Received: from mail.evil-relay.example (mail.evil-relay.example "
+        b"[203.0.113.9]) by mx.example.org with ESMTPS; "
+        b"Mon, 02 Jun 2026 09:00:00 +0000\r\n"
+        b'From: "http://lure.evil-relay.example/claim" <noreply@evil-relay.example>\r\n'
+        b"To: analyst@example.org\r\n"
+        b"Subject: synthetic defang coverage\r\n"
+        b"Authentication-Results: mx.example.org; spf=fail "
+        b"(sender ip is 203.0.113.9) smtp.mailfrom=evil-relay.example\r\n"
+        b"\r\n"
+        b"Synthetic body.\r\n"
+    )
+    parsed = parse_eml(raw, filename="synthetic.eml")
+    iocs = extract_iocs(parsed)
+    config = load_config()
+    view = build_report(parsed, iocs, score_email(parsed, iocs, config), config=config)
+
+    hop = view.routing[0]
+    assert "203[.]0[.]113[.]9" in hop.raw
+    assert "203.0.113.9" not in hop.raw
+    # Bare hostnames in hop prose follow the same free-text policy as subjects:
+    # left legible (they are not one-click linkable), only URL/email/IP tokens
+    # are rewritten.
+    assert hop.from_ == "mail.evil-relay.example"
+
+    assert "hxxp://lure[.]evil-relay[.]example/claim" in (view.from_.display_name or "")
+    assert "http://" not in (view.from_.display_name or "")
+
+    spf = next(a for a in view.auth if a.mechanism == "SPF")
+    assert "203[.]0[.]113[.]9" in (spf.detail or "")
+    assert "203.0.113.9" not in (spf.detail or "")
+
+
 # --------------------------------------------------------------------------- #
 # defang_text helper                                                          #
 # --------------------------------------------------------------------------- #
