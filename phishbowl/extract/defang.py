@@ -23,7 +23,9 @@ _SCHEME_RE = re.compile(r"^(https?)(?=://)", re.IGNORECASE)
 # Dangerous code-execution / data URI schemes. A link extracted from a hostile
 # message can carry these (e.g. an anchor href), and they must never appear live
 # in any output, so we neuter the colon: ``javascript:`` -> ``javascript[:]``.
-_DANGEROUS_SCHEME_RE = re.compile(r"^(javascript|data|vbscript)(?=:)", re.IGNORECASE)
+# The colon is consumed (not a lookahead) so it is replaced, not duplicated —
+# keeping the refang round-trip lossless.
+_DANGEROUS_SCHEME_RE = re.compile(r"^(javascript|data|vbscript):", re.IGNORECASE)
 
 # Indicator-shaped tokens inside free text (subject, body preview, evidence). We
 # only ever defang things that are actually clickable/copyable indicators — full

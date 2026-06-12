@@ -5,6 +5,56 @@ All notable changes to PhishBowl are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Stdin input** — `phishbowl analyze -` reads the email from stdin (PRD §6.1),
+  so it can be piped straight from another tool (e.g.
+  `curl … | phishbowl analyze -`). The format is sniffed from the bytes (OLE2
+  magic → `.msg`, else `.eml`), the read is bounded by the same size cap as
+  files and uploads, and an empty stream is a clean usage error.
+
+### Security
+
+- **SSRF guard now holds across redirects.** The connector HTTP client no
+  longer delegates redirect-following to httpx (which re-checks nothing):
+  redirects are followed hop-by-hop with the host allowlist re-applied to every
+  redirect target before any connection, and a chain longer than 5 hops
+  soft-fails. Previously a vendor 3xx could bounce the one redirect-following
+  connector (RDAP) to a non-allowlisted host unchecked. RDAP's legitimate
+  bootstrap flow (`rdap.org` → authoritative registry) still works via a
+  narrow, declared exception: exactly one redirect issued by the allowlisted
+  redirector may leave the allowlist (https only), and the designated registry
+  may not redirect again.
+- **API keys are scrubbed from descendant HTTP loggers too** (e.g.
+  `httpcore.http11`): logging filters on a parent logger do not apply to
+  child-logger records, so each existing `httpx.*`/`httpcore.*` logger gets
+  the scrub filter for the duration of an enrichment run.
+- **API keys are scrubbed from HTTP debug logs.** httpx logs every request URL
+  at INFO/DEBUG, and Shodan's API key rides in the query string — with verbose
+  logging enabled, the key landed in the operator's logs. Known key values
+  (env *and* programmatic) are now scrubbed from the `httpx`/`httpcore` loggers
+  for the duration of an enrichment run, and from connector crash tracebacks.
+- **Enrichment cache entries are now private** (`0700` directories, `0600`
+  files): they hold the analyzed email's indicators, which other local users on
+  a shared host should not be able to read.
+- **Received-hop text, address display names, and auth details are now
+  defanged** in all outputs, closing the gap where a forged `Received` header
+  or a URL-bearing display name could hand an analyst a live IP/URL on
+  copy-paste (the view contract already promised this).
+- Raised the `urllib3` transitive floor to `>=2.7.0` (PYSEC-2026-141/142).
+
+### Fixed
+
+- Defanging a `javascript:`/`data:`/`vbscript:` URI no longer doubles the
+  colon (`javascript[:]:…` → `javascript[:]…`), restoring the documented
+  lossless `refang` round-trip for those URIs.
+- `make test` / `make lint` / `make format` now invoke pytest and ruff via
+  `python3 -m …` instead of bare executables, so they always run from the
+  interpreter that has PhishBowl's dependencies installed (a bare `pytest` on
+  PATH may live in an unrelated, isolated tool environment).
+
 ## [0.1.0] — 2026-06-05
 
 Inaugural release. PhishBowl is a self-hostable, vendor-neutral,

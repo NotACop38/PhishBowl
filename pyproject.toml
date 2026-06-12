@@ -47,11 +47,11 @@ dependencies = [
     # pip-audit). Not imported directly — pinned only to keep a fresh install off
     # versions with known CVEs: `cryptography` arrives via
     # extract-msg → msoffcrypto-tool; `idna` via httpx; `urllib3` via requests
-    # (CVE-2025-50181/50182 redirect handling fixed in 2.5.0, CVE-2025-66418
-    # decompression-chain DoS fixed in 2.6.0).
+    # (PYSEC-2026-141/142 fixed in 2.7.0; earlier CVE-2025-50181/50182 redirect
+    # handling and CVE-2025-66418 decompression-chain DoS).
     "cryptography>=46.0.6",
     "idna>=3.15",
-    "urllib3>=2.6.0",
+    "urllib3>=2.7.0",
 ]
 
 [project.optional-dependencies]

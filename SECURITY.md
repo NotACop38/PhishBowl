@@ -62,12 +62,23 @@ network, and it is deliberately narrow (`phishbowl/connectors/`):
 - **Allowlisted egress only.** Each connector declares the vendor host(s) it may
   reach, and its HTTP client refuses any other host *before* connecting — so a
   connector can never be coerced into fetching a URL taken from the analyzed
-  email (the SSRF guarantee). urlscan, the one connector whose vendor can be
+  email (the SSRF guarantee). Redirects are never delegated to the HTTP library:
+  they are followed hop-by-hop with the same allowlist check applied to every
+  redirect target, so a vendor 3xx cannot bounce a request to a non-allowlisted
+  host either. The one calibrated exception is RDAP's *bootstrap redirect*:
+  `rdap.org`'s documented job is to designate the authoritative registry, so
+  exactly one redirect it issues may leave the allowlist (https only), and the
+  designated registry gets exactly one request — any further redirect (e.g. to
+  a registrant-chosen registrar RDAP) is refused. urlscan, the one connector
+  whose vendor can be
   asked to visit a URL, defaults to **private** and to passive search by domain;
   active submission is a separate, explicit opt-in (`--urlscan-submit`).
 - **Key-gated, env-only secrets.** API keys are read from the environment only,
-  never logged, never written to an output, and defensively scrubbed from any
-  retained vendor response.
+  never logged (key values are scrubbed even from the HTTP libraries' debug
+  logs and from connector crash tracebacks), never written to an output or the
+  on-disk cache, and defensively scrubbed from any retained vendor response.
+  Cache entries are written `0600` in a `0700` tree, since they hold the
+  analyzed email's indicators.
 - **Graceful degrade.** A missing key skips a connector with a note; a network or
   API error soft-fails it with a note; nothing crashes the run. The offline
   verdict is always computed first and never depends on enrichment.
@@ -101,9 +112,10 @@ pip-audit
 - **pip-audit:** the transitive dependencies in Phishbowl's runtime closure
   (`cryptography` via `extract-msg` → `msoffcrypto-tool`, `idna` via `httpx`, and
   `urllib3` via `requests`) are pinned to non-vulnerable floors in
-  `pyproject.toml`. (`requests` is a direct dependency because `iocextract`
+  `pyproject.toml` (`urllib3>=2.7.0` covers PYSEC-2026-141/142). (`requests` is a
+  direct dependency because `iocextract`
   imports it without declaring it; it pulls `urllib3` into the closure, hence the
-  `urllib3>=2.6.0` floor.) Any other findings in a given environment come from
+  `urllib3` floor.) Any other findings in a given environment come from
   build/CI tooling (`pip`, `wheel`, `setuptools`) or unrelated pre-installed
   packages (`pyjwt`, `urllib3` via `conan`/`oauthlib`) that are **not** part of
   Phishbowl's dependency graph.

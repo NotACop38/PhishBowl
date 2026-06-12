@@ -16,7 +16,9 @@ from typer.testing import CliRunner
 
 from phishbowl.cli import app
 
-FIXTURE = Path(__file__).parent / "fixtures" / "benign_newsletter.eml"
+FIXTURES = Path(__file__).parent / "fixtures"
+FIXTURE = FIXTURES / "benign_newsletter.eml"
+MSG_FIXTURE = FIXTURES / "synthetic_phish.msg"
 
 runner = CliRunner()
 
@@ -50,3 +52,28 @@ def test_analyze_command_missing_msg_file() -> None:
     result = runner.invoke(app, ["analyze", "/does/not/exist.msg"])
 
     assert result.exit_code != 0
+
+
+def test_analyze_dash_reads_eml_from_stdin() -> None:
+    result = runner.invoke(app, ["analyze", "-"], input=FIXTURE.read_bytes())
+
+    assert result.exit_code == 0
+    assert "VERDICT" in result.stdout
+    # Stdin has no filename; the sniffed format shows in the source banner.
+    assert "stdin.eml" in result.stdout
+
+
+def test_analyze_dash_sniffs_msg_from_stdin() -> None:
+    # No suffix to dispatch on — the OLE2 magic alone must route to the .msg parser.
+    result = runner.invoke(app, ["analyze", "-"], input=MSG_FIXTURE.read_bytes())
+
+    assert result.exit_code == 0
+    assert "VERDICT" in result.stdout
+    assert "stdin.msg" in result.stdout
+
+
+def test_analyze_dash_empty_stdin_is_clean_error() -> None:
+    result = runner.invoke(app, ["analyze", "-"], input=b"")
+
+    assert result.exit_code != 0
+    assert "stdin" in result.output

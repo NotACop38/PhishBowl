@@ -1,6 +1,6 @@
 # Phishbowl — Product Requirements Document
 
-**Status:** Draft v1 (living document) · **Owner:** project lead · **Last updated:** 2026-06-03
+**Status:** v1 (living document; all phases incl. the Phase 7 stretch are built) · **Owner:** project lead · **Last updated:** 2026-06-12
 
 A self-hostable, vendor-neutral phishing triage tool. Drop in a suspicious email → parse it → extract and defang IOCs → enrich via OSINT → risk-score → produce an analyst-ready report, with optional SOAR playbook export.
 
@@ -200,7 +200,10 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 - **Secrets** — API keys via env vars / a gitignored config file. Never logged, never written into the report or JSON, redacted from any debug output. Ship `.env.example`.
 - **Config** — YAML for scoring weights, verdict bands, connector toggles, org domains (for lookalike detection), and redaction rules. Sensible zero-config defaults.
 - **PII redaction** — opt-in; clearly defines and redacts recipients, internal hostnames/IPs, and configured fields.
-- **Logging** — structured, secret-safe, with a quiet default and a `--verbose` mode.
+- **Logging** — quiet by default and secret-safe: API-key values are scrubbed
+  even from the HTTP libraries' debug logs and connector crash tracebacks.
+  Parse-layer issues surface as report *anomalies* (visible to the analyst)
+  rather than log noise; a structured `--verbose` mode remains future work.
 - **Errors** — a malformed email or failing connector degrades gracefully with a noted partial result; it never crashes the run.
 
 ## 12. Key technical decisions
@@ -238,7 +241,8 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 
 ## 15. Out of scope / future
 
-- FastAPI upload UI (stretch — the contract is designed so it's additive, not a rewrite).
+- ~~FastAPI upload UI~~ — **built** (Phase 7 stretch): `phishbowl serve` runs the
+  same offline pipeline behind an optional `web` extra, additive as designed.
 - Additional connectors (community-driven via the plugin API).
 - Archive content inspection / deeper attachment analysis (still no detonation).
 - Multi-email / mailbox batch triage.

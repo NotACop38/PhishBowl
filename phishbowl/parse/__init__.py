@@ -25,7 +25,14 @@ from .eml import parse_file as parse_eml_file
 from .msg import parse_file as parse_msg_file
 from .msg import parse_msg
 
-__all__ = ["parse", "parse_bytes", "parse_eml", "parse_msg", "SUPPORTED_SUFFIXES"]
+__all__ = [
+    "parse",
+    "parse_bytes",
+    "parse_eml",
+    "parse_msg",
+    "sniff_suffix",
+    "SUPPORTED_SUFFIXES",
+]
 
 _EML_SUFFIXES = {".eml"}
 _MSG_SUFFIXES = {".msg"}
@@ -33,6 +40,10 @@ _MSG_SUFFIXES = {".msg"}
 # The input formats Phishbowl accepts, for callers (e.g. the upload UI) that need
 # to validate a filename's type *before* handing bytes to a parser.
 SUPPORTED_SUFFIXES = frozenset(_EML_SUFFIXES | _MSG_SUFFIXES)
+
+# Every .msg is an OLE2 compound document and opens with this fixed signature;
+# no legitimate RFC 822 message can start with these bytes.
+_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def _unsupported(suffix: str) -> ValueError:
@@ -77,3 +88,14 @@ def parse_bytes(data: bytes, filename: str) -> ParsedEmail:
         return parse_msg(data, filename=filename)
 
     raise _unsupported(Path(filename).suffix)
+
+
+def sniff_suffix(data: bytes) -> str:
+    """Detect the input format of raw email bytes: ``".msg"`` or ``".eml"``.
+
+    For sources with no filename to dispatch on (stdin, a pipe), the format is
+    sniffed from the bytes themselves: an OLE2 magic prefix means an Outlook
+    ``.msg``; anything else is treated as RFC 822 text, whose parser already
+    degrades a malformed message into a noted partial result (PRD §11).
+    """
+    return ".msg" if data.startswith(_OLE_MAGIC) else ".eml"

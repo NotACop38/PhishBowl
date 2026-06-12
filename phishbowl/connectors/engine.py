@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import traceback
+from contextlib import contextmanager
 
 import httpx
 
@@ -53,6 +55,67 @@ from .secrets import active_key_values, env_var_for, scrub_secrets
 from .targets import build_targets
 
 log = logging.getLogger(__name__)
+
+# Loggers that can see a full request URL: httpx logs every request line at
+# INFO/DEBUG, httpcore traces at DEBUG. Shodan's API key rides in the query
+# string, so with debug logging enabled these would otherwise print the key.
+_HTTP_LOGGERS = ("httpx", "httpcore")
+
+
+class _SecretScrubFilter(logging.Filter):
+    """Rewrites known key values out of a log record before it is emitted.
+
+    Secrets are never logged (PRD §11) — but third-party HTTP libraries log
+    request URLs, and some vendors (Shodan) require the key as a query
+    parameter. This filter is attached to those loggers for the duration of an
+    enrichment run so the operator can debug at any verbosity without a key
+    landing in their logs.
+    """
+
+    def __init__(self, secrets: frozenset[str]) -> None:
+        super().__init__()
+        self._secrets = secrets
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # noqa: BLE001 - a malformed record must not break the caller
+            return True
+        scrubbed = scrub_secrets(message, self._secrets)
+        if scrubbed != message:
+            record.msg = scrubbed
+            record.args = None
+        return True
+
+
+def _http_logger_names() -> set[str]:
+    """The HTTP loggers to scrub: the parents plus every existing descendant.
+
+    A :class:`logging.Filter` on a parent logger does **not** apply to records
+    emitted through child loggers (``httpcore.http11``, ``httpcore.connection``,
+    …) — propagation runs ancestor *handlers*, not ancestor filters — so each
+    descendant needs the filter too. Both libraries create their loggers at
+    import time, which has happened by the time enrichment runs.
+    """
+    prefixes = tuple(f"{name}." for name in _HTTP_LOGGERS)
+    names = set(_HTTP_LOGGERS)
+    names.update(n for n in logging.Logger.manager.loggerDict if n.startswith(prefixes))
+    return names
+
+
+@contextmanager
+def _scrubbed_http_logs(secrets: frozenset[str]):
+    """Attach the secret-scrub filter to the HTTP loggers; always detach after."""
+    pairs = [
+        (logging.getLogger(name), _SecretScrubFilter(secrets)) for name in _http_logger_names()
+    ]
+    for logger, filt in pairs:
+        logger.addFilter(filt)
+    try:
+        yield
+    finally:
+        for logger, filt in pairs:
+            logger.removeFilter(filt)
 
 
 def enrich_email(
@@ -91,15 +154,18 @@ async def run_enrichment_async(
     """Enrich ``targets`` across all selected connectors, concurrently and safely."""
     connectors = _select_connectors(settings)
     cache = EnrichmentCache(settings.cache_dir, enabled=settings.cache_enabled, now=settings.now)
-    secrets = active_key_values()
+    # Everything key-shaped we know about — env vars *and* programmatic
+    # overrides — so the defensive scrub covers the library-use path too.
+    secrets = active_key_values() | frozenset(v for v in settings.api_keys.values() if v)
     semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
-    statuses = await asyncio.gather(
-        *(
-            _run_one_connector(cls(), targets, settings, cache, semaphore, secrets)
-            for cls in connectors
+    with _scrubbed_http_logs(secrets):
+        statuses = await asyncio.gather(
+            *(
+                _run_one_connector(cls(), targets, settings, cache, semaphore, secrets)
+                for cls in connectors
+            )
         )
-    )
     # Stable, name-sorted ordering so reports read the same run to run.
     statuses = tuple(sorted(statuses, key=lambda s: s.connector))
     return EnrichmentReport(enabled=True, statuses=statuses)
@@ -147,6 +213,7 @@ async def _run_one_connector(
         transport=settings.transport,
         sleep=settings.sleep,
         follow_redirects=connector.follow_redirects,
+        bootstrap_redirect=connector.bootstrap_redirect,
     )
     ctx = EnrichContext(http=client, settings=settings, api_key=api_key, now=settings.clock())
 
@@ -160,7 +227,9 @@ async def _run_one_connector(
                 results.append(cached.as_cached())
                 cache_hits += 1
                 continue
-            result = await _enrich_one(connector, indicator, ctx, limiter, semaphore, failures)
+            result = await _enrich_one(
+                connector, indicator, ctx, limiter, semaphore, failures, secrets
+            )
             if result is not None:
                 result = _sanitize(result, secrets)
                 cache.put(result)
@@ -178,6 +247,7 @@ async def _enrich_one(
     limiter: RateLimiter,
     semaphore: asyncio.Semaphore,
     failures: list[str],
+    secrets: frozenset[str],
 ) -> EnrichmentResult | None:
     """One guarded enrichment call: rate-limited, concurrency-capped, soft-failing."""
     await limiter.acquire()
@@ -190,7 +260,11 @@ async def _enrich_one(
             # Network/transport failure (timeout, DNS, connection reset, …).
             failures.append(f"network error: {exc.__class__.__name__}")
         except Exception:  # noqa: BLE001 - last-resort guard: a connector bug must not crash the run
-            log.warning("connector %r raised an unexpected error", connector.name, exc_info=True)
+            # Keep the traceback for debuggability, but scrub known key values
+            # first — a buggy connector could embed its API key in an exception
+            # message, and secrets are never logged (PRD §11).
+            detail = scrub_secrets(traceback.format_exc(), secrets)
+            log.warning("connector %r raised an unexpected error\n%s", connector.name, detail)
             failures.append("unexpected connector error")
     return None
 

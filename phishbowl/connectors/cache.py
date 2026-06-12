@@ -130,9 +130,16 @@ class EnrichmentCache:
         path = self._path(result.connector, result.ioc_type, result.indicator)
         payload = {"stored_at": self._now().isoformat(), "result": _serialize(result)}
         try:
+            # The cache holds the analyzed email's indicators (URLs, domains,
+            # sending IPs) — keep it private to the operator on shared hosts:
+            # 0700 on the cache tree we own, 0600 on each entry.
             path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(self._dir, 0o700)
+            os.chmod(path.parent, 0o700)
             tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(json.dumps(payload))
             tmp.replace(path)  # atomic swap — a concurrent reader sees old or new, never half
         except OSError:
             return  # a write failure must never crash the run (PRD §11)

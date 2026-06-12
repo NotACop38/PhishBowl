@@ -1,6 +1,6 @@
 # Phishbowl — Engineering Checklist
 
-**Status:** Draft v1 (living document) · Mirrors the build order in `PRD.md` §5.
+**Status:** v1 — all phases complete (0–7, incl. the stretch) · Mirrors the build order in `PRD.md` §5.
 
 Build the **offline core first** (Phases 0–4). The offline MVP — a complete verdict and a gorgeous self-contained HTML report with zero API keys — lands at the end of Phase 4. Enrichment (Phase 5) and SOAR export (Phase 6) layer on top of an already-complete product. We build one phase at a time; the lead approves moving to the next.
 
@@ -16,17 +16,17 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 
 **Decision gates:**
 - [x] Internal model = Pydantic v2 (locked in PRD).
-- [ ] Final `ParsedEmail` field list approved by lead.
+- [x] Final `ParsedEmail` field list approved by lead.
 
 **Tasks:**
-- [ ] `pyproject.toml` packaging (PEP 621), Python 3.11+, pinned core deps (`typer`, `pydantic`, `httpx`, `jinja2`, `rich`, `iocextract`, `extract-msg`, `pytest`).
-- [ ] Package layout (`phishbowl/`: `models/`, `parse/`, `extract/`, `score/`, `report/`, `connectors/`, `cli.py`).
-- [ ] Define the `ParsedEmail` Pydantic model and sub-models (§7 of PRD).
-- [ ] `Typer` entrypoint with a no-op `analyze` command wired to the (stub) pipeline.
-- [ ] One **synthetic** safe fixture email (`tests/fixtures/`), obviously benign.
-- [ ] `pytest` harness + first test: fixture loads into `ParsedEmail`.
-- [ ] Lightweight Makefile (`format`, `lint`, `test`); `make test` is the routine gate. No GitHub Actions, no coverage gate, no type-checker.
-- [ ] `.gitignore`, `.env.example`, MIT license, README stub, `CONTRIBUTING.md` stub stating **no real samples** rule.
+- [x] `pyproject.toml` packaging (PEP 621), Python 3.11+, pinned core deps (`typer`, `pydantic`, `httpx`, `jinja2`, `rich`, `iocextract`, `extract-msg`, `pytest`).
+- [x] Package layout (`phishbowl/`: `models/`, `parse/`, `extract/`, `score/`, `report/`, `connectors/`, `cli.py`).
+- [x] Define the `ParsedEmail` Pydantic model and sub-models (§7 of PRD).
+- [x] `Typer` entrypoint with a no-op `analyze` command wired to the (stub) pipeline.
+- [x] One **synthetic** safe fixture email (`tests/fixtures/`), obviously benign.
+- [x] `pytest` harness + first test: fixture loads into `ParsedEmail`.
+- [x] Lightweight Makefile (`format`, `lint`, `test`); `make test` is the routine gate. No GitHub Actions, no coverage gate, no type-checker.
+- [x] `.gitignore`, `.env.example`, MIT license, README stub, `CONTRIBUTING.md` stub stating **no real samples** rule.
 
 **DoD:** `pip install -e .` then `phishbowl --help` works; the stub command runs end-to-end on the fixture and returns a `ParsedEmail`; `make test` is green.
 
@@ -40,15 +40,15 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 - [x] `.eml` via stdlib `email`; `.msg` via `extract-msg` (locked).
 
 **Tasks:**
-- [ ] `.eml` parser → headers (ordered, duplicates preserved), addresses (display/addr-spec split), subject/date, body parts, attachments.
-- [ ] RFC 2047 encoded-word decoding for subject and display names.
-- [ ] Auth extraction: SPF/DKIM/DMARC from `Authentication-Results` + `Received-SPF`.
-- [ ] `Received` hop parsing → ordered routing path.
-- [ ] Attachment handling: filename, declared type, **magic-byte detection**, size, MD5/SHA1/SHA256, structural flags (archive / macro-capable / extension mismatch / double extension). **No execution, no archive extraction.**
-- [ ] `.msg` parser via `extract-msg`, normalized into the **same** `ParsedEmail` (note lossier auth data).
-- [ ] Structural anomaly notes captured during parsing.
-- [ ] Charset/encoding handling centralized in the parse layer.
-- [ ] Tests: both formats → equivalent `ParsedEmail`; malformed input degrades gracefully (noted partial, no crash).
+- [x] `.eml` parser → headers (ordered, duplicates preserved), addresses (display/addr-spec split), subject/date, body parts, attachments.
+- [x] RFC 2047 encoded-word decoding for subject and display names.
+- [x] Auth extraction: SPF/DKIM/DMARC from `Authentication-Results` + `Received-SPF`.
+- [x] `Received` hop parsing → ordered routing path.
+- [x] Attachment handling: filename, declared type, **magic-byte detection**, size, MD5/SHA1/SHA256, structural flags (archive / macro-capable / extension mismatch / double extension). **No execution, no archive extraction.**
+- [x] `.msg` parser via `extract-msg`, normalized into the **same** `ParsedEmail` (note lossier auth data).
+- [x] Structural anomaly notes captured during parsing.
+- [x] Charset/encoding handling centralized in the parse layer.
+- [x] Tests: both formats → equivalent `ParsedEmail`; malformed input degrades gracefully (noted partial, no crash).
 
 **DoD:** Both formats parse into identical-shape models; auth, routing, addresses, and attachment hashes verified against synthetic fixtures; malformed-email test passes.
 
@@ -180,9 +180,9 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 
 ## Cross-cutting / ongoing (every phase)
 
-- [ ] **Safety invariants** stay enforced & tested: no send, no detonate, no fetch of email URLs, no auto-remediation, no report beaconing (PRD §4).
-- [ ] **Secrets** never logged or written to outputs; `.env.example` kept current (PRD §11).
-- [ ] **Fixtures** synthetic only; CONTRIBUTING reiterates the no-real-samples rule (PRD §4).
-- [ ] **Tests** accompany each feature; `make test` green before advancing a phase.
-- [ ] **Docs** kept in step: README, connector-authoring guide (by Phase 5), glossary, scoring-config guide.
-- [ ] **PRD/CHECKLIST** updated as decisions land (these are living documents).
+- [x] **Safety invariants** stay enforced & tested: no send, no detonate, no fetch of email URLs, no auto-remediation, no report beaconing (PRD §4).
+- [x] **Secrets** never logged or written to outputs; `.env.example` kept current (PRD §11).
+- [x] **Fixtures** synthetic only; CONTRIBUTING reiterates the no-real-samples rule (PRD §4).
+- [x] **Tests** accompany each feature; `make test` green before advancing a phase.
+- [x] **Docs** kept in step: README, connector-authoring guide (by Phase 5), glossary, scoring-config guide.
+- [x] **PRD/CHECKLIST** updated as decisions land (these are living documents).

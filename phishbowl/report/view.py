@@ -12,8 +12,8 @@ Guarantees baked into the view:
 
 * every human-facing indicator carries a **defanged** ``display`` *and* a
   clearly-labelled raw ``value`` (for the JSON consumer), never just one;
-* every free-text field (subject, body preview, rule evidence, hop text) is
-  control-stripped and indicator-defanged;
+* every free-text field (subject, body preview, rule evidence, auth detail,
+  address display names, hop text) is control-stripped and indicator-defanged;
 * the raw HTML body is **never** carried into the view — only an escaped,
   defanged plaintext preview or a neutered-and-withheld note;
 * redaction, when active, is applied to both the ``display`` and the raw
@@ -267,7 +267,12 @@ def _address_view(addr, redactor: Redactor, *, recipient: bool) -> AddressView |
             )
     raw = addr.addr_spec
     return AddressView(
-        display_name=_clean(addr.display_name),
+        # Display names are attacker-chosen free text and can themselves carry a
+        # URL/email/IP — defang like any other free text. Bare domains follow the
+        # same free-text policy as subjects (left legible; not one-click); a brand
+        # domain in a display name is the *scorer's* job
+        # (identity.display_name_brand_mismatch), not the defanger's.
+        display_name=_safe_text(addr.display_name),
         addr_spec_display=defang(raw, IOCType.EMAIL) if raw else None,
         addr_spec_raw=raw,
         domain=addr.domain,
@@ -387,7 +392,9 @@ def build_report(
     redactor = Redactor(policy, parsed, config)
 
     auth = [
-        AuthLineView(mechanism=name, result=line.result.value, detail=_clean(line.detail))
+        # Auth details quote attacker-influenced header text (domains, client
+        # IPs) — defanged like subject/evidence, so copy-paste stays safe.
+        AuthLineView(mechanism=name, result=line.result.value, detail=_safe_text(line.detail))
         for name, line in (
             ("SPF", parsed.auth.spf),
             ("DKIM", parsed.auth.dkim),
@@ -415,13 +422,16 @@ def build_report(
             groups.append(IOCGroupView(type=ioc_type, label=label, items=items))
 
     routing = [
+        # Hop text comes straight from (forgeable) Received headers: redact
+        # first — the redactor must see the un-defanged hosts/IPs to match
+        # internal topology — then defang what survives for safe display.
         HopView(
             index=idx,
-            **{"from": redactor.hop_text(_clean(hop.from_))},
-            by=redactor.hop_text(_clean(hop.by)),
-            **{"with": _clean(hop.with_)},
+            **{"from": defang_text(redactor.hop_text(_clean(hop.from_)))},
+            by=defang_text(redactor.hop_text(_clean(hop.by))),
+            **{"with": _safe_text(hop.with_)},
             timestamp=hop.timestamp.isoformat() if hop.timestamp else None,
-            raw=redactor.hop_text(_clean(hop.raw)) or "",
+            raw=defang_text(redactor.hop_text(_clean(hop.raw))) or "",
         )
         for idx, hop in enumerate(parsed.routing.hops)
     ]
