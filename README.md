@@ -70,7 +70,8 @@ open report.html        # macOS. Use `xdg-open` on Linux, `start` on Windows.
 
 That is it. The terminal prints a colorized verdict summary, and `report.html` is a
 single self-contained file you can attach to a ticket or share with a colleague.
-Want machine-readable output too? Add `--json result.json`.
+Want machine-readable output too? Add `--json result.json`. Piping from another
+tool? `phishbowl analyze -` reads the email from stdin and sniffs the format.
 
 > [!NOTE]
 > **Status.** The **offline core** (parse, extract, defang, score, report) is
@@ -286,7 +287,7 @@ load-bearing and enforced in code and tests ([`CLAUDE.md`](CLAUDE.md), [`docs/PR
 | [`docs/PRD.md`](docs/PRD.md) | Product requirements, the source of truth. |
 | [`docs/CHECKLIST.md`](docs/CHECKLIST.md) | The phased engineering build order. |
 | [`docs/SCORING.md`](docs/SCORING.md) | The scoring-config guide: rule catalog, weights, bands, tuning. |
-| [`docs/CONNECTORS.md`](docs/CONNECTORS.md) | Connector-authoring guide (placeholder, interface lands in Phase 5). |
+| [`docs/CONNECTORS.md`](docs/CONNECTORS.md) | Connector-authoring guide: the `Connector` interface, registration, and a worked example. |
 | [`docs/SOAR_EXPORT.md`](docs/SOAR_EXPORT.md) | SOAR export guide: XSOAR and Sentinel playbook drafts, field mappings, import steps. |
 | [`docs/GLOSSARY.md`](docs/GLOSSARY.md) | Plain-English glossary: IOC, SPF/DKIM/DMARC, defang, Safelinks/URL Defense, SOAR, RDAP, and more. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | How to contribute, including the **no real samples** rule. |
