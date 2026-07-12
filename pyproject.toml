@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "Phishbowl contributors" }]
 keywords = ["phishing", "triage", "security", "soc", "dfir", "email", "ioc"]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 4 - Beta",
     "Environment :: Console",
     "Intended Audience :: Information Technology",
     "License :: OSI Approved :: MIT License",

@@ -64,9 +64,13 @@ order, lowest → highest precedence:
 
 ### From the CLI
 
-The CLI reads the `PHISHBOWL_SCORING_CONFIG` environment variable:
+Pass a site override with ``--scoring-config``, or set the
+``PHISHBOWL_SCORING_CONFIG`` environment variable:
 
 ```bash
+phishbowl analyze suspicious.eml --scoring-config /etc/phishbowl/scoring.yaml --html report.html
+
+# equivalent:
 export PHISHBOWL_SCORING_CONFIG=/etc/phishbowl/scoring.yaml
 phishbowl analyze suspicious.eml --html report.html
 ```
@@ -163,12 +167,13 @@ Default weights from [`defaults.yaml`](../phishbowl/score/defaults.yaml). All ar
 | `attach.type_mismatch` | 16 | Declared content-type ≠ detected magic bytes. |
 | `attach.executable` | 22 | Executable / script / LNK / ISO / disk-image attachment. |
 | `attach.password_protected_archive` | 14 | Password-protected archive. |
+| `attach.archive` | 10 | Plain archive attachment (zip/rar/7z/…). |
 
 ### Content (deliberately weak)
 
 | Rule ID | Default | Fires when |
 |---------|:------:|------------|
-| `content.urgency_keywords` | 4 | Urgency / financial-pressure phrases. Low weight on purpose — high false-positive rate, so it only ever *nudges*. |
+| `content.urgency_keywords` | 4 | Urgency / financial-pressure phrases in subject, plaintext, or visible HTML text. Low weight on purpose — high false-positive rate, so it only ever *nudges*. |
 
 ### Enrichment (opt-in, key-gated)
 

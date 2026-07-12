@@ -2,12 +2,15 @@
 # keep it cheap and fast. Heavier checks (bandit, pip-audit, release build)
 # are run once, in their dedicated phases — never wired in here.
 
-.PHONY: format lint test screenshot demo
+.PHONY: install format lint test screenshot demo
 
 # Run tools via `$(PYTHON) -m` so they always come from the interpreter that
 # has Phishbowl's dependencies installed — a bare `pytest`/`ruff` on PATH may
 # live in an unrelated, isolated tool environment and fail to import them.
 PYTHON ?= python3
+
+install:
+	$(PYTHON) -m pip install -e ".[dev]"
 
 format:
 	$(PYTHON) -m ruff format .

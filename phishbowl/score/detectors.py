@@ -534,11 +534,34 @@ def password_protected_archive(ctx: ScoringContext) -> list[str]:
     return [f"password-protected archive (evades scanning): {n}" for n in names]
 
 
+def archive(ctx: ScoringContext) -> list[str]:
+    """Plain archive attachments (zip/rar/7z/…) — a common phish delivery vector.
+
+    Password-protected archives are scored separately (and more heavily) by
+    ``attach.password_protected_archive``; this rule covers the generic case so
+    a plain ``invoice.zip`` still nudges the verdict. Anti-double-counting: the
+    engine fires each rule at most once, and the two flags are independent.
+    """
+    from phishbowl.models import AttachmentFlag
+
+    names = _attachments_with(ctx, AttachmentFlag.ARCHIVE)
+    return [f"archive attachment (common delivery vector): {n}" for n in names]
+
+
 # --- weak content detector (PRD §8 — deliberately low weight) --------------
 
 
 def urgency_keywords(ctx: ScoringContext) -> list[str]:
-    haystack = f"{ctx.parsed.subject or ''} {ctx.parsed.body.text or ''}".casefold()
+    """Scan subject + plaintext + visible HTML text for pressure phrasing.
+
+    HTML-only phishing is common; extraction already de-tags ``html_raw``, and
+    scoring must do the same — otherwise urgency language that only lives in the
+    HTML part is invisible to this (deliberately weak) signal.
+    """
+    parts = [ctx.parsed.subject or "", ctx.parsed.body.text or ""]
+    if ctx.parsed.body.html_raw:
+        parts.append(_strip_tags(ctx.parsed.body.html_raw))
+    haystack = " ".join(parts).casefold()
     found = sorted({kw for kw in ctx.config.urgency_keywords if kw in haystack})
     if found:
         return [f"urgency / financial-pressure phrasing: {', '.join(found)}"]
@@ -664,6 +687,12 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
         "Password-protected archive (evades scanning)",
         RuleSource.OFFLINE,
         password_protected_archive,
+    ),
+    DetectorSpec(
+        "attach.archive",
+        "Archive attachment (zip/rar/7z/… — common delivery vector)",
+        RuleSource.OFFLINE,
+        archive,
     ),
     # Weak content
     DetectorSpec(

@@ -1,24 +1,10 @@
 """Phishbowl command-line interface.
 
-Wires up the Typer surface and the ``analyze`` command. As of Phase 4 (the
-offline MVP milestone), ``analyze`` runs the full offline pipeline —
-parse → extract → defang → score → report — and prints a rich terminal summary,
-optionally writing a self-contained HTML report and/or a complete JSON result.
-
-Phase 5 adds an opt-in ``--enrich`` flag: with API keys configured (env only),
-it augments the offline verdict with allowlisted OSINT connectors and re-scores,
-tagging every added point ``[enrichment]``. Without ``--enrich`` (and without
-keys) the pipeline is entirely offline and unchanged.
-
-Phase 6 adds optional SOAR export: ``--xsoar`` and ``--sentinel`` write a Cortex
-XSOAR playbook and a Microsoft Sentinel playbook (Logic App ARM template)
-respectively. These are **drafts** — every XSOAR task is manual and the Sentinel
-workflow ships disabled — so importing one triggers no automation.
-
-Phase 7 (stretch) adds ``serve``: an optional FastAPI upload UI that runs the
-**same** offline pipeline and renders the **same** zero-egress report — no logic
-fork. It lives behind the ``web`` extra and is imported lazily, so the offline
-CLI never hard-requires FastAPI.
+Wires up the Typer surface and the ``analyze`` / ``serve`` commands. ``analyze``
+runs the full offline pipeline — parse → extract → defang → score → report —
+and prints a rich terminal summary, optionally writing HTML / JSON / SOAR drafts.
+``--enrich`` layers allowlisted OSINT on top; ``--inner`` re-triages an attached
+email inside a forward wrapper (the common SOC hand-off).
 
 Phishbowl is defensive-only: it never sends, detonates, fetches the email's
 URLs, or auto-remediates (CLAUDE.md invariants). Even with ``--enrich``, the only
@@ -34,55 +20,97 @@ from typing import Annotated
 import typer
 from rich.console import Console
 
-from phishbowl.connectors import EnrichmentReport, EnrichmentSettings, enrich_email
+from phishbowl import __version__
+from phishbowl.connectors import EnrichmentSettings
 from phishbowl.export import render_sentinel, render_xsoar
-from phishbowl.extract import extract_iocs
-from phishbowl.models import ParsedEmail
-from phishbowl.parse import parse, parse_bytes, sniff_suffix
-from phishbowl.parse.limits import read_stream_within_limit
-from phishbowl.report import (
-    RedactionPolicy,
-    build_report,
-    render_cli,
-    render_html,
-    render_json,
-)
-from phishbowl.score import load_config, score_email
+from phishbowl.parse import list_embedded_emails, parse, parse_bytes, sniff_suffix
+from phishbowl.parse.limits import read_stream_within_limit, read_within_limit
+from phishbowl.pipeline import triage
+from phishbowl.report import RedactionPolicy, render_cli, render_html, render_json, severity_for
+from phishbowl.score import load_config
 
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
 )
 
+# ``--fail-on`` thresholds keyed by severity slug (same bands as the report).
+_FAIL_ON_THRESHOLDS = {
+    "low": 20,
+    "suspicious": 40,
+    "elevated": 40,
+    "likely": 65,
+    "high": 65,
+    "malicious": 85,
+    "critical": 85,
+}
+
+
+def _version_callback(value: bool) -> None:
+    if value:
+        typer.echo(f"phishbowl {__version__}")
+        raise typer.Exit(0)
+
 
 @app.callback()
-def main() -> None:
+def main(
+    version: Annotated[
+        bool,
+        typer.Option(
+            "--version",
+            help="Print the Phishbowl version and exit.",
+            is_eager=True,
+            callback=_version_callback,
+        ),
+    ] = False,
+) -> None:
     """Phishbowl — a self-hostable, defensive-only phishing triage tool.
 
     Offline-first phishing triage: parse a suspicious .eml/.msg, extract and
     defang IOCs, risk-score it, and produce an analyst-ready report.
-
-    This callback intentionally does nothing; it exists so that ``analyze``
-    (and future commands) stay subcommands — i.e. ``phishbowl analyze <file>``
-    — instead of Typer collapsing a lone command into the root program.
     """
+    _ = version
 
 
-def _parse_stdin() -> ParsedEmail:
-    """Read an email from stdin (``analyze -``) and parse it (PRD §6.1).
+def _load_input_bytes(path: str) -> tuple[bytes, str]:
+    """Return ``(bytes, filename)`` for a path or stdin (``-``)."""
+    if path == "-":
+        data = read_stream_within_limit(sys.stdin.buffer)
+        if not data:
+            raise ValueError(
+                "no input on stdin; pipe a .eml/.msg, e.g. `phishbowl analyze - < mail.eml`"
+            )
+        return data, f"stdin{sniff_suffix(data)}"
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"no such file: {path}")
+    return read_within_limit(p), p.name
 
-    Stdin has no filename to dispatch on, so the format is sniffed from the
-    bytes (OLE2 magic → ``.msg``, else ``.eml``) and handed to the very same
-    :func:`parse_bytes` path the upload UI uses. The read is bounded by the
-    parse layer's size cap, so a runaway pipe can never be slurped whole, and
-    an empty stream is a clean usage error rather than a meaningless report.
-    """
-    data = read_stream_within_limit(sys.stdin.buffer)
-    if not data:
+
+def _resolve_parsed(
+    path: str,
+    *,
+    inner: bool,
+    inner_index: int,
+):
+    """Parse ``path``, optionally swapping in an attached inner email."""
+    data, filename = _load_input_bytes(path)
+    if not inner:
+        return parse_bytes(data, filename=filename)
+
+    embedded = list_embedded_emails(data, filename=filename)
+    if not embedded:
         raise ValueError(
-            "no input on stdin; pipe a .eml/.msg, e.g. `phishbowl analyze - < mail.eml`"
+            "no attached email found to analyze with --inner "
+            "(expected a message/rfc822 or .eml attachment)"
         )
-    return parse_bytes(data, filename=f"stdin{sniff_suffix(data)}")
+    if inner_index < 0 or inner_index >= len(embedded):
+        raise ValueError(
+            f"--inner-index {inner_index} out of range; "
+            f"found {len(embedded)} attached email(s) (0..{len(embedded) - 1})"
+        )
+    target = embedded[inner_index]
+    return parse_bytes(target.data, filename=target.filename)
 
 
 @app.command()
@@ -96,8 +124,12 @@ def analyze(
         typer.Option("--html", "-H", help="Write the self-contained HTML report to this path."),
     ] = None,
     json_out: Annotated[
-        Path | None,
-        typer.Option("--json", "-j", help="Write the complete JSON result to this path."),
+        str | None,
+        typer.Option(
+            "--json",
+            "-j",
+            help="Write the complete JSON result to this path, or '-' for stdout.",
+        ),
     ] = None,
     xsoar: Annotated[
         Path | None,
@@ -135,6 +167,62 @@ def analyze(
             help="Allow urlscan to actively submit URLs (private by default). Implies --enrich.",
         ),
     ] = False,
+    connector: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--connector",
+            help="Only run this enrichment connector (repeatable). Implies --enrich.",
+        ),
+    ] = None,
+    disable_connector: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--disable-connector",
+            help="Skip this enrichment connector (repeatable). Implies --enrich.",
+        ),
+    ] = None,
+    scoring_config: Annotated[
+        Path | None,
+        typer.Option(
+            "--scoring-config",
+            help="YAML scoring override layered over the bundled defaults.",
+        ),
+    ] = None,
+    inner: Annotated[
+        bool,
+        typer.Option(
+            "--inner",
+            help="Triage an attached email (message/rfc822 / .eml) instead of the outer wrapper.",
+        ),
+    ] = False,
+    inner_index: Annotated[
+        int,
+        typer.Option(
+            "--inner-index",
+            help=(
+                "Which attached email to triage when several are present "
+                "(0-based). Implies --inner."
+            ),
+        ),
+    ] = 0,
+    quiet: Annotated[
+        bool,
+        typer.Option(
+            "--quiet",
+            "-q",
+            help="Suppress the rich CLI summary (still writes --html/--json/etc.).",
+        ),
+    ] = False,
+    fail_on: Annotated[
+        str | None,
+        typer.Option(
+            "--fail-on",
+            help=(
+                "Exit 1 when the severity is at least this level "
+                "(low|suspicious|likely|malicious). Useful for SOAR/CI glue."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Triage a suspicious email and produce a report (HTML / JSON / CLI).
 
@@ -142,29 +230,35 @@ def analyze(
     summary; pass ``--html``/``--json`` to also write those outputs, and
     ``--xsoar``/``--sentinel`` to emit SOAR playbook drafts. Add ``--enrich`` to
     layer in OSINT enrichment (key-gated, reading secrets from the environment
-    only). Phishbowl is defensive-only: it never sends, detonates, fetches the
-    email's URLs, or auto-remediates — SOAR exports are inert drafts for an analyst
-    to review, never executed automation.
+    only). Use ``--inner`` when the input is a forward wrapper with the phish
+    attached. Phishbowl is defensive-only: it never sends, detonates, fetches the
+    email's URLs, or auto-remediates.
     """
+    use_inner = inner or (inner_index != 0)
     try:
-        parsed = _parse_stdin() if path == "-" else parse(path)
+        # Prefer the path-based parser when not doing --inner so existing error
+        # messages for unsupported suffixes stay identical; --inner needs bytes.
+        if use_inner or path == "-":
+            parsed = _resolve_parsed(path, inner=use_inner, inner_index=inner_index)
+        else:
+            parsed = parse(path)
     except (OSError, ValueError) as exc:
-        # Missing, unreadable (permissions/I/O), or unsupported input degrades
-        # into a clean CLI error rather than an internal traceback (PRD §11).
         raise typer.BadParameter(str(exc)) from exc
 
-    config = load_config()
-    iocs = extract_iocs(parsed)
+    try:
+        config = load_config(path=scoring_config) if scoring_config else load_config()
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"scoring config: {exc}") from exc
 
-    enrichment: EnrichmentReport | None = None
-    if enrich or urlscan_submit:
-        settings = EnrichmentSettings(
+    want_enrich = bool(enrich or urlscan_submit or connector or disable_connector)
+    enrichment_settings: EnrichmentSettings | None = None
+    if want_enrich:
+        enrichment_settings = EnrichmentSettings(
             enabled=True,
             urlscan_submit=urlscan_submit,
+            select=frozenset(c.strip().casefold() for c in connector) if connector else None,
+            disable=frozenset(c.strip().casefold() for c in (disable_connector or ())),
         )
-        enrichment = enrich_email(parsed, iocs, settings)
-
-    result = score_email(parsed, iocs, config, enrichment=enrichment)
 
     extra_fields = tuple(redact_field or ())
     policy = (
@@ -172,28 +266,64 @@ def analyze(
         if redact or extra_fields
         else RedactionPolicy.disabled()
     )
-    view = build_report(parsed, iocs, result, policy=policy, config=config, enrichment=enrichment)
 
-    render_cli(view, Console())
+    view, result = triage(
+        parsed,
+        config=config,
+        policy=policy,
+        enrichment_settings=enrichment_settings,
+    )
+
+    # JSON to stdout suppresses the Rich summary unless the operator also asked
+    # for HTML/SOAR (those still need a place to acknowledge writes).
+    json_to_stdout = json_out == "-"
+    show_cli = not quiet and not json_to_stdout
+    if show_cli:
+        render_cli(view, Console())
 
     if html is not None:
         html.write_text(render_html(view), encoding="utf-8")
-        typer.echo(f"phishbowl: wrote HTML report to {html}")
+        if not json_to_stdout:
+            typer.echo(f"phishbowl: wrote HTML report to {html}")
     if json_out is not None:
-        json_out.write_text(render_json(view), encoding="utf-8")
-        typer.echo(f"phishbowl: wrote JSON result to {json_out}")
+        payload = render_json(view)
+        if json_to_stdout:
+            sys.stdout.write(payload)
+            if not payload.endswith("\n"):
+                sys.stdout.write("\n")
+        else:
+            Path(json_out).write_text(payload, encoding="utf-8")
+            typer.echo(f"phishbowl: wrote JSON result to {json_out}")
     if xsoar is not None:
         xsoar.write_text(render_xsoar(view), encoding="utf-8")
-        typer.echo(
-            f"phishbowl: wrote XSOAR playbook DRAFT to {xsoar} "
-            "(manual tasks only — review before running; Phishbowl never acts)"
-        )
+        if not json_to_stdout:
+            typer.echo(
+                f"phishbowl: wrote XSOAR playbook DRAFT to {xsoar} "
+                "(manual tasks only — review before running; Phishbowl never acts)"
+            )
     if sentinel is not None:
         sentinel.write_text(render_sentinel(view), encoding="utf-8")
-        typer.echo(
-            f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
-            "(ships disabled — review and enable manually; Phishbowl never acts)"
-        )
+        if not json_to_stdout:
+            typer.echo(
+                f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
+                "(ships disabled — review and enable manually; Phishbowl never acts)"
+            )
+
+    if fail_on is not None:
+        key = fail_on.strip().casefold()
+        if key not in _FAIL_ON_THRESHOLDS:
+            raise typer.BadParameter(
+                f"unknown --fail-on level '{fail_on}'; "
+                f"expected one of: {', '.join(sorted(set(_FAIL_ON_THRESHOLDS)))}"
+            )
+        if result.score >= _FAIL_ON_THRESHOLDS[key]:
+            if show_cli:
+                typer.echo(
+                    f"phishbowl: failing (score {result.score}, "
+                    f"severity={severity_for(result.score)}) — threshold '{key}'",
+                    err=True,
+                )
+            raise typer.Exit(1)
 
 
 @app.command()
@@ -219,9 +349,6 @@ def serve(
     try:
         import uvicorn
 
-        # Import lazily so the offline CLI never hard-requires FastAPI just to
-        # run ``analyze``. Keep it in the same optional-extra guard as uvicorn:
-        # an environment can have one web dependency but not the other.
         from phishbowl.web import app as web_app
     except ImportError as exc:  # pragma: no cover - exercised via the install path
         raise typer.BadParameter(

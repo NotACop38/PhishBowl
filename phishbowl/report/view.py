@@ -124,6 +124,13 @@ class HopView(PhishbowlModel):
     raw: str
 
 
+class HeaderView(PhishbowlModel):
+    """One header line, control-stripped and indicator-defanged for display."""
+
+    name: str
+    value: str
+
+
 class AttachmentView(PhishbowlModel):
     filename: str | None = None
     declared_type: str | None = None
@@ -135,6 +142,9 @@ class AttachmentView(PhishbowlModel):
     sha1: str | None = None
     sha256: str | None = None
     flags: list[str] = Field(default_factory=list)
+    # True when this attachment is itself an email (message/rfc822 or .eml) that
+    # can be re-triaged with ``phishbowl analyze --inner``.
+    embedded_email: bool = False
 
 
 class AnomalyView(PhishbowlModel):
@@ -216,7 +226,13 @@ class ReportView(PhishbowlModel):
     ioc_groups: list[IOCGroupView] = Field(default_factory=list)
     ioc_total: int = 0
     routing: list[HopView] = Field(default_factory=list)
+    # Best public sending-IP candidate from the Received chain (defanged), when known.
+    sending_ip_display: str | None = None
+    sending_ip_raw: str | None = None
+    headers: list[HeaderView] = Field(default_factory=list)
     attachments: list[AttachmentView] = Field(default_factory=list)
+    # How many attachments are themselves emails the operator can re-triage with --inner.
+    embedded_email_count: int = 0
 
     body_preview: str | None = None
     body_note: str | None = None
@@ -306,6 +322,13 @@ def _ioc_view(ioc, redactor: Redactor) -> IOCView:
     )
 
 
+def _is_embedded_email(att) -> bool:
+    """True when an attachment is itself an email worth re-triaging with --inner."""
+    declared = (att.declared_type or "").casefold()
+    name = (att.filename or "").casefold()
+    return declared.startswith("message/") or name.endswith(".eml") or name.endswith(".msg")
+
+
 def _body(parsed: ParsedEmail) -> tuple[str | None, str | None]:
     """Return ``(preview, note)`` — escaped/defanged plaintext, never raw HTML."""
     if parsed.body.text:
@@ -321,10 +344,31 @@ def _body(parsed: ParsedEmail) -> tuple[str | None, str | None]:
         if parsed.body.has_html:
             note += " An HTML part was also present; its raw markup is never rendered."
         return text, note
+    if parsed.body.has_html and parsed.body.html_raw:
+        # HTML-only mail: show de-tagged visible text so analysts still get a
+        # readable preview. Markup is stripped, never rendered (PRD §10).
+        import html as _html
+        import re
+
+        visible = _html.unescape(re.sub(r"<[^>]+>", " ", parsed.body.html_raw))
+        visible = re.sub(r"\s+", " ", visible).strip()
+        text = _safe_text(visible) or ""
+        if len(text) > _BODY_PREVIEW_LIMIT:
+            text = text[:_BODY_PREVIEW_LIMIT]
+            note = (
+                f"HTML-only message: visible text shown defanged and truncated to "
+                f"the first {_BODY_PREVIEW_LIMIT} characters. Raw markup is never rendered."
+            )
+        else:
+            note = (
+                "HTML-only message: visible text shown defanged. "
+                "Raw attacker markup is never rendered."
+            )
+        return (text or None), note
     if parsed.body.has_html:
         return None, (
             "This message had an HTML body only. Phishbowl never renders attacker "
-            "markup, and no plaintext alternative was available to preview."
+            "markup, and no readable text could be recovered for preview."
         )
     return None, "No body content was parsed from this message."
 
@@ -436,6 +480,48 @@ def build_report(
         for idx, hop in enumerate(parsed.routing.hops)
     ]
 
+    # Best public sending-IP candidate (same pivot enrichment uses). Redact
+    # internal IPs the same way hop text is redacted.
+    sending_ip_display: str | None = None
+    sending_ip_raw: str | None = None
+    try:
+        from phishbowl.connectors.targets import sending_ips
+
+        ips = sending_ips(parsed)
+        if ips:
+            candidate = ips[0]
+            placeholder = redactor.classify_ioc(candidate.type, candidate.value)
+            if placeholder is not None:
+                sending_ip_display = placeholder
+                sending_ip_raw = None
+            else:
+                sending_ip_display = candidate.defanged
+                sending_ip_raw = candidate.value
+    except Exception:
+        pass
+
+    # Full header set for analyst pivot — ordered, duplicates preserved, values
+    # control-stripped and indicator-defanged. Recipient / internal tokens are
+    # scrubbed with the same hop-text redactor so Received ``for <user@org>``
+    # lines cannot leak bystander PII through the new headers panel.
+    from .redact import REDACTED_RECIPIENT
+
+    headers: list[HeaderView] = []
+    for header in parsed.headers.items:
+        name = _clean(header.name) or ""
+        value = header.value or ""
+        folded = name.casefold()
+        if redactor.active and redactor.policy.recipients and folded in {"to", "cc", "bcc"}:
+            headers.append(HeaderView(name=name, value=REDACTED_RECIPIENT))
+            redactor.triggered.add("recipients")
+            continue
+        scrubbed = redactor.hop_text(value) if redactor.active else value
+        redacted_value = redactor.field(name, scrubbed)
+        if redacted_value is not scrubbed:
+            headers.append(HeaderView(name=name, value=redacted_value or ""))
+        else:
+            headers.append(HeaderView(name=name, value=_safe_text(scrubbed) or ""))
+
     attachments = [
         AttachmentView(
             filename=_clean(att.filename),
@@ -448,9 +534,11 @@ def build_report(
             sha1=att.sha1,
             sha256=att.sha256,
             flags=[f.value for f in att.flags],
+            embedded_email=_is_embedded_email(att),
         )
         for att in parsed.attachments
     ]
+    embedded_email_count = sum(1 for a in attachments if a.embedded_email)
 
     body_preview, body_note = _body(parsed)
 
@@ -481,7 +569,11 @@ def build_report(
         ioc_groups=groups,
         ioc_total=total,
         routing=routing,
+        sending_ip_display=sending_ip_display,
+        sending_ip_raw=sending_ip_raw,
+        headers=headers,
         attachments=attachments,
+        embedded_email_count=embedded_email_count,
         body_preview=body_preview,
         body_note=body_note,
         anomalies=[
