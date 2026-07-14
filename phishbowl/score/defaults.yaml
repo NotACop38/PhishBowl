@@ -78,8 +78,12 @@ weights:
   attach.type_mismatch: 16
   attach.executable: 22
   attach.password_protected_archive: 14
+  # Plain archives are a common delivery vector; weaker than password-protected
+  # (which additionally evade scanning) and weaker than a raw executable.
+  attach.archive: 10
 
   # --- Weak content signals (PRD §8 — deliberately low) ---
+  # Scans subject + plaintext + visible (de-tagged) HTML text.
   content.urgency_keywords: 4
 
   # --- Enrichment (PRD §8/§9) — only ever ADD on top of the offline base, and

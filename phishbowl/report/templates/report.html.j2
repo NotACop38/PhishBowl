@@ -246,6 +246,40 @@
     .verdict { grid-template-columns: 1fr; gap: 20px; }
     .dl { grid-template-columns: 92px 1fr; }
   }
+
+  /* Print / PDF — ticket-friendly hard copy of the dossier. */
+  @media print {
+    body { background: #fff; color: #111; }
+    body::before, body::after { display: none !important; }
+    .wrap { max-width: none; margin: 0; padding: 0; }
+    .verdict, .card, .notice { break-inside: avoid; page-break-inside: avoid;
+      box-shadow: none; background: #fff; border-color: #ccc; }
+    .verdict { border: 2px solid #333; }
+    .badges .badge { border-color: #999; }
+    table { break-inside: auto; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    details.headers { open: true; }
+    details.headers[open] summary { display: none; }
+    .preview { max-height: none; overflow: visible; }
+    footer.foot { break-before: avoid; }
+  }
+
+  details.headers { margin: 0; }
+  details.headers summary {
+    cursor: pointer; list-style: none; font-family: var(--font-mono);
+    font-size: 12px; color: var(--muted); padding: 4px 0 12px;
+  }
+  details.headers summary::-webkit-details-marker { display: none; }
+  details.headers summary::before { content: "▸ "; color: var(--faint); }
+  details.headers[open] summary::before { content: "▾ "; }
+  .hdr-row { display: grid; grid-template-columns: minmax(120px, 180px) 1fr;
+    gap: 8px 16px; padding: 6px 0; border-bottom: 1px solid var(--border-soft);
+    font-size: 12.5px; }
+  .hdr-row:last-child { border-bottom: none; }
+  .hdr-name { font-family: var(--font-mono); color: var(--muted); font-weight: 600; }
+  .hdr-val { font-family: var(--font-mono); color: var(--ink); word-break: break-word; }
+  .sending-ip { font-family: var(--font-mono); font-size: 13px; margin: 0 0 14px; }
+  .sending-ip b { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -296,6 +330,16 @@
     <span>Bystander PII is withheld from this report{% if r.redaction.categories %}
       ({{ r.redaction.categories | join(", ") }}){% endif %}.
       Attacker-controlled indicators are shown in full.</span>
+  </div>
+  {% endif %}
+
+  {% if r.embedded_email_count > 0 %}
+  <div class="notice">
+    <span class="tag">Attached email</span>
+    <span>This message carries {{ r.embedded_email_count }} attached
+      email{{ "" if r.embedded_email_count == 1 else "s" }}. The verdict above is for
+      the <em>outer</em> wrapper — re-run with <code>--inner</code> (CLI) or the
+      “Analyze attached email” option (upload UI) to triage the enclosed message.</span>
   </div>
   {% endif %}
 
@@ -434,6 +478,10 @@
     <div class="card span">
       <div class="card-h"><h2>Routing path</h2><span class="count">{{ r.routing | length }} hop{{ "" if r.routing|length == 1 else "s" }}</span></div>
       <div class="card-b">
+        {% if r.sending_ip_display %}
+        <p class="sending-ip">Sending infrastructure (best public hop IP):
+          <b>{{ r.sending_ip_display }}</b></p>
+        {% endif %}
         {% if r.routing %}
           {% for hop in r.routing %}
           <div class="hop">
@@ -449,6 +497,26 @@
           {% endfor %}
         {% else %}
           <p class="empty">No Received hops were parsed.</p>
+        {% endif %}
+      </div>
+    </div>
+
+    {# ---------- Full headers ---------- #}
+    <div class="card span">
+      <div class="card-h"><h2>Headers</h2><span class="count">{{ r.headers | length }}</span></div>
+      <div class="card-b">
+        {% if r.headers %}
+        <details class="headers">
+          <summary>Show ordered raw headers (duplicates preserved, indicators defanged)</summary>
+          {% for h in r.headers %}
+          <div class="hdr-row">
+            <div class="hdr-name">{{ h.name }}</div>
+            <div class="hdr-val">{{ h.value }}</div>
+          </div>
+          {% endfor %}
+        </details>
+        {% else %}
+          <p class="empty">No headers were parsed.</p>
         {% endif %}
       </div>
     </div>
@@ -469,7 +537,8 @@
               <td class="mono">{{ att.size_human or "—" }}</td>
               <td class="mono" title="md5 {{ att.md5 or '' }}">{{ att.sha256 or "—" }}</td>
               <td>{% for f in att.flags %}<span class="chip flag">{{ f }}</span> {% endfor %}
-                  {%- if not att.flags %}—{% endif %}</td>
+                  {%- if att.embedded_email %}<span class="chip warn">attached email</span> {% endif %}
+                  {%- if not att.flags and not att.embedded_email %}—{% endif %}</td>
             </tr>
           {% endfor %}
           </tbody>

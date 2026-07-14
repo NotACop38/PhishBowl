@@ -14,7 +14,7 @@
 ![Scope: defensive-only](https://img.shields.io/badge/scope-defensive--only-C73E3A)
 ![Pipeline: offline-first](https://img.shields.io/badge/pipeline-offline--first-2E7D9A)
 ![Report: zero egress](https://img.shields.io/badge/report-zero--egress-5E35B1)
-![Status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-E08A3C)
+![Status: v0.1](https://img.shields.io/badge/status-v0.1-2E7D9A)
 
 </div>
 
@@ -74,11 +74,10 @@ Want machine-readable output too? Add `--json result.json`. Piping from another
 tool? `phishbowl analyze -` reads the email from stdin and sniffs the format.
 
 > [!NOTE]
-> **Status.** The **offline core** (parse, extract, defang, score, report) is
-> built and tested. **Opt-in OSINT enrichment** (`--enrich`) layers on top with
-> five allowlisted, key-gated connectors, and **SOAR export** (`--xsoar`,
-> `--sentinel`) emits Cortex XSOAR and Microsoft Sentinel playbook *drafts*.
-> PhishBowl is built phase-by-phase per [`docs/CHECKLIST.md`](docs/CHECKLIST.md).
+> **Status.** PhishBowl **v0.1** ships the full offline core, opt-in OSINT
+> enrichment (`--enrich`), SOAR export (`--xsoar` / `--sentinel`), and an
+> optional upload UI (`phishbowl serve`). See [`docs/CHECKLIST.md`](docs/CHECKLIST.md)
+> for the completed build phases.
 
 ---
 
@@ -213,9 +212,11 @@ Full rule catalog and tuning instructions: [`docs/SCORING.md`](docs/SCORING.md).
 |--------|------|---------------|
 | **Rich CLI** | *(default)* | Colorized verdict banner, top reasons, IOC tables, auth results. Read it right in the terminal. |
 | **HTML** | `--html report.html` | The primary deliverable: a self-contained, zero-egress dossier you can attach to a ticket. |
-| **JSON** | `--json result.json` | Complete structured result (defanged **and** clearly labeled raw) for piping into other tools. |
+| **JSON** | `--json result.json` / `--json -` | Complete structured result (defanged **and** clearly labeled raw). Use `-` for stdout. |
 | **SOAR export** | `--xsoar playbook.yml` / `--sentinel azuredeploy.json` | Cortex XSOAR and Microsoft Sentinel playbook **drafts**: inert, never auto-run. See [`docs/SOAR_EXPORT.md`](docs/SOAR_EXPORT.md). |
 | **Redaction** | `--redact` / `--redact-field` | Strip bystander PII (recipients, internal hosts/IPs) so a report can be shared externally. |
+| **Inner email** | `--inner` | Triage an attached `message/rfc822` / `.eml` instead of the outer forward wrapper. |
+| **Quiet / fail-on** | `-q` / `--fail-on suspicious` | Suppress the Rich summary; exit nonzero when severity crosses a threshold (SOAR/CI glue). |
 
 ---
 
@@ -258,7 +259,8 @@ pip install -e ".[web]"
 phishbowl serve                 # http://127.0.0.1:8000  (or: uvicorn phishbowl.web:app)
 ```
 
-Drop in a `.eml`/`.msg` and you get the identical report `analyze --html` produces. Uploads
+Drop in a `.eml`/`.msg` and you get the identical report `analyze --html` produces. The form
+offers the same **Analyze attached email** and **Redact PII** options as the CLI. Uploads
 are hardened: type-checked (`.eml`/`.msg` only) and size-capped **before** parsing, analyzed
 in memory (never written to disk, executed, or contacted), and served with a strict
 `Content-Security-Policy`. It binds to localhost by default: a self-hosted analyst tool, not

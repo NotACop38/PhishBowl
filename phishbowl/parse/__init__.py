@@ -20,6 +20,7 @@ from pathlib import Path
 
 from phishbowl.models import ParsedEmail
 
+from .embedded import EmbeddedEmail, list_embedded_emails
 from .eml import parse_eml
 from .eml import parse_file as parse_eml_file
 from .msg import parse_file as parse_msg_file
@@ -32,6 +33,8 @@ __all__ = [
     "parse_msg",
     "sniff_suffix",
     "SUPPORTED_SUFFIXES",
+    "list_embedded_emails",
+    "EmbeddedEmail",
 ]
 
 _EML_SUFFIXES = {".eml"}

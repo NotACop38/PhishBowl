@@ -9,11 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Inner-email triage** — `phishbowl analyze --inner` (and the upload UI's
+  “Analyze attached email” option) re-triages an attached `message/rfc822` /
+  `.eml` instead of the outer forward wrapper. The common SOC hand-off of
+  “Fwd: reported message” now scores the enclosed phish. Outer reports note
+  when attached emails are present.
+- **Full headers + sending IP in reports** — the HTML/JSON dossier now includes
+  the ordered header set (collapsible in HTML) and highlights the best public
+  sending-IP candidate from the `Received` chain.
+- **HTML body preview** — HTML-only messages now show de-tagged visible text
+  in the body preview (markup is still never rendered).
+- **Print stylesheet** — `@media print` rules so the HTML dossier prints cleanly
+  for tickets / PDF archival.
+- **CLI ergonomics** — `--version`, `--quiet`/`-q`, `--json -` (stdout),
+  `--scoring-config PATH`, `--connector` / `--disable-connector`,
+  `--fail-on low|suspicious|likely|malicious` (nonzero exit for SOAR/CI glue).
+- **Web UI polish** — redesigned zero-egress upload form, HTML error pages for
+  413/415/400 (instead of raw JSON), and form options for inner-email triage
+  and PII redaction. Shared `phishbowl.pipeline.triage` keeps CLI and web in lockstep.
+- **`attach.archive` scoring rule** — plain zip/rar/7z/… attachments now
+  contribute to the offline score (weight 10); password-protected archives
+  remain the heavier signal.
+- **`make install`** bootstrap target; `.env.example` documents
+  `PHISHBOWL_SCORING_CONFIG` and `PHISHBOWL_CACHE_DIR`.
 - **Stdin input** — `phishbowl analyze -` reads the email from stdin (PRD §6.1),
   so it can be piped straight from another tool (e.g.
   `curl … | phishbowl analyze -`). The format is sniffed from the bytes (OLE2
   magic → `.msg`, else `.eml`), the read is bounded by the same size cap as
   files and uploads, and an empty stream is a clean usage error.
+
+### Fixed
+
+- **`content.urgency_keywords` now scans HTML bodies** — urgency language that
+  only lives in an HTML part (common for phishing) previously scored 0 on this
+  rule because only the plaintext part was searched.
+- Defanging a `javascript:`/`data:`/`vbscript:` URI no longer doubles the
+  colon (`javascript[:]:…` → `javascript[:]…`), restoring the documented
+  lossless `refang` round-trip for those URIs.
+- `make test` / `make lint` / `make format` now invoke pytest and ruff via
+  `python3 -m …` instead of bare executables, so they always run from the
+  interpreter that has PhishBowl's dependencies installed (a bare `pytest` on
+  PATH may live in an unrelated, isolated tool environment).
 
 ### Security
 
@@ -44,16 +80,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a URL-bearing display name could hand an analyst a live IP/URL on
   copy-paste (the view contract already promised this).
 - Raised the `urllib3` transitive floor to `>=2.7.0` (PYSEC-2026-141/142).
-
-### Fixed
-
-- Defanging a `javascript:`/`data:`/`vbscript:` URI no longer doubles the
-  colon (`javascript[:]:…` → `javascript[:]…`), restoring the documented
-  lossless `refang` round-trip for those URIs.
-- `make test` / `make lint` / `make format` now invoke pytest and ruff via
-  `python3 -m …` instead of bare executables, so they always run from the
-  interpreter that has PhishBowl's dependencies installed (a bare `pytest` on
-  PATH may live in an unrelated, isolated tool environment).
 
 ## [0.1.0] — 2026-06-05
 

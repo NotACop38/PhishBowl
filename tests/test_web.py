@@ -21,10 +21,9 @@ from pathlib import Path
 
 import pytest
 
-from phishbowl.extract import extract_iocs
+# Unused imports cleaned — web tests compare via the shared triage pipeline.
 from phishbowl.parse import parse_bytes
-from phishbowl.report import build_report, render_html
-from phishbowl.score import load_config, score_email
+from phishbowl.report import render_html
 
 fastapi_testclient = pytest.importorskip(
     "fastapi.testclient",
@@ -57,12 +56,11 @@ def _normalize(html: str) -> str:
 
 def _cli_pipeline_html(path: Path) -> str:
     """Render the report exactly as the CLI ``analyze`` path would, for comparison."""
+    from phishbowl.pipeline import triage
+
     data = path.read_bytes()
     parsed = parse_bytes(data, filename=path.name)
-    config = load_config()
-    iocs = extract_iocs(parsed)
-    result = score_email(parsed, iocs, config)
-    view = build_report(parsed, iocs, result, config=config)
+    view, _ = triage(parsed)
     return render_html(view)
 
 
@@ -138,6 +136,30 @@ def test_wrong_type_upload_is_refused_415() -> None:
     )
 
     assert response.status_code == 415
+    # Browser clients get an HTML error page, not raw JSON.
+    assert "text/html" in response.headers["content-type"]
+    assert "unsupported" in response.text.casefold()
+
+
+def test_inner_option_triages_attached_email() -> None:
+    forwarded = FIXTURES / "forwarded_eml.eml"
+    response = client.post(
+        "/analyze",
+        data={"inner": "1"},
+        files={"file": (forwarded.name, forwarded.read_bytes(), "message/rfc822")},
+    )
+    assert response.status_code == 200
+    assert "You have won a prize" in response.text
+    assert "Fwd: reported message" not in response.text
+
+
+def test_upload_msg_fixture_when_present() -> None:
+    msg = FIXTURES / "synthetic_phish.msg"
+    if not msg.exists():
+        pytest.skip("synthetic .msg fixture not present")
+    response = _upload(msg, content_type="application/vnd.ms-outlook")
+    assert response.status_code == 200
+    assert response.text.lstrip().lower().startswith("<!doctype html>")
 
 
 def test_extensionless_upload_is_refused_415() -> None:

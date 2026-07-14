@@ -1270,7 +1270,7 @@ def test_cli_enrich_flag_wires_enrichment_into_the_run(monkeypatch: pytest.Monke
         )
         return EnrichmentReport(enabled=True, statuses=(status,))
 
-    monkeypatch.setattr(cli, "enrich_email", fake_enrich)
+    monkeypatch.setattr("phishbowl.pipeline.enrich_email", fake_enrich)
     result = CliRunner().invoke(cli.app, ["analyze", str(MALICIOUS), "--enrich"])
 
     assert result.exit_code == 0, result.stdout

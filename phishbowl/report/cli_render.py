@@ -73,6 +73,15 @@ def render_cli(view: ReportView, console: Console | None = None) -> None:
                 style="italic dim",
             )
         )
+    if view.embedded_email_count > 0:
+        n = view.embedded_email_count
+        console.print(
+            Text(
+                f"Note: {n} attached email(s) detected — this verdict is for the outer "
+                f"wrapper. Re-run with --inner to triage the enclosed message.",
+                style="italic yellow",
+            )
+        )
     console.print()
     _reasons(view, console)
     _enrichment(view, console)
@@ -199,10 +208,14 @@ def _iocs(view: ReportView, console: Console) -> None:
 
 
 def _routing(view: ReportView, console: Console) -> None:
-    if not view.routing:
+    if not view.routing and not view.sending_ip_display:
         return
     line = Text(f"Routing  {len(view.routing)} hop(s)", style="bold")
     console.print(line)
+    if view.sending_ip_display:
+        sip = Text("  Sending IP: ", style="dim")
+        sip.append(view.sending_ip_display, style="cyan bold")
+        console.print(sip)
     for hop in view.routing:
         seg = Text(f"  {hop.index}. ", style="dim")
         if hop.from_:

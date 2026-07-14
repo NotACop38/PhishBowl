@@ -362,6 +362,7 @@ def _att(filename: str, *flags: AttachmentFlag) -> Attachment:
         ("attach.type_mismatch", AttachmentFlag.TYPE_MISMATCH, "invoice.pdf"),
         ("attach.executable", AttachmentFlag.EXECUTABLE, "setup.exe"),
         ("attach.password_protected_archive", AttachmentFlag.PASSWORD_PROTECTED, "docs.zip"),
+        ("attach.archive", AttachmentFlag.ARCHIVE, "invoice.zip"),
     ],
 )
 def test_attachment_detectors_fire_on_flag(
