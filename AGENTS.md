@@ -13,7 +13,7 @@ Phishbowl is a self-hostable, vendor-neutral, **defensive-only** phishing triage
 
 ## Working rules
 
-- Start with the user's task and `git status --short --branch`; preserve unrelated work. This file is the operating contract; consult the expanded context in `CLAUDE.md` only when needed.
+- Start with the user's task and `git status --short --branch`; preserve unrelated work. This file is the operating contract; `CLAUDE.md` is a compatibility pointer.
 - Run `make test` after a coherent batch of changes and before closeout. Reuse a passing result while its checked inputs remain unchanged; rerun after relevant edits. Report failures and checks that could not run accurately.
 - Treat `docs/PRD.md` and `docs/CHECKLIST.md` as the source of truth; read the sections relevant to the task and reuse context already read unless it has changed.
 - For phased implementation, build one phase at a time per `docs/CHECKLIST.md`; never jump ahead. A specific maintenance, review, or documentation request follows its own scope without advancing unrelated phases.
