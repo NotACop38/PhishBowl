@@ -65,7 +65,14 @@ class VirusTotalConnector(Connector):
         total = sum(int(v or 0) for v in stats.values())
 
         if malicious == 0 and suspicious == 0:
-            return self._result(indicator, EnrichmentVerdict.BENIGN, None, gui_kind, gui_id, stats)
+            return self._result(
+                indicator,
+                EnrichmentVerdict.BENIGN if sum(stats.values()) > 0 else EnrichmentVerdict.UNKNOWN,
+                None,
+                gui_kind,
+                gui_id,
+                stats,
+            )
 
         # Magnitude = detection ratio (PRD §8 "scaled by detection ratio").
         ratio = (malicious + suspicious) / total if total else 0.0

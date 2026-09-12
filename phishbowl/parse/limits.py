@@ -2,10 +2,11 @@
 
 The analyzed email is hostile input end to end: a `.eml`/`.msg` can be
 maliciously oversized or pathologically structured (a deeply nested or
-fan-out multipart "MIME bomb"). These caps bound the work the parser will do
-on a single message so abusive input can't exhaust memory or wedge the
-pipeline. They are deliberately generous — far above any legitimate email — so
-they never trip on real mail, only on abuse.
+fan-out multipart "MIME bomb"). These caps bound input reads; additional MIME
+construction, text and IOC budgets
+live at their processing boundaries. A budget violation produces an incomplete
+assessment. This is not a process sandbox or a guarantee against every dependency
+failure. Legitimate messages may also exceed the limits.
 
 Two complementary guards:
 

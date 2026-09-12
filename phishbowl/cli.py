@@ -234,6 +234,14 @@ def analyze(
     attached. Phishbowl is defensive-only: it never sends, detonates, fetches the
     email's URLs, or auto-remediates.
     """
+    if fail_on is not None:
+        key = fail_on.strip().casefold()
+        if key not in _FAIL_ON_THRESHOLDS:
+            raise typer.BadParameter(
+                f"unknown --fail-on level '{fail_on}'; "
+                f"expected one of: {', '.join(sorted(set(_FAIL_ON_THRESHOLDS)))}"
+            )
+
     use_inner = inner or (inner_index != 0)
     try:
         # Prefer the path-based parser when not doing --inner so existing error
@@ -309,13 +317,10 @@ def analyze(
                 "(ships disabled — review and enable manually; Phishbowl never acts)"
             )
 
+    if not result.analysis_complete:
+        raise typer.Exit(2)
+
     if fail_on is not None:
-        key = fail_on.strip().casefold()
-        if key not in _FAIL_ON_THRESHOLDS:
-            raise typer.BadParameter(
-                f"unknown --fail-on level '{fail_on}'; "
-                f"expected one of: {', '.join(sorted(set(_FAIL_ON_THRESHOLDS)))}"
-            )
         if result.score >= _FAIL_ON_THRESHOLDS[key]:
             if show_cli:
                 typer.echo(

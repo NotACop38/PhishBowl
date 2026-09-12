@@ -658,6 +658,8 @@ def test_api_keys_never_leak_into_any_output(
         )
 
     parsed = parse(MALICIOUS)
+    # Public IP is used only against the in-process MockTransport.
+    parsed.body.text = (parsed.body.text or "") + " 8.8.8.8 "
     iocs = extract_iocs(parsed)
     config = load_config()
     # Read keys from the (seeded) environment — api_keys override left empty.
@@ -1188,6 +1190,7 @@ def _enriched_view(tmp_path: Path):
         )
 
     parsed = parse(MALICIOUS)
+    parsed.body.text = (parsed.body.text or "") + " 8.8.8.8 "
     iocs = extract_iocs(parsed)
     config = load_config()
     report = enrich_email(parsed, iocs, make_settings(handler, cache_dir=tmp_path))

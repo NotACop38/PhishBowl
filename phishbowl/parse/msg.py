@@ -111,7 +111,7 @@ def parse_msg(data: bytes, filename: str | None = None) -> ParsedEmail:
         return parsed
 
     try:
-        msg = extract_msg.openMsg(io.BytesIO(data))
+        msg = extract_msg.openMsg(io.BytesIO(data), delayAttachments=True)
     except Exception as exc:
         parsed.anomalies.append(Anomaly(code="parse_error", message=f"could not parse .msg: {exc}"))
         return parsed
@@ -177,6 +177,13 @@ def _populate(parsed: ParsedEmail, msg) -> None:
         parsed.date = _guard(parsed, "date_error", lambda: _mapi_date(msg), None)
 
     parsed.body = _guard(parsed, "body_error", lambda: _build_body(msg), Body())
+    if not parsed.body.text and not parsed.body.html_raw:
+        parsed.anomalies.append(
+            Anomaly(
+                code="msg_body_unavailable",
+                message="No plain text or PR_HTML body recovered; compressed RTF is not expanded",
+            )
+        )
     parsed.attachments = _guard(parsed, "attachment_error", lambda: _build_attachments(msg), [])
 
     _note_msg_anomalies(parsed, header_msg)
@@ -293,37 +300,16 @@ def _build_body(msg) -> Body:
     exactly as on the .eml path. ``has_html`` reflects whether a *real* HTML part
     was present (matching the .eml parser's semantics).
     """
-    text = msg.body
+    text = msg.getStringStream("__substg1.0_1000")
     html = _real_html(msg)
     return Body(text=text, html_raw=html, has_html=html is not None)
 
 
 def _real_html(msg) -> str | None:
-    """The message's genuine HTML body, or ``None`` if it had no HTML part.
-
-    Outlook stores the HTML body either as the PR_HTML stream
-    (``__substg1.0_10130102``) or encapsulated inside the compressed-RTF body.
-    We read PR_HTML first, then fall back to RTF *only when it actually
-    encapsulates HTML* — never to ``extract-msg``'s ``htmlBody`` property, which
-    synthesizes HTML from the plain-text body when no HTML part exists. That
-    fabricated markup would set ``has_html`` and feed downstream link/HTML
-    analysis content the message never contained.
-    """
+    """Read genuine PR_HTML only; do not expand compressed RTF or synthesize HTML."""
     raw = _get_stream(msg, _HTML_BODY_ID)
     if raw is not None:
         return _decode_html(bytes(raw), msg)
-    # No PR_HTML stream — consult the RTF body, but accept it only if RTFDE
-    # reports it encapsulates HTML (not a text-only RTF).
-    try:
-        deencap = msg.deencapsulatedRtf
-        if deencap is not None and getattr(deencap, "content_type", None) == "html":
-            html = deencap.html
-            if isinstance(html, bytes):
-                return _decode_html(html, msg)
-            return html
-    except Exception:
-        # RTF deencapsulation is best-effort; a failure just means no HTML.
-        return None
     return None
 
 

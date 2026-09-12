@@ -118,6 +118,7 @@ class ScoreResult:
     verdict: str
     fired: tuple[FiredRule, ...]
     offline_score: int
+    analysis_complete: bool = True
 
     def by_source(self, source: RuleSource) -> tuple[FiredRule, ...]:
         """The fired rules from a given source, in fire order."""

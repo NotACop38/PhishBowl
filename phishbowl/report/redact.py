@@ -22,8 +22,11 @@ is hidden — the structure of the analysis is preserved.
 from __future__ import annotations
 
 import ipaddress
+import re
 from dataclasses import dataclass
+from urllib.parse import quote, quote_plus, unquote
 
+from phishbowl.extract import defang_text
 from phishbowl.models import Address, ParsedEmail
 from phishbowl.score import ScoringConfig
 
@@ -65,7 +68,7 @@ def _is_internal_ip(value: str) -> bool:
         ip = ipaddress.ip_address(value.strip())
     except ValueError:
         return False
-    return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+    return not ip.is_global or ip.is_multicast
 
 
 class Redactor:
@@ -92,6 +95,31 @@ class Redactor:
         self._recipient_domains = frozenset(
             a.domain.strip().casefold().rstrip(".") for a in recipients if a.domain
         )
+
+        replacements = []
+        if policy.recipients:
+            replacements.extend(
+                (v, REDACTED_RECIPIENT, "recipients")
+                for a in recipients
+                for v in (a.addr_spec, a.display_name, a.domain)
+                if v
+            )
+        for h in parsed.headers.items:
+            if h.name.casefold() in self._extra_fields and h.value:
+                replacements.append((h.value, REDACTED_FIELD, "operator fields"))
+        self._replacements = []
+        for value, replacement, category in sorted(replacements, key=lambda item: -len(item[0])):
+            variants = {
+                value,
+                defang_text(value),
+                value.replace(".", "[.]"),
+                quote(value, safe=""),
+                quote_plus(value),
+            }
+            pattern = re.compile(
+                "|".join(re.escape(v) for v in sorted(variants, key=len, reverse=True) if v), re.I
+            )
+            self._replacements.append((pattern, replacement, category))
 
     @property
     def active(self) -> bool:
@@ -123,50 +151,55 @@ class Redactor:
         return Address(display_name=None, addr_spec=REDACTED_RECIPIENT, domain=None)
 
     def hop_text(self, text: str | None) -> str | None:
-        """Redact recipient and internal host/IP tokens inside a ``Received`` hop.
-
-        ``Received`` headers routinely carry the envelope recipient (``for
-        <user@org>``) and the org's own hostnames/IPs. With redaction active we
-        scrub recipient addresses and internal-topology tokens here too, so PII
-        cannot leak through the routing path. Attacker/external infra in the same
-        hop is left visible — that is the part an analyst needs.
-        """
+        """Apply the same policy to free text and every derived representation."""
         if not self.active or not text:
             return text
-        import re
+        if self.policy.internal:
 
-        if self.policy.recipients and self._recipient_addrs:
-            pattern = re.compile(
-                "|".join(re.escape(a) for a in self._recipient_addrs), re.IGNORECASE
-            )
+            def internal_host(m):
+                if self._is_internal_host(m.group()):
+                    self._note("internal hosts")
+                    return REDACTED_INTERNAL_HOST
+                return m.group()
 
-            def _sub_recipient(m: re.Match[str]) -> str:
-                self._note("recipients")
-                return REDACTED_RECIPIENT
+            text = re.sub(r"(?<![A-Za-z0-9.-])[A-Za-z0-9.-]+\.[A-Za-z]{2,}", internal_host, text)
+        for pattern, replacement, category in self._replacements:
+            text, count = pattern.subn(lambda m, replacement=replacement: replacement, text)
+            if count:
+                self._note(category)
+        if self.policy.internal:
 
-            text = pattern.sub(_sub_recipient, text)
+            def host(m):
+                if self._is_internal_host(m.group()):
+                    self._note("internal hosts")
+                    return REDACTED_INTERNAL_HOST
+                return m.group()
 
-        if not self.policy.internal:
-            return text
+            def ip(m):
+                if _is_internal_ip(m.group()):
+                    self._note("internal IPs")
+                    return REDACTED_INTERNAL_IP
+                return m.group()
 
-        def _sub_host(m: re.Match[str]) -> str:
-            tok = m.group(0)
-            if self._is_internal_host(tok):
-                self._note("internal hosts")
-                return REDACTED_INTERNAL_HOST
-            return tok
-
-        def _sub_ip(m: re.Match[str]) -> str:
-            tok = m.group(0)
-            if _is_internal_ip(tok):
-                self._note("internal IPs")
-                return REDACTED_INTERNAL_IP
-            return tok
-
-        text = re.sub(r"[A-Za-z0-9.\-]+\.[A-Za-z]{2,}", _sub_host, text)
-        text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", _sub_ip, text)
-        text = re.sub(r"\b[0-9A-Fa-f:]{2,}:[0-9A-Fa-f:]+\b", _sub_ip, text)
+            text = re.sub(r"(?<![A-Za-z0-9.-])[A-Za-z0-9.-]+\.[A-Za-z]{2,}", host, text)
+            text = re.sub(r"(?<![\w:])(?:[0-9A-Fa-f]*:){2,}[0-9A-Fa-f:.]*(?![\w:])", ip, text)
+            text = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", ip, text)
         return text
+
+    def text(self, value: str | None) -> str | None:
+        if not self.active or not value:
+            return value
+        # Inspect common percent encodings before rendering. Any changed encoded
+        # value is withheld whole: redaction must not create a usable altered URL.
+        decoded = value
+        for _ in range(3):
+            new = unquote(decoded)
+            if new == decoded:
+                break
+            decoded = new
+        if decoded != value and self.hop_text(decoded) != decoded:
+            return REDACTED_FIELD
+        return self.hop_text(value)
 
     def classify_ioc(self, ioc_type: str, value: str) -> str | None:
         """Return a placeholder if this IOC value is PII, else ``None`` (keep it).
@@ -192,4 +225,6 @@ class Redactor:
             if ioc_type == "domain" and self._is_internal_host(value):
                 self._note("internal hosts")
                 return REDACTED_INTERNAL_HOST
+        if self.text(value) != value:
+            return REDACTED_FIELD
         return None

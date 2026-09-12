@@ -145,7 +145,12 @@ def score_email(
 
     return ScoreResult(
         score=total_score,
-        verdict=verdict_for(total_score, config),
+        verdict=(
+            verdict_for(total_score, config)
+            if not parsed.anomalies
+            else "Incomplete — analyst review required"
+        ),
         fired=tuple(fired),
         offline_score=offline_score,
+        analysis_complete=not parsed.anomalies,
     )

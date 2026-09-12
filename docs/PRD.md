@@ -53,7 +53,7 @@ Phishbowl analyzes emails the user **received or was forwarded**, for triage. Th
 ingest → parse → extract → defang → score(offline) → [optional: enrich → re-score] → report
 ```
 
-The **offline core** (parse → extract → defang → score → report) is built first and is always sufficient to produce a complete verdict and report. Enrichment is a distinct layer that *augments* signals and can shift the score, but the offline verdict is always computed and always shown. This is what makes the demo instant and the "graceful offline degrade" honest by construction rather than bolted on afterward.
+The **offline core** (parse → extract → defang → score → report) is built first and is always sufficient to produce a report of recovered evidence and analysis limitations. Enrichment is a distinct layer that *augments* signals and can shift the score, but the offline verdict is always computed and always shown. This is what makes the demo instant and the "graceful offline degrade" honest by construction rather than bolted on afterward.
 
 Everything downstream consumes one internal contract: the `ParsedEmail` model (§7). Both the `.eml` and `.msg` paths normalize into it, so nothing after parsing needs to know the source format.
 
@@ -116,7 +116,7 @@ Design notes: From/Return-Path/Reply-To must be trivially comparable (mismatch i
 
 **Philosophy.** Transparent over clever. No ML black box. Score is the sum of weights of triggered rules, normalized to 0–100. Every triggered rule emits a human-readable reason with the evidence that fired it. Weights live in editable YAML so analysts can tune to their environment. Offline and online signals are tagged by source, so a verdict reached with zero API keys is still meaningful — and a reader can always see which points came from local heuristics vs enrichment.
 
-**Combination rule.** Offline rules produce a base score that is always computed. Enrichment rules add (rarely subtract) on top, each tagged `[enrichment]`. No single missing connector can zero out a verdict; no signal is double-counted across detectors.
+**Combination rule.** Offline rules produce a base score that is always computed. Enrichment rules add on top, each tagged `[enrichment]`. No single missing connector can zero out a verdict; no signal is double-counted across detectors.
 
 **Signal catalog** *(weights below are starting points — calibrated against synthetic samples in Phase 3, not fixed now)*:
 
@@ -156,11 +156,11 @@ Design notes: From/Return-Path/Reply-To must be trivially comparable (mismatch i
 
 | Score | Verdict |
 |---|---|
-| 0–19 | Benign — no strong indicators |
+| 0–19 | Few signals — safety undetermined |
 | 20–39 | Low suspicion |
 | 40–64 | Suspicious — analyst review |
-| 65–84 | Likely malicious |
-| 85–100 | Malicious — high confidence |
+| 65–84 | High suspicion |
+| 85–100 | Very high suspicion |
 
 ## 9. Connector plugin architecture
 
@@ -247,3 +247,19 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 - Archive content inspection / deeper attachment analysis (still no detonation).
 - Multi-email / mailbox batch triage.
 - Case-management features (we export to those systems, we don't become one).
+
+## Critical review revision (2026-09-12)
+
+This maintenance revision supersedes any stronger wording above about complete
+verdicts, confidence or sharing safety. The product is an offline evidence and
+heuristic triage aid. Report/JSON/SOAR consumers receive `analysis_complete` and
+an assessment note; any recorded parse/analysis anomaly makes the assessment
+incomplete. Authentication header claims are not independently verified. Scores
+are not calibrated against real mail and are not probabilities.
+
+Resource budgets, redaction limits and deployment assumptions are documented in
+SECURITY.md. MIME construction is bounded before node allocation; all ordinary
+body parts are analyzed within an explicit text budget. Compressed Outlook RTF
+is excluded. Domain comparisons use the packaged Public Suffix List, including
+private suffixes, with downloads and filesystem caching disabled. Updates to that
+snapshot follow dependency updates, not a network fetch during analysis.

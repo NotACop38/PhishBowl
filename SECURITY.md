@@ -49,8 +49,8 @@ The parser defends against malicious or malformed input (`phishbowl/parse/`):
 
 - **Size limit:** inputs over `MAX_INPUT_BYTES` (50 MiB) are refused *before*
   being read into memory (`phishbowl/parse/limits.py`).
-- **Structural caps:** the MIME walker yields at most `MAX_PARTS` parts, so a
-  multipart "MIME bomb" is truncated rather than walked unbounded.
+- **Structural caps:** MIME construction checks part and nesting limits before
+  allocating each node. Later traversal also uses the part budget.
 - **Graceful degradation:** a readable-but-malformed message degrades into a
   noted partial result (recorded as an `Anomaly`) and never crashes the run.
 
@@ -102,23 +102,17 @@ bandit -r phishbowl
 pip-audit
 ```
 
-### Current status
+### Review check (2026-09-12)
 
-- **bandit:** clean. The MD5/SHA1 used for attachment fingerprinting are IOC
-  identity hashes (not a security control) and are marked `usedforsecurity=False`;
-  the remaining `B105` matches are false positives (enum values, a Rich colour
-  name, a Proofpoint run-token) annotated inline — Phishbowl holds no passwords
-  in code, as API keys come only from the environment.
-- **pip-audit:** the transitive dependencies in Phishbowl's runtime closure
-  (`cryptography` via `extract-msg` → `msoffcrypto-tool`, `idna` via `httpx`, and
-  `urllib3` via `requests`) are pinned to non-vulnerable floors in
-  `pyproject.toml` (`urllib3>=2.7.0` covers PYSEC-2026-141/142). (`requests` is a
-  direct dependency because `iocextract`
-  imports it without declaring it; it pulls `urllib3` into the closure, hence the
-  `urllib3` floor.) Any other findings in a given environment come from
-  build/CI tooling (`pip`, `wheel`, `setuptools`) or unrelated pre-installed
-  packages (`pyjwt`, `urllib3` via `conan`/`oauthlib`) that are **not** part of
-  Phishbowl's dependency graph.
+The isolated development environment's dependency audit reported advisories only
+for its bundled pip 25.0.1; pip was upgraded to 26.2.1, above all fix versions in
+that audit. No runtime dependency findings were returned. This is a dated result,
+not a guarantee that future installations or advisory databases are clean.
+
+Bandit reported one existing silent exception handler around the report's routing
+IP projection. The unnecessary catch was removed and the path is covered by the
+report/workflow tests. MD5/SHA1 remain attachment identity fingerprints using
+`usedforsecurity=False`, not cryptographic security controls.
 
 ## Reporting a vulnerability
 
@@ -132,3 +126,27 @@ reproduction** — never attach a real phishing sample, live link, or real PII.
 
 We aim to acknowledge reports within a few days and will coordinate a fix and
 disclosure timeline with you.
+
+## Resource and evidence limits
+
+The parser accepts at most 50 MiB, 2,000 MIME nodes, nesting depth 30, 100,000
+lines and 64 KiB per line. IOC regex passes have a 150 ms budget per type/pattern and retain at most 1,000
+indicators. The analysis examines up to 262,144 characters per
+body representation. Limits produce an incomplete assessment, never a safety
+verdict. All non-attachment body parts are combined before that analysis limit.
+Outlook compressed RTF is not expanded. These are application budgets, not an
+OS sandbox or a proof against all parser/dependency resource exhaustion.
+
+The upload service counts request bytes before multipart parsing, permits one
+file and two small fields, and limits requests to the message cap plus 64 KiB
+of multipart overhead. Its upload spool stays in memory under this bound. One
+upload/analysis is admitted per process; CPU work runs off the event loop. The
+service defaults to loopback. Exposed deployments require operator-provided
+access control, ingress/time limits and process resource limits. Host memory,
+swap, crash dumps and the ASGI server are outside the memory-only upload claim.
+
+Authentication results and Received IPs are unverified header claims. Scores are
+uncalibrated heuristics. Redaction is selected-value removal, not anonymization.
+Installed third-party connectors are trusted Python code with process authority;
+the guarded HTTP client is not a plugin sandbox. RDAP's HTTPS bootstrap redirect
+is an explicit exception to its initial vendor host allowlist.

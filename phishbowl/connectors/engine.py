@@ -133,7 +133,9 @@ def enrich_email(
     settings = settings or EnrichmentSettings()
     if not settings.enabled:
         return EnrichmentReport(enabled=False)
-    return run_enrichment(build_targets(parsed, iocs), settings)
+    return run_enrichment(
+        build_targets(parsed, iocs, excluded_domains=settings.excluded_domains), settings
+    )
 
 
 def run_enrichment(
@@ -224,7 +226,7 @@ async def _run_one_connector(
         for indicator in indicators:
             cached = cache.get(name, indicator.type, indicator.value, ttl=connector.cache_ttl)
             if cached is not None:
-                results.append(cached.as_cached())
+                results.append(_sanitize(cached, secrets).as_cached())
                 cache_hits += 1
                 continue
             result = await _enrich_one(
@@ -255,7 +257,7 @@ async def _enrich_one(
         try:
             return await connector.enrich(indicator, ctx)
         except ConnectorError as exc:
-            failures.append(str(exc) or exc.__class__.__name__)
+            failures.append(scrub_secrets(str(exc), secrets) or exc.__class__.__name__)
         except httpx.HTTPError as exc:
             # Network/transport failure (timeout, DNS, connection reset, …).
             failures.append(f"network error: {exc.__class__.__name__}")
@@ -271,20 +273,21 @@ async def _enrich_one(
 
 def _sanitize(result: EnrichmentResult, secrets: frozenset[str]) -> EnrichmentResult:
     """Defensively scrub any known key value out of a result's retained raw data."""
-    if not secrets or result.raw is None:
-        return result
-    scrubbed = scrub_secrets(result.raw, secrets)
-    if scrubbed is result.raw:
-        return result
-    return EnrichmentResult(
-        connector=result.connector,
-        ioc_type=result.ioc_type,
-        indicator=result.indicator,
-        verdict=result.verdict,
-        signals=result.signals,
-        references=result.references,
-        raw=scrubbed,
-        cached=result.cached,
+    from dataclasses import replace
+
+    return replace(
+        result,
+        raw=scrub_secrets(result.raw, secrets),
+        indicator=scrub_secrets(result.indicator, secrets),
+        references=scrub_secrets(result.references, secrets),
+        signals=tuple(
+            replace(
+                signal,
+                description=scrub_secrets(signal.description, secrets),
+                evidence=scrub_secrets(signal.evidence, secrets),
+            )
+            for signal in result.signals
+        ),
     )
 
 

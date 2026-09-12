@@ -35,7 +35,9 @@ _DANGEROUS_SCHEME_RE = re.compile(r"^(javascript|data|vbscript):", re.IGNORECASE
 # later passes never re-touch a host already inside a neutered URL.
 _TEXT_URL_RE = re.compile(r"\b(?:https?|hxxps?)://[^\s<>\"'`]+", re.IGNORECASE)
 _TEXT_WWW_RE = re.compile(r"\bwww\.[^\s<>\"'`]+", re.IGNORECASE)
-_TEXT_EMAIL_RE = re.compile(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b")
+_TEXT_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
+)
 _TEXT_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 
 

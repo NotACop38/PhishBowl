@@ -62,7 +62,10 @@ class UnwrapResult:
 
 
 def _host(url: str) -> str:
-    netloc = urlsplit(url).netloc
+    try:
+        netloc = urlsplit(url).netloc
+    except ValueError:
+        return ""
     if "@" in netloc:
         netloc = netloc.rsplit("@", 1)[1]
     return netloc.split(":", 1)[0].casefold()
@@ -71,7 +74,10 @@ def _host(url: str) -> str:
 def detect_wrapper(url: str) -> str | None:
     """Return the protective-wrapper name for ``url``, or ``None`` if it's plain."""
     host = _host(url)
-    path = urlsplit(url).path
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
     if host == "safelinks.protection.outlook.com" or host.endswith(
         ".safelinks.protection.outlook.com"
     ):

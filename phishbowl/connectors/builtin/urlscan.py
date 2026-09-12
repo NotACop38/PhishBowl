@@ -95,7 +95,7 @@ class UrlscanConnector(Connector):
             )
             return self._result(indicator, EnrichmentVerdict.MALICIOUS, signal, references)
 
-        verdict = EnrichmentVerdict.UNKNOWN if results else EnrichmentVerdict.BENIGN
+        verdict = EnrichmentVerdict.UNKNOWN
         return self._result(indicator, verdict, None, references)
 
     async def _submit(self, indicator: Indicator, ctx: EnrichContext) -> EnrichmentResult:

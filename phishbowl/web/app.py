@@ -21,10 +21,13 @@ map to the same ``RedactionPolicy`` / ``--inner`` paths the CLI uses — no fork
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated
+from threading import BoundedSemaphore
 
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
+from starlette.concurrency import run_in_threadpool
+from starlette.datastructures import UploadFile
+from starlette.formparsers import MultiPartException, MultiPartParser
 
 from phishbowl.parse import SUPPORTED_SUFFIXES, list_embedded_emails, parse_bytes
 from phishbowl.parse.limits import MAX_INPUT_BYTES
@@ -245,13 +248,28 @@ def create_app() -> FastAPI:
     async def index() -> HTMLResponse:
         return HTMLResponse(_UPLOAD_PAGE)
 
+    admission = BoundedSemaphore(1)
+
     @app.post("/analyze", response_class=HTMLResponse)
-    async def analyze(
-        file: UploadFile,
-        inner: Annotated[str, Form()] = "",
-        redact: Annotated[str, Form()] = "",
-    ) -> Response:
-        return await _analyze_upload(file, inner=bool(inner), redact=bool(redact))
+    async def analyze(request: Request) -> Response:
+        origin = request.headers.get("origin")
+        if origin and origin != f"{request.url.scheme}://{request.url.netloc}":
+            raise HTTPException(403, "Cross-origin uploads are refused")
+        if not admission.acquire(blocking=False):
+            raise HTTPException(503, "An analysis is already running; try again shortly")
+        try:
+            form = await _read_form(request)
+            try:
+                file = form.get("file")
+                if not isinstance(file, UploadFile):
+                    raise HTTPException(422, "Select one .eml or .msg file")
+                return await _analyze_upload(
+                    file, inner=bool(form.get("inner")), redact=bool(form.get("redact"))
+                )
+            finally:
+                await form.close()
+        finally:
+            admission.release()
 
     return app
 
@@ -272,6 +290,10 @@ async def _analyze_upload(
 
     data = await _read_within_limit(file)
 
+    return await run_in_threadpool(_analyze_bytes, data, filename, inner, redact)
+
+
+def _analyze_bytes(data: bytes, filename: str, inner: bool, redact: bool) -> HTMLResponse:
     try:
         if inner:
             embedded = list_embedded_emails(data, filename=filename)
@@ -315,3 +337,53 @@ async def _read_within_limit(file: UploadFile) -> bytes:
             detail=(f"Upload exceeds the {_MAX_MIB} MiB limit and was refused before parsing."),
         )
     return data
+
+
+class _IngressLimit(MultiPartException):
+    pass
+
+
+class _MemoryMultipart(MultiPartParser):
+    # Every received byte, including unused fields, is counted before parsing.
+    # The spool can therefore never reach its rollover threshold.
+    spool_max_size = MAX_INPUT_BYTES + 64 * 1024 + 1
+    max_file_size = spool_max_size  # Starlette before spool_max_size was renamed.
+
+    async def parse(self):
+        try:
+            return await super().parse()
+        except BaseException:
+            for file in self._files_to_close_on_error:
+                file.close()
+            raise
+
+
+async def _read_form(request: Request):
+    limit = MAX_INPUT_BYTES + 64 * 1024
+    length = request.headers.get("content-length")
+    if length:
+        try:
+            if int(length) > limit or int(length) < 0:
+                raise HTTPException(413, "Upload exceeds the request limit")
+        except ValueError as exc:
+            raise HTTPException(400, "Invalid Content-Length") from exc
+    if not request.headers.get("content-type", "").lower().startswith("multipart/form-data"):
+        raise HTTPException(415, "Use a multipart email upload")
+
+    async def bounded_stream():
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                raise _IngressLimit("Upload exceeds the request limit")
+            yield chunk
+
+    parser = _MemoryMultipart(
+        request.headers, bounded_stream(), max_files=1, max_fields=2, max_part_size=1024
+    )
+    try:
+        return await parser.parse()
+    except _IngressLimit as exc:
+        raise HTTPException(413, exc.message) from exc
+    except MultiPartException as exc:
+        raise HTTPException(400, exc.message) from exc

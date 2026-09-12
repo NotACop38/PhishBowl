@@ -23,7 +23,7 @@
 # Weights start from the PRD §8 catalog and were sanity-checked so that, on the
 # fixtures:
 #   * benign_newsletter.eml  -> 0   (Benign)        : nothing fires.
-#   * auth_fail_spoofed.eml  -> ~79 (Likely malicious): SPF+DKIM+DMARC fail
+#   * auth_fail_spoofed.eml  -> ~79 (High suspicion): SPF+DKIM+DMARC fail
 #       (15+12+18) plus Reply-To/Return-Path/Sender divergence (12+10+8) plus a
 #       weak urgency hit (4). A textbook header spoof scores high on header
 #       signals alone, exactly as an analyst would triage it.
@@ -102,11 +102,11 @@ weights:
 # Verdict bands (PRD §8). The first band whose ``max`` the score is <= wins, so
 # these MUST be listed low-to-high and the last one MUST be 100.
 bands:
-  - {max: 19, verdict: "Benign — no strong indicators"}
+  - {max: 19, verdict: "Few signals — safety undetermined"}
   - {max: 39, verdict: "Low suspicion"}
   - {max: 64, verdict: "Suspicious — analyst review"}
-  - {max: 84, verdict: "Likely malicious"}
-  - {max: 100, verdict: "Malicious — high confidence"}
+  - {max: 84, verdict: "High suspicion"}
+  - {max: 100, verdict: "Very high suspicion"}
 
 # Free webmail providers. A "brand" sender using one of these is a classic
 # impersonation tell (identity.freemail_brand). Case-insensitive.

@@ -140,7 +140,7 @@ def test_xsoar_carries_verdict_indicators_and_disclaimer() -> None:
     playbook = build_xsoar_playbook(view)
     yaml_text = render_xsoar(view)
 
-    assert "Malicious" in playbook["name"]
+    assert "Very high suspicion" in playbook["name"]
     assert DRAFT_DISCLAIMER in playbook["description"]
     # Raw indicators ride along as playbook inputs (machine channel, for pivoting).
     inputs_blob = json.dumps(playbook["inputs"])
@@ -210,7 +210,7 @@ def test_sentinel_carries_verdict_indicators_and_disclaimer() -> None:
     summary = template["resources"][0]["properties"]["definition"]["actions"][
         "Compose_Phishbowl_Triage_DRAFT"
     ]["inputs"]
-    assert summary["verdict"]["text"] == "Malicious — high confidence"
+    assert summary["verdict"]["text"] == "Very high suspicion"
     assert summary["disclaimer"] == DRAFT_DISCLAIMER
     assert summary["never_acts"] is True
     # Raw indicators for hunting (machine channel) and defanged for humans both ride along.

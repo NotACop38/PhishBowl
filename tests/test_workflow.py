@@ -157,7 +157,7 @@ def test_report_includes_headers_and_sending_ip() -> None:
     sip_view, _ = triage(parse_eml(raw, filename="sip.eml"))
     assert sip_view.sending_ip_raw == "8.8.8.8"
     assert sip_view.sending_ip_display == "8[.]8[.]8[.]8"
-    assert "Sending infrastructure" in __import__(
+    assert "Received-header IP candidate" in __import__(
         "phishbowl.report", fromlist=["render_html"]
     ).render_html(sip_view)
 

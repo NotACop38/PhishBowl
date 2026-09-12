@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING
 from pydantic import Field
 
 from phishbowl.extract import defang, defang_text, defang_url
+from phishbowl.html_analysis import inspect_html
 from phishbowl.models import IOCs, IOCType, ParsedEmail, PhishbowlModel
 from phishbowl.score import ScoreResult, ScoringConfig, load_config
 
@@ -206,6 +207,11 @@ class ReportView(PhishbowlModel):
     max_score: int = 100
     verdict: str
     severity: str
+    analysis_complete: bool = True
+    assessment_note: str = (
+        "Heuristic score, not a probability or proof of safety. "
+        "Header authentication claims are unverified."
+    )
 
     subject: str | None = None
     date: str | None = None
@@ -282,13 +288,17 @@ def _address_view(addr, redactor: Redactor, *, recipient: bool) -> AddressView |
                 redacted=True,
             )
     raw = addr.addr_spec
+    if redactor.active and (
+        redactor.field("To" if recipient else "From", raw) != raw or redactor.text(raw) != raw
+    ):
+        return AddressView(addr_spec_display="[redacted:field]", redacted=True)
     return AddressView(
         # Display names are attacker-chosen free text and can themselves carry a
         # URL/email/IP — defang like any other free text. Bare domains follow the
         # same free-text policy as subjects (left legible; not one-click); a brand
         # domain in a display name is the *scorer's* job
         # (identity.display_name_brand_mismatch), not the defanger's.
-        display_name=_safe_text(addr.display_name),
+        display_name=_safe_text(redactor.text(addr.display_name)),
         addr_spec_display=defang(raw, IOCType.EMAIL) if raw else None,
         addr_spec_raw=raw,
         domain=addr.domain,
@@ -309,10 +319,12 @@ def _ioc_view(ioc, redactor: Redactor) -> IOCView:
             unresolved=ioc.unresolved,
             redacted=True,
         )
-    wrapped_display = defang(ioc.wrapped, ioc.type) if ioc.wrapped else None
+    if ioc.wrapped and redactor.text(ioc.wrapped) != ioc.wrapped:
+        return IOCView(type=ioc.type.value, value_display="[redacted:field]", redacted=True)
+    wrapped_display = _clean(defang(ioc.wrapped, ioc.type)) if ioc.wrapped else None
     return IOCView(
         type=ioc.type.value,
-        value_display=ioc.defanged,
+        value_display=_clean(ioc.defanged) or "",
         value_raw=ioc.value,
         provenance=list(ioc.provenance),
         wrapper=ioc.wrapper,
@@ -329,10 +341,10 @@ def _is_embedded_email(att) -> bool:
     return declared.startswith("message/") or name.endswith(".eml") or name.endswith(".msg")
 
 
-def _body(parsed: ParsedEmail) -> tuple[str | None, str | None]:
+def _body(parsed: ParsedEmail, redactor: Redactor) -> tuple[str | None, str | None]:
     """Return ``(preview, note)`` — escaped/defanged plaintext, never raw HTML."""
     if parsed.body.text:
-        text = _safe_text(parsed.body.text) or ""
+        text = _safe_text(redactor.text(parsed.body.text)) or ""
         if len(text) > _BODY_PREVIEW_LIMIT:
             text = text[:_BODY_PREVIEW_LIMIT]
             note = (
@@ -347,12 +359,9 @@ def _body(parsed: ParsedEmail) -> tuple[str | None, str | None]:
     if parsed.body.has_html and parsed.body.html_raw:
         # HTML-only mail: show de-tagged visible text so analysts still get a
         # readable preview. Markup is stripped, never rendered (PRD §10).
-        import html as _html
-        import re
-
-        visible = _html.unescape(re.sub(r"<[^>]+>", " ", parsed.body.html_raw))
+        visible = inspect_html(parsed.body.html_raw).text
         visible = re.sub(r"\s+", " ", visible).strip()
-        text = _safe_text(visible) or ""
+        text = _safe_text(redactor.text(visible)) or ""
         if len(text) > _BODY_PREVIEW_LIMIT:
             text = text[:_BODY_PREVIEW_LIMIT]
             note = (
@@ -373,7 +382,7 @@ def _body(parsed: ParsedEmail) -> tuple[str | None, str | None]:
     return None, "No body content was parsed from this message."
 
 
-def _enrichment_view(enrichment: EnrichmentReport | None) -> EnrichmentView:
+def _enrichment_view(enrichment: EnrichmentReport | None, redactor: Redactor) -> EnrichmentView:
     """Prepare the per-connector enrichment summary, references defanged (PRD §9, §10).
 
     References (vendor pivot links) are defanged for human-facing display just
@@ -386,13 +395,15 @@ def _enrichment_view(enrichment: EnrichmentReport | None) -> EnrichmentView:
         return EnrichmentView(enabled=False)
     connectors: list[ConnectorStatusView] = []
     for status in enrichment.statuses:
-        raw_refs = _dedup_refs(ref for result in status.results for ref in result.references)
+        raw_refs = _dedup_refs(
+            ref for result in status.results if not redactor.active for ref in result.references
+        )
         connectors.append(
             ConnectorStatusView(
                 connector=status.connector,
                 version=status.version,
                 outcome=status.outcome.value,
-                note=_clean(status.note) or "",
+                note=_safe_text(redactor.text(status.note)) or "",
                 queried=status.queried,
                 cache_hits=status.cache_hits,
                 flagged=sum(1 for result in status.results if result.signals),
@@ -438,7 +449,9 @@ def build_report(
     auth = [
         # Auth details quote attacker-influenced header text (domains, client
         # IPs) — defanged like subject/evidence, so copy-paste stays safe.
-        AuthLineView(mechanism=name, result=line.result.value, detail=_safe_text(line.detail))
+        AuthLineView(
+            mechanism=name, result=line.result.value, detail=_safe_text(redactor.text(line.detail))
+        )
         for name, line in (
             ("SPF", parsed.auth.spf),
             ("DKIM", parsed.auth.dkim),
@@ -449,10 +462,10 @@ def build_report(
     fired = [
         FiredRuleView(
             id=f.id,
-            description=f.description,
+            description=_safe_text(redactor.text(f.description)) or "",
             weight=f.weight,
             source=f.source.value,
-            evidence=[_safe_text(e) or "" for e in f.evidence],
+            evidence=[_safe_text(redactor.text(e)) or "" for e in f.evidence],
         )
         for f in sorted(result.fired, key=lambda f: (-f.weight, f.id))
     ]
@@ -471,11 +484,11 @@ def build_report(
         # internal topology — then defang what survives for safe display.
         HopView(
             index=idx,
-            **{"from": defang_text(redactor.hop_text(_clean(hop.from_)))},
-            by=defang_text(redactor.hop_text(_clean(hop.by))),
+            **{"from": defang_text(redactor.text(_clean(hop.from_)))},
+            by=defang_text(redactor.text(_clean(hop.by))),
             **{"with": _safe_text(hop.with_)},
             timestamp=hop.timestamp.isoformat() if hop.timestamp else None,
-            raw=defang_text(redactor.hop_text(_clean(hop.raw))) or "",
+            raw=defang_text(redactor.text(_clean(hop.raw))) or "",
         )
         for idx, hop in enumerate(parsed.routing.hops)
     ]
@@ -484,21 +497,18 @@ def build_report(
     # internal IPs the same way hop text is redacted.
     sending_ip_display: str | None = None
     sending_ip_raw: str | None = None
-    try:
-        from phishbowl.connectors.targets import sending_ips
+    from phishbowl.connectors.targets import sending_ips
 
-        ips = sending_ips(parsed)
-        if ips:
-            candidate = ips[0]
-            placeholder = redactor.classify_ioc(candidate.type, candidate.value)
-            if placeholder is not None:
-                sending_ip_display = placeholder
-                sending_ip_raw = None
-            else:
-                sending_ip_display = candidate.defanged
-                sending_ip_raw = candidate.value
-    except Exception:
-        pass
+    ips = sending_ips(parsed)
+    if ips:
+        candidate = ips[0]
+        placeholder = redactor.classify_ioc(candidate.type, candidate.value)
+        if placeholder is not None:
+            sending_ip_display = placeholder
+            sending_ip_raw = None
+        else:
+            sending_ip_display = candidate.defanged
+            sending_ip_raw = candidate.value
 
     # Full header set for analyst pivot — ordered, duplicates preserved, values
     # control-stripped and indicator-defanged. Recipient / internal tokens are
@@ -515,7 +525,7 @@ def build_report(
             headers.append(HeaderView(name=name, value=REDACTED_RECIPIENT))
             redactor.triggered.add("recipients")
             continue
-        scrubbed = redactor.hop_text(value) if redactor.active else value
+        scrubbed = redactor.text(value) if redactor.active else value
         redacted_value = redactor.field(name, scrubbed)
         if redacted_value is not scrubbed:
             headers.append(HeaderView(name=name, value=redacted_value or ""))
@@ -524,7 +534,7 @@ def build_report(
 
     attachments = [
         AttachmentView(
-            filename=_clean(att.filename),
+            filename=_safe_text(redactor.text(att.filename)),
             declared_type=att.declared_type,
             detected_type=att.detected_type,
             type_mismatch="type_mismatch" in [f.value for f in att.flags],
@@ -540,11 +550,12 @@ def build_report(
     ]
     embedded_email_count = sum(1 for a in attachments if a.embedded_email)
 
-    body_preview, body_note = _body(parsed)
+    body_preview, body_note = _body(parsed, redactor)
+    enrichment_view = _enrichment_view(enrichment, redactor)
 
     return ReportView(
         source=SourceView(
-            filename=_clean(parsed.source.filename),
+            filename=_safe_text(redactor.text(parsed.source.filename)),
             format=parsed.source.format.value,
             parsed_at=parsed.source.parsed_at.isoformat(),
             parser_version=parsed.source.parser_version,
@@ -553,7 +564,8 @@ def build_report(
         offline_score=result.offline_score,
         verdict=result.verdict,
         severity=severity_for(result.score),
-        subject=_safe_text(parsed.subject),
+        analysis_complete=result.analysis_complete,
+        subject=_safe_text(redactor.field("Subject", redactor.text(parsed.subject))),
         date=parsed.date.isoformat() if parsed.date else None,
         **{"from": _address_view(parsed.addresses.from_, redactor, recipient=False)},
         reply_to=_address_view(parsed.addresses.reply_to, redactor, recipient=False),
@@ -577,11 +589,12 @@ def build_report(
         body_preview=body_preview,
         body_note=body_note,
         anomalies=[
-            AnomalyView(code=a.code, message=_clean(a.message) or "") for a in parsed.anomalies
+            AnomalyView(code=a.code, message=_safe_text(redactor.text(a.message)) or "")
+            for a in parsed.anomalies
         ],
         redaction=RedactionView(
             enabled=redactor.active,
             categories=sorted(redactor.triggered),
         ),
-        enrichment=_enrichment_view(enrichment),
+        enrichment=enrichment_view,
     )

@@ -392,32 +392,32 @@ def test_urgency_keywords_fire_at_low_weight() -> None:
 def test_benign_fixture_scores_low() -> None:
     res = _score_fixture("benign_newsletter.eml")
     assert res.score == 0
-    assert res.verdict.startswith("Benign")
+    assert res.verdict.startswith("Few signals")
     assert res.fired == ()
 
 
 def test_spoofed_fixture_scores_high() -> None:
     res = _score_fixture("auth_fail_spoofed.eml")
     assert res.score >= 65
-    assert res.verdict in {"Likely malicious", "Malicious — high confidence"}
+    assert res.verdict in {"High suspicion", "Very high suspicion"}
 
 
 def test_crafted_malicious_fixture_scores_high() -> None:
     res = _score_fixture("crafted_malicious.eml")
     assert res.score >= 85
-    assert res.verdict == "Malicious — high confidence"
+    assert res.verdict == "Very high suspicion"
     # It exercises a broad spread of the catalog, not one lucky rule.
     assert len(res.fired) >= 8
 
 
 def test_verdict_bands_cover_the_range() -> None:
     cfg = load_config()
-    assert verdict_for(0, cfg).startswith("Benign")
-    assert verdict_for(19, cfg).startswith("Benign")
+    assert verdict_for(0, cfg).startswith("Few signals")
+    assert verdict_for(19, cfg).startswith("Few signals")
     assert verdict_for(20, cfg) == "Low suspicion"
     assert verdict_for(50, cfg).startswith("Suspicious")
-    assert verdict_for(70, cfg) == "Likely malicious"
-    assert verdict_for(100, cfg).startswith("Malicious")
+    assert verdict_for(70, cfg) == "High suspicion"
+    assert verdict_for(100, cfg).startswith("Very high suspicion")
 
 
 def test_score_is_clamped_to_100() -> None:

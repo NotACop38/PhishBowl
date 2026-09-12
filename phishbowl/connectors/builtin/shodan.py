@@ -62,7 +62,7 @@ class ShodanConnector(Connector):
         )
         if response.status_code == 404:
             # Shodan has no record for this IP — nothing exposed that it can see.
-            return self._result(indicator, EnrichmentVerdict.BENIGN, None, [])
+            return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, [])
         if response.status_code != 200:
             raise ConnectorError(f"Shodan returned HTTP {response.status_code}")
 

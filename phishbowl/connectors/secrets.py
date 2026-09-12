@@ -69,7 +69,7 @@ def scrub_secrets(value: Any, secrets: frozenset[str]) -> Any:
                 out = out.replace(secret, "[redacted]")
         return out
     if isinstance(value, dict):
-        return {k: scrub_secrets(v, secrets) for k, v in value.items()}
+        return {scrub_secrets(k, secrets): scrub_secrets(v, secrets) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return type(value)(scrub_secrets(v, secrets) for v in value)
     return value

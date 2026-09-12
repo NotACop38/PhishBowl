@@ -14,7 +14,6 @@ the result to :func:`~phishbowl.parse.parse_bytes`.
 
 from __future__ import annotations
 
-import email
 import io
 from dataclasses import dataclass
 from email.generator import BytesGenerator
@@ -23,6 +22,7 @@ from pathlib import Path
 
 from .attachments import iter_parts
 from .charset import decode_mime_words
+from .mime import bounded_message
 
 
 @dataclass(frozen=True)
@@ -51,7 +51,7 @@ def list_embedded_emails(data: bytes, *, filename: str | None = None) -> list[Em
         return []
 
     try:
-        msg = email.message_from_bytes(data)
+        msg = bounded_message(data)
     except Exception:
         return []
 

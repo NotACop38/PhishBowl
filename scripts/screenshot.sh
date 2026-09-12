@@ -29,13 +29,13 @@ COLOR_SCHEME="${COLOR_SCHEME:-dark}"
 mkdir -p "$OUT_DIR"
 
 echo "phishbowl/screenshot: generating HTML report from $FIXTURE"
-python -m phishbowl.cli analyze "$FIXTURE" --html "$HTML" >/dev/null
+"${PYTHON:-python3}" -m phishbowl.cli analyze "$FIXTURE" --html "$HTML" >/dev/null
 echo "phishbowl/screenshot: wrote $HTML"
 
 render() {
   # render <viewport> <output> [--full-page]
   local viewport="$1" out="$2"; shift 2
-  npx --yes playwright@latest screenshot \
+  playwright screenshot \
     --browser chromium \
     --color-scheme "$COLOR_SCHEME" \
     --viewport-size "$viewport" \
@@ -43,9 +43,9 @@ render() {
     "file://$(pwd)/$HTML" "$out"
 }
 
-if command -v npx >/dev/null 2>&1; then
+if command -v playwright >/dev/null 2>&1; then
   echo "phishbowl/screenshot: rendering PNGs with headless Chromium (Playwright)…"
-  # On first run Playwright downloads a headless Chromium build automatically.
+  # Playwright and its Chromium browser must already be installed.
   if render "$VIEWPORT" "$PNG" --full-page && render "$HERO_VIEWPORT" "$HERO"; then
     echo "phishbowl/screenshot: wrote $PNG and $HERO"
     exit 0
@@ -64,7 +64,7 @@ To capture the screenshots manually:
   1. Open $HTML in any browser (it loads zero remote assets — safe to open).
   2. Screenshot the full page  -> $PNG
      and the verdict banner    -> $HERO
-  3. Re-run with Node available to automate it:  make screenshot
+  3. Re-run with Playwright and Chromium installed to automate it:  make screenshot
 
 EOF
 exit 0
