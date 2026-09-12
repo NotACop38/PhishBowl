@@ -271,3 +271,37 @@ def test_extraction_performs_zero_network_io(monkeypatch: pytest.MonkeyPatch) ->
     # It still did real work — wrappers unwrapped, indicators found — with no I/O.
     assert len(iocs) > 0
     assert "https://account-verify.example/login?id=42" in _values(iocs, IOCType.URL)
+
+
+def test_fake_proofpoint_host_keeps_actual_destination():
+    wrapped = (
+        "https://urldefense.com.attacker.example/urldefense.com/v1/"
+        "?u=https%3A%2F%2Fexample.org%2F&k=unused"
+    )
+    assert unwrap_url(wrapped) is None
+
+
+def test_proofpoint_version_must_be_in_wrapper_path():
+    wrapped = (
+        "https://urldefense.com/other/urldefense.com/v1/?u=https%3A%2F%2Fexample.org%2F&k=unused"
+    )
+    assert unwrap_url(wrapped).unresolved
+
+
+def test_safelinks_preserves_destination_percent_encoding():
+    from urllib.parse import quote
+
+    target = "https://sample.example/a%2Fb?token=a%26b%3Dc"
+    wrapped = "https://safelinks.protection.outlook.com/?url=" + quote(target, safe="")
+    assert unwrap_safelinks(wrapped) == target
+
+
+@pytest.mark.parametrize("host", ["urldefense.com", "safelinks.protection.outlook.com"])
+def test_backslash_authority_cannot_masquerade_as_wrapper(host):
+    url = (
+        "https://attacker.example\\@"
+        + host
+        + "/v1/?u=https%3A%2F%2Fexample.org%2F&k=unused"
+        + "&url=https%3A%2F%2Fexample.org%2F"
+    )
+    assert unwrap_url(url) is None

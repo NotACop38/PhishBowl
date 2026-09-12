@@ -219,12 +219,19 @@ async def _run_one_connector(
     )
     ctx = EnrichContext(http=client, settings=settings, api_key=api_key, now=settings.clock())
 
+    # Active submissions are actions, not reusable reputation lookups. Never
+    # suppress an explicit submission with a passive hit or cache its receipt.
+    use_cache = not (name == "urlscan" and settings.urlscan_submit)
     results: list[EnrichmentResult] = []
     failures: list[str] = []
     cache_hits = 0
     try:
         for indicator in indicators:
-            cached = cache.get(name, indicator.type, indicator.value, ttl=connector.cache_ttl)
+            cached = (
+                cache.get(name, indicator.type, indicator.value, ttl=connector.cache_ttl)
+                if use_cache
+                else None
+            )
             if cached is not None:
                 results.append(_sanitize(cached, secrets).as_cached())
                 cache_hits += 1
@@ -234,7 +241,8 @@ async def _run_one_connector(
             )
             if result is not None:
                 result = _sanitize(result, secrets)
-                cache.put(result)
+                if use_cache:
+                    cache.put(result)
                 results.append(result)
     finally:
         await client.aclose()

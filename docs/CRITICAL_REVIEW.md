@@ -76,3 +76,43 @@ updated report with zero HTTP requests and no horizontal overflow at 390 pixels.
 The wheel and source distribution built successfully. The dependency audit found
 only outdated pip tooling, upgraded to 26.2.1; Bandit's one existing silent catch
 was removed. Tests use mocked vendor responses, not live service qualification.
+
+
+## Follow-up review — evidence integrity
+
+A second review of the merged implementation found remaining defects despite
+324 passing tests. The fixes preserve the local evidence-organizer purpose:
+
+- Bound hostname matching in anchor labels; long unbroken text no longer causes
+  quadratic scoring work. A subprocess deadline guards the regression.
+- Match Proofpoint host boundaries and version paths instead of substrings, so
+  an attacker-owned hostname cannot masquerade as a gateway and hide its actual
+  destination. Safelinks decoding preserves percent escapes belonging to the
+  destination itself.
+- Retain unsupported inline text formats (including calendar and RTF) as hashed
+  attachment metadata and explicitly mark their body analysis incomplete.
+- Reject CLI output aliases to source emails, scoring configuration, or other
+  outputs before analysis or enrichment. Checks include symlinks and hardlinks;
+  they prevent ordinary mistakes, not hostile concurrent filesystem changes.
+- Bypass both cache reads and writes for explicit active urlscan submissions:
+  passive reputation results cannot suppress an action, and submission receipts
+  cannot replace passive evidence. Existing cache entries from older versions
+  retain their original TTL; clear the cache if prior active receipts are present.
+
+The PRD now treats evidence integrity, bounded analysis and analyst traceability
+as success criteria. Attractive reports and repository popularity do not validate
+phishing detection. The offline core and optional local UI remain appropriate;
+adding a classifier, hosted service or automated remediation would expand the
+trust boundary without evidence that it solves the current product's gaps.
+
+Independent review caught and corrected a terminal-dot regression in hostname
+matching before merge; sentence punctuation still permits mismatch detection.
+
+Ambiguous backslash authorities also remain intact, avoiding browser/Python
+host interpretation differences during unwrapping.
+
+Validation: 339 tests passed using the repository virtual environment, including
+synthetic regressions; Ruff and whitespace checks passed. The system Python had
+no pytest, so the gate was run as `make test PYTHON=.venv/bin/python`. No live
+vendor requests or real messages were used. Existing dependency deprecation
+warnings remain; this follow-up did not repeat the earlier dependency audit.

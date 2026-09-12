@@ -314,3 +314,45 @@ def test_public_ipv6_url_keeps_url_reputation_target():
     value = "https://[2606:4700:4700::1111]/login"
     parsed = email(value, html=False)
     assert value in {target.value for target in build_targets(parsed, extract_iocs(parsed))}
+
+
+@pytest.mark.parametrize("content_type", ["text/calendar", "text/rtf"])
+def test_unsupported_inline_text_body_is_visible_and_incomplete(content_type):
+    parsed = parse_eml(
+        (
+            f"From: sender@example.com\r\nContent-Type: {content_type}\r\n\r\n"
+            "DESCRIPTION:Verify at https://credential.example/login"
+        ).encode()
+    )
+    view, result = triage(parsed)
+    assert not result.analysis_complete
+    assert any(a.code == "unsupported_body_type" for a in view.anomalies)
+    assert len(parsed.attachments) == 1
+    assert parsed.attachments[0].sha256
+
+
+def test_long_anchor_label_finishes_within_process_budget():
+    import subprocess
+    import sys
+
+    # Subprocess timeout makes a future CPU regression fail instead of hanging pytest.
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+from phishbowl.score.detectors import _first_host_in_text
+assert _first_host_in_text('a' * 250_000) is None
+assert _first_host_in_text('a.' * 120_000) is None
+assert _first_host_in_text('visit https://example.org/login') == 'example.org'
+""",
+        ],
+        check=True,
+        timeout=5,
+    )
+
+
+@pytest.mark.parametrize("label", ["Visit paypal.com.", "paypal.com. ", "paypal.com"])
+def test_anchor_host_followed_by_punctuation_still_detects_mismatch(label):
+    _, result = triage(email(f'<a href="https://credential.example/login">{label}</a>'))
+    assert any(rule.id == "url.anchor_href_mismatch" for rule in result.fired)

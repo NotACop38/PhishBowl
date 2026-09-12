@@ -193,8 +193,8 @@ def is_attachment(part: Message) -> bool:
 
     A part counts as an attachment when it is an attached message
     (``message/rfc822``), explicitly dispositioned as one, carries a filename,
-    or is a non-text leaf (e.g. an inline image). Multipart containers and
-    text body parts — including ``Content-Disposition: inline`` text — are not.
+    or is a leaf other than text/plain or text/html. Multipart containers and
+    supported text body parts — including ``Content-Disposition: inline`` text — are not.
     """
     maintype = part.get_content_maintype()
     # An attached email is an attachment to capture, not a container to descend
@@ -213,9 +213,8 @@ def is_attachment(part: Message) -> bool:
         return True
     if part.get_filename() is not None:
         return True
-    # Inline (or undeclared) text parts are body; any non-text leaf — e.g. an
-    # inline image — is an attachment.
-    return maintype != "text"
+    # Unsupported text formats remain visible as metadata-only attachments.
+    return part.get_content_type() not in {"text/plain", "text/html"}
 
 
 def iter_parts(part: Message, *, max_parts: int | None = None, include_containers: bool = False):

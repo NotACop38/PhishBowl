@@ -73,6 +73,10 @@ def _host(url: str) -> str:
 
 def detect_wrapper(url: str) -> str | None:
     """Return the protective-wrapper name for ``url``, or ``None`` if it's plain."""
+    # Browsers treat backslashes as slashes in web URLs, unlike urlsplit.
+    # Keep ambiguous URLs intact instead of trusting a different authority.
+    if "\\" in url:
+        return None
     host = _host(url)
     try:
         path = urlsplit(url).path
@@ -82,7 +86,10 @@ def detect_wrapper(url: str) -> str | None:
         ".safelinks.protection.outlook.com"
     ):
         return SAFELINKS
-    if "urldefense.proofpoint.com" in host or "urldefense.com" in host:
+    if any(
+        host == domain or host.endswith("." + domain)
+        for domain in ("urldefense.proofpoint.com", "urldefense.com")
+    ):
         return PROOFPOINT
     if host.endswith(".mimecast.com") or host == "mimecast.com":
         if path.startswith("/s/"):
@@ -103,7 +110,7 @@ def unwrap_safelinks(url: str) -> str | None:
     target = params.get("url")
     if not target:
         return None
-    decoded = unquote(target[0])
+    decoded = target[0]  # parse_qs already decoded this wrapper layer.
     return decoded or None
 
 
@@ -121,7 +128,11 @@ _PP_RUN = {ch: i + 2 for i, ch in enumerate(_B64_ALPHABET)}
 
 
 def _pp_version(url: str) -> str | None:
-    m = re.search(r"urldefense(?:\.proofpoint)?\.com/(v[123])/", url)
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
+    m = re.match(r"/(v[123])/", path)
     return m.group(1) if m else None
 
 

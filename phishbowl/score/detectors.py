@@ -41,7 +41,12 @@ from .rules import DetectorSpec, RuleSource
 
 _EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _TEXT_HOST_RE = re.compile(
-    r"(?:https?://)?((?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,})", re.IGNORECASE
+    # A token boundary prevents retrying every suffix of long hostile text;
+    # DNS label bounds also cap backtracking within each candidate.
+    r"(?<![a-z0-9.\-])(?:https?://)?"
+    r"((?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.){1,127}[a-z]{2,63})"
+    r"(?![a-z0-9\-]|\.[a-z0-9\-])",
+    re.IGNORECASE,
 )
 _WS_RE = re.compile(r"\s+")
 
