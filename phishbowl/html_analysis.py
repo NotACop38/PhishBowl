@@ -14,6 +14,7 @@ class HTMLAnalysis:
     text: str
     links: tuple[str, ...]
     anchors: tuple[tuple[str, str], ...]
+    complete: bool = True
 
 
 class _Inspector(HTMLParser):
@@ -48,7 +49,13 @@ class _Inspector(HTMLParser):
 
 def inspect_html(value: str) -> HTMLAnalysis:
     parser = _Inspector()
-    parser.feed(value[:MAX_TEXT_CHARS])
-    parser.close()
+    complete = len(value) <= MAX_TEXT_CHARS
+    try:
+        parser.feed(value[:MAX_TEXT_CHARS])
+        parser.close()
+    except (AssertionError, ValueError):
+        complete = False
+        # Preserve text for IOC scanning; renderers escape all such content.
+        parser.text.append(value[:MAX_TEXT_CHARS])
     parser.handle_endtag("a")
-    return HTMLAnalysis("".join(parser.text), tuple(parser.links), tuple(parser.anchors))
+    return HTMLAnalysis("".join(parser.text), tuple(parser.links), tuple(parser.anchors), complete)

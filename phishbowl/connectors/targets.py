@@ -106,6 +106,7 @@ def build_targets(
             else:
                 if not _is_public_ip(host):
                     return
+                host = None  # A validated IP literal is not a DNS hostname.
         if host:
             host = host.casefold().rstrip(".")
             if "." not in host or host.endswith((".localhost", ".local", ".internal")):

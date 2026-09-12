@@ -274,9 +274,14 @@ def _human_size(size: int | None) -> str | None:
     return f"{size} B"
 
 
-def _address_view(addr, redactor: Redactor, *, recipient: bool) -> AddressView | None:
+def _address_view(
+    addr, redactor: Redactor, *, recipient: bool, header: str = "From"
+) -> AddressView | None:
     if addr is None:
         return None
+    if redactor.hides_field(header):
+        redactor.triggered.add("operator fields")
+        return AddressView(addr_spec_display="[redacted:field]", redacted=True)
     if recipient:
         redacted = redactor.recipient_address(addr)
         if redacted is not addr:
@@ -288,9 +293,7 @@ def _address_view(addr, redactor: Redactor, *, recipient: bool) -> AddressView |
                 redacted=True,
             )
     raw = addr.addr_spec
-    if redactor.active and (
-        redactor.field("To" if recipient else "From", raw) != raw or redactor.text(raw) != raw
-    ):
+    if redactor.active and (redactor.field(header, raw) != raw or redactor.text(raw) != raw):
         return AddressView(addr_spec_display="[redacted:field]", redacted=True)
     return AddressView(
         # Display names are attacker-chosen free text and can themselves carry a
@@ -450,7 +453,19 @@ def build_report(
         # Auth details quote attacker-influenced header text (domains, client
         # IPs) — defanged like subject/evidence, so copy-paste stays safe.
         AuthLineView(
-            mechanism=name, result=line.result.value, detail=_safe_text(redactor.text(line.detail))
+            mechanism=name,
+            result=(
+                "redacted"
+                if redactor.hides_field("Authentication-Results")
+                or (name == "SPF" and redactor.hides_field("Received-SPF"))
+                else line.result.value
+            ),
+            detail=(
+                None
+                if redactor.hides_field("Authentication-Results")
+                or (name == "SPF" and redactor.hides_field("Received-SPF"))
+                else _safe_text(redactor.text(line.detail))
+            ),
         )
         for name, line in (
             ("SPF", parsed.auth.spf),
@@ -486,7 +501,7 @@ def build_report(
             index=idx,
             **{"from": defang_text(redactor.text(_clean(hop.from_)))},
             by=defang_text(redactor.text(_clean(hop.by))),
-            **{"with": _safe_text(hop.with_)},
+            **{"with": _safe_text(redactor.text(hop.with_))},
             timestamp=hop.timestamp.isoformat() if hop.timestamp else None,
             raw=defang_text(redactor.text(_clean(hop.raw))) or "",
         )
@@ -566,11 +581,15 @@ def build_report(
         severity=severity_for(result.score),
         analysis_complete=result.analysis_complete,
         subject=_safe_text(redactor.field("Subject", redactor.text(parsed.subject))),
-        date=parsed.date.isoformat() if parsed.date else None,
+        date=redactor.field("Date", parsed.date.isoformat() if parsed.date else None),
         **{"from": _address_view(parsed.addresses.from_, redactor, recipient=False)},
-        reply_to=_address_view(parsed.addresses.reply_to, redactor, recipient=False),
-        return_path=_address_view(parsed.addresses.return_path, redactor, recipient=False),
-        sender=_address_view(parsed.addresses.sender, redactor, recipient=False),
+        reply_to=_address_view(
+            parsed.addresses.reply_to, redactor, recipient=False, header="Reply-To"
+        ),
+        return_path=_address_view(
+            parsed.addresses.return_path, redactor, recipient=False, header="Return-Path"
+        ),
+        sender=_address_view(parsed.addresses.sender, redactor, recipient=False, header="Sender"),
         to=[v for a in parsed.addresses.to if (v := _address_view(a, redactor, recipient=True))],
         cc=[v for a in parsed.addresses.cc if (v := _address_view(a, redactor, recipient=True))],
         return_path_mismatch=parsed.addresses.return_path_mismatch,

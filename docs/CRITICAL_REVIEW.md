@@ -68,7 +68,10 @@ local report rendering, package build, and a separate review before merge. The
 routine gate remains `make test`; no hosted CI, coverage gate or type checker was
 introduced.
 
-The review check passed 318 tests before independent review. Chromium loaded the
+The final review check passed 324 tests. Independent review also caught hidden
+MIME-container defects, repeated defanging in redacted evidence, a routing-field
+redaction omission, and public IPv6 URLs being filtered as DNS names. These were
+corrected with targeted regression coverage. Chromium loaded the
 updated report with zero HTTP requests and no horizontal overflow at 390 pixels.
 The wheel and source distribution built successfully. The dependency audit found
 only outdated pip tooling, upgraded to 26.2.1; Bandit's one existing silent catch

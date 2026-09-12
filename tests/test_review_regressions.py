@@ -111,6 +111,7 @@ def test_redaction_applies_to_every_renderer_and_derived_copy():
             "PRIVATE-SUBJECT",
             "10.0.0.4",
             "10[.]0[.]0[.]4",
+            "10[[.]]0[[.]]0[[.]]4",
             "::1",
         ):
             assert secret not in text
@@ -244,3 +245,72 @@ def test_cache_malformed_shape_and_naive_timestamp_are_misses(tmp_path):
     for payload in ([], {"stored_at": "2026-09-12T00:00:00", "result": {}}):
         path.write_text(json.dumps(payload))
         assert cache.get("rdap", "domain", "example.com", ttl=3600) is None
+
+
+def test_malformed_html_declaration_is_incomplete_and_recoverable():
+    view, result = triage(email("<![foo]><a href=https://credential.example/login>Review</a>"))
+    assert "credential" in render_json(view)
+    if any(a.code == "html_incomplete" for a in view.anomalies):
+        assert not result.analysis_complete
+
+
+def test_explicit_header_redaction_removes_normalized_derivatives():
+    parsed = parse_eml(
+        b"From: Secret Name <secret@confidential.example>\r\n"
+        b"Reply-To: Other Name <private@response.example>\r\n"
+        b"Date: Wed, 03 Jun 2026 02:05:09 +0000\r\n\r\nhello"
+    )
+    view, _ = triage(parsed, policy=RedactionPolicy.standard(("From", "Reply-To", "Date")))
+    for output in (render_json(view), render_html(view), render_xsoar(view), render_sentinel(view)):
+        for secret in (
+            "confidential",
+            "response.example",
+            "response[.]example",
+            "2026-06-03",
+            "Secret Name",
+            "Other Name",
+        ):
+            assert secret not in output
+
+
+def test_defanged_internal_values_are_redacted_in_evidence():
+    from phishbowl.report.redact import Redactor
+
+    redactor = Redactor(
+        RedactionPolicy.standard(),
+        email("hello"),
+        load_config(overrides={"org_domains": ["corp.example"]}),
+    )
+    for value in (
+        "host.corp[.]example",
+        "10[.]0[.]0[.]4",
+        "10[[.]]0[[.]]0[[.]]4",
+        "fc00[:][:]1",
+        "hxxps://host.corp[.]example/",
+    ):
+        assert redactor.text(value).startswith("[redacted:")
+
+
+def test_multipart_container_defects_make_analysis_incomplete():
+    raw = (
+        b"From: sender@example.com\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n"
+        b"--x\r\nContent-Type: text/plain\r\n\r\nhello\r\n"
+    )
+    view, result = triage(parse_eml(raw))
+    assert not result.analysis_complete
+    assert any("CloseBoundaryNotFoundDefect" in a.message for a in view.anomalies)
+
+
+def test_routing_protocol_field_obeys_redaction():
+    parsed = email("hello", html=False)
+    from phishbowl.models.routing import ReceivedHop
+
+    parsed.routing.hops.append(ReceivedHop(raw="", with_="alice@example.org"))
+    view, _ = triage(parsed, policy=RedactionPolicy.standard())
+    assert "alice" not in render_json(view)
+
+
+def test_public_ipv6_url_keeps_url_reputation_target():
+    value = "https://[2606:4700:4700::1111]/login"
+    parsed = email(value, html=False)
+    assert value in {target.value for target in build_targets(parsed, extract_iocs(parsed))}

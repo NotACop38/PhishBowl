@@ -201,7 +201,7 @@ def _build_attachments(msg: Message) -> list[Attachment]:
 
 def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:
     """Surface MIME defects and obvious missing pieces as anomaly notes."""
-    for part in iter_parts(msg):
+    for part in iter_parts(msg, include_containers=True):
         for defect in getattr(part, "defects", []) or []:
             parsed.anomalies.append(
                 Anomaly(code="mime_defect", message=f"{type(defect).__name__}: {defect}")

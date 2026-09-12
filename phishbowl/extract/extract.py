@@ -140,6 +140,10 @@ def _scan_html(collector: _Collector, html_raw: str, provenance: str) -> None:
     is only ever string-scanned here — never rendered (PRD §10).
     """
     inspected = inspect_html(html_raw)
+    if not inspected.complete:
+        collector.note(
+            "html_incomplete", "HTML parsing was incomplete; markup may contain unrecognized links"
+        )
     for link in inspected.links:
         _add_url(collector, link, provenance)
     visible = inspected.text

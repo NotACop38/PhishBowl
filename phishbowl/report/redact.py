@@ -26,8 +26,9 @@ import re
 from dataclasses import dataclass
 from urllib.parse import quote, quote_plus, unquote
 
-from phishbowl.extract import defang_text
+from phishbowl.extract import defang_text, refang
 from phishbowl.models import Address, ParsedEmail
+from phishbowl.parse.addresses import parse_address_list
 from phishbowl.score import ScoringConfig
 
 # Typed placeholders. Kept distinct so a reader (and a downstream tool consuming
@@ -89,6 +90,9 @@ class Redactor:
         self.triggered: set[str] = set()
 
         recipients = [*parsed.addresses.to, *parsed.addresses.cc]
+        for header in parsed.headers.items:
+            if header.name.casefold() == "bcc":
+                recipients.extend(parse_address_list([header.value]))
         self._recipient_addrs = frozenset(
             a.addr_spec.strip().casefold() for a in recipients if a.addr_spec
         )
@@ -107,6 +111,23 @@ class Redactor:
         for h in parsed.headers.items:
             if h.name.casefold() in self._extra_fields and h.value:
                 replacements.append((h.value, REDACTED_FIELD, "operator fields"))
+                if h.name.casefold() in {
+                    "from",
+                    "reply-to",
+                    "return-path",
+                    "sender",
+                    "to",
+                    "cc",
+                    "bcc",
+                }:
+                    for address in parse_address_list([h.value]):
+                        replacements.extend(
+                            (value, REDACTED_FIELD, "operator fields")
+                            for value in (address.addr_spec, address.domain, address.display_name)
+                            if value
+                        )
+        if "date" in self._extra_fields and parsed.date:
+            replacements.append((parsed.date.isoformat(), REDACTED_FIELD, "operator fields"))
         self._replacements = []
         for value, replacement, category in sorted(replacements, key=lambda item: -len(item[0])):
             variants = {
@@ -133,6 +154,9 @@ class Redactor:
         if not host:
             return False
         return any(host == d or host.endswith("." + d) for d in self._org_domains)
+
+    def hides_field(self, name: str) -> bool:
+        return self.active and name.casefold() in self._extra_fields
 
     def field(self, name: str, value: str | None) -> str | None:
         """Redact a header *value* if the operator listed its *name* as sensitive."""
@@ -191,6 +215,14 @@ class Redactor:
             return value
         # Inspect common percent encodings before rendering. Any changed encoded
         # value is withheld whole: redaction must not create a usable altered URL.
+        restored = value
+        for _ in range(3):
+            new = refang(restored)
+            if new == restored:
+                break
+            restored = new
+        if restored != value and self.hop_text(restored) != restored:
+            return REDACTED_FIELD
         decoded = value
         for _ in range(3):
             new = unquote(decoded)
