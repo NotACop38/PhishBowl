@@ -235,9 +235,11 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 ## 14. Success metrics
 
 - **Time-to-first-report** from `pip install` on the bundled sample: **< 60s**, zero keys.
-- A reviewer's gut reaction to the HTML report: "I'd paste that into a ticket." (Screenshot-worthiness is the primary growth driver.)
+- Evidence integrity: preserve actual destinations, surface unsupported content, and prevent report destinations from overwriting source evidence.
+- Bounded analysis: hostile synthetic regression cases finish within test budgets; exhausted or unsupported analysis is explicitly incomplete.
+- Analyst usability: trace each scoring contribution to evidence in a readable, inert report. Visual polish supports this goal; it is not detection validation.
 - Connector plugin API clear enough that an external contributor can ship one against the docs without reading core internals.
-- Proxy growth signals: GitHub stars, forks, externally-contributed connectors.
+- External adoption and connector contributions are secondary indicators; stars and forks are not measures of detection quality.
 
 ## 15. Out of scope / future
 

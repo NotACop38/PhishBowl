@@ -78,3 +78,53 @@ def test_analyze_dash_empty_stdin_is_clean_error() -> None:
 
     assert result.exit_code != 0
     assert "stdin" in result.output
+
+
+def test_outputs_cannot_overwrite_source_or_aliases(tmp_path: Path) -> None:
+    source = tmp_path / "evidence.eml"
+    original = FIXTURE.read_bytes()
+    source.write_bytes(original)
+    symlink = tmp_path / "link.html"
+    symlink.symlink_to(source)
+    hardlink = tmp_path / "hardlink.json"
+    hardlink.hardlink_to(source)
+    for destination in (source, symlink, hardlink):
+        result = runner.invoke(app, ["analyze", str(source), "--html", str(destination)])
+        assert result.exit_code == 2
+        assert "output" in result.output.lower()
+        assert source.read_bytes() == original
+
+
+def test_output_collisions_are_rejected_before_any_write(tmp_path: Path) -> None:
+    destination = tmp_path / "report"
+    result = runner.invoke(
+        app,
+        [
+            "analyze",
+            str(FIXTURE),
+            "--html",
+            str(destination),
+            "--json",
+            str(destination),
+        ],
+    )
+    assert result.exit_code == 2
+    assert not destination.exists()
+
+
+def test_output_cannot_overwrite_scoring_config(tmp_path: Path) -> None:
+    config = tmp_path / "config.yaml"
+    config.write_text("weights: {}\n")
+    result = runner.invoke(
+        app,
+        [
+            "analyze",
+            str(FIXTURE),
+            "--scoring-config",
+            str(config),
+            "--html",
+            str(config),
+        ],
+    )
+    assert result.exit_code == 2
+    assert config.read_text() == "weights: {}\n"

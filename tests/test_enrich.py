@@ -1282,3 +1282,24 @@ def test_cli_enrich_flag_wires_enrichment_into_the_run(monkeypatch: pytest.Monke
     assert "rdap" in result.stdout
     # The enrichment-derived point is shown and source-tagged.
     assert "enrichment" in result.stdout
+
+
+def test_urlscan_active_submission_does_not_reuse_or_replace_passive_cache(tmp_path: Path) -> None:
+    calls = []
+
+    def handler(request):
+        calls.append(request.method)
+        if request.method == "POST":
+            return httpx.Response(200, json={"result": "https://urlscan.io/result/synthetic/"})
+        return httpx.Response(200, json={"results": []})
+
+    target = Indicator("url", "https://sample.example/path", "hxxps://sample[.]example/path")
+    options = dict(select=frozenset({"urlscan"}), cache_enabled=True, cache_dir=tmp_path)
+    run_enrichment([target], make_settings(handler, **options))
+    active = run_enrichment([target], make_settings(handler, urlscan_submit=True, **options))
+    assert calls == ["GET", "POST"]
+    assert active.status_for("urlscan").cache_hits == 0
+    passive = run_enrichment([target], make_settings(handler, **options))
+    assert calls == ["GET", "POST"]
+    assert passive.status_for("urlscan").cache_hits == 1
+    assert passive.results[0].references == ()

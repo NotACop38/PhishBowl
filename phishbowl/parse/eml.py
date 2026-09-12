@@ -202,6 +202,18 @@ def _build_attachments(msg: Message) -> list[Attachment]:
 def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:
     """Surface MIME defects and obvious missing pieces as anomaly notes."""
     for part in iter_parts(msg, include_containers=True):
+        if (
+            part.get_content_maintype() == "text"
+            and part.get_content_type() not in {"text/plain", "text/html"}
+            and part.get_content_disposition() != "attachment"
+            and part.get_filename() is None
+        ):
+            parsed.anomalies.append(
+                Anomaly(
+                    code="unsupported_body_type",
+                    message=f"{part.get_content_type()} body inspected as attachment metadata only",
+                )
+            )
         for defect in getattr(part, "defects", []) or []:
             parsed.anomalies.append(
                 Anomaly(code="mime_defect", message=f"{type(defect).__name__}: {defect}")

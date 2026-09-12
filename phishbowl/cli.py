@@ -13,6 +13,7 @@ network egress is to allowlisted vendor APIs — never the analyzed email's URLs
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -111,6 +112,34 @@ def _resolve_parsed(
         )
     target = embedded[inner_index]
     return parse_bytes(target.data, filename=target.filename)
+
+
+def _validate_output_paths(source: str, outputs: list[Path], config: Path | None) -> None:
+    """Reject aliases before analysis or enrichment can have side effects."""
+    from phishbowl.score.config import DEFAULT_CONFIG_PATH, ENV_CONFIG
+
+    protected = [DEFAULT_CONFIG_PATH]
+    if source != "-":
+        protected.append(Path(source))
+    if config is not None:
+        protected.append(config)
+    if os.environ.get(ENV_CONFIG):
+        protected.append(Path(os.environ[ENV_CONFIG]))
+
+    def aliases(left: Path, right: Path) -> bool:
+        return left.resolve() == right.resolve() or (
+            left.exists() and right.exists() and left.samefile(right)
+        )
+
+    try:
+        for index, output in enumerate(outputs):
+            if any(aliases(output, other) for other in protected + outputs[:index]):
+                raise typer.BadParameter(
+                    "output paths must be distinct from the source email, scoring config, "
+                    "and other outputs (including filesystem aliases)"
+                )
+    except (OSError, RuntimeError) as exc:
+        raise typer.BadParameter(f"could not validate output paths: {exc}") from exc
 
 
 @app.command()
@@ -241,6 +270,11 @@ def analyze(
                 f"unknown --fail-on level '{fail_on}'; "
                 f"expected one of: {', '.join(sorted(set(_FAIL_ON_THRESHOLDS)))}"
             )
+
+    outputs = [p for p in (html, xsoar, sentinel) if p is not None]
+    if json_out is not None and json_out != "-":
+        outputs.append(Path(json_out))
+    _validate_output_paths(path, outputs, scoring_config)
 
     use_inner = inner or (inner_index != 0)
     try:
