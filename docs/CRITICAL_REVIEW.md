@@ -108,7 +108,10 @@ trust boundary without evidence that it solves the current product's gaps.
 Independent review caught and corrected a terminal-dot regression in hostname
 matching before merge; sentence punctuation still permits mismatch detection.
 
-Validation: 337 tests passed using the repository virtual environment, including
+Ambiguous backslash authorities also remain intact, avoiding browser/Python
+host interpretation differences during unwrapping.
+
+Validation: 339 tests passed using the repository virtual environment, including
 synthetic regressions; Ruff and whitespace checks passed. The system Python had
 no pytest, so the gate was run as `make test PYTHON=.venv/bin/python`. No live
 vendor requests or real messages were used. Existing dependency deprecation

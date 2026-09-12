@@ -73,6 +73,10 @@ def _host(url: str) -> str:
 
 def detect_wrapper(url: str) -> str | None:
     """Return the protective-wrapper name for ``url``, or ``None`` if it's plain."""
+    # Browsers treat backslashes as slashes in web URLs, unlike urlsplit.
+    # Keep ambiguous URLs intact instead of trusting a different authority.
+    if "\\" in url:
+        return None
     host = _host(url)
     try:
         path = urlsplit(url).path

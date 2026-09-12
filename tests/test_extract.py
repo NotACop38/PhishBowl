@@ -294,3 +294,14 @@ def test_safelinks_preserves_destination_percent_encoding():
     target = "https://sample.example/a%2Fb?token=a%26b%3Dc"
     wrapped = "https://safelinks.protection.outlook.com/?url=" + quote(target, safe="")
     assert unwrap_safelinks(wrapped) == target
+
+
+@pytest.mark.parametrize("host", ["urldefense.com", "safelinks.protection.outlook.com"])
+def test_backslash_authority_cannot_masquerade_as_wrapper(host):
+    url = (
+        "https://attacker.example\\@"
+        + host
+        + "/v1/?u=https%3A%2F%2Fexample.org%2F&k=unused"
+        + "&url=https%3A%2F%2Fexample.org%2F"
+    )
+    assert unwrap_url(url) is None
