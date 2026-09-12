@@ -45,7 +45,7 @@ _TEXT_HOST_RE = re.compile(
     # DNS label bounds also cap backtracking within each candidate.
     r"(?<![a-z0-9.\-])(?:https?://)?"
     r"((?:[a-z0-9](?:[a-z0-9\-]{0,61}[a-z0-9])?\.){1,127}[a-z]{2,63})"
-    r"(?![a-z0-9.\-])",
+    r"(?![a-z0-9\-]|\.[a-z0-9\-])",
     re.IGNORECASE,
 )
 _WS_RE = re.compile(r"\s+")

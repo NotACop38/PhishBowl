@@ -350,3 +350,9 @@ assert _first_host_in_text('visit https://example.org/login') == 'example.org'
         check=True,
         timeout=5,
     )
+
+
+@pytest.mark.parametrize("label", ["Visit paypal.com.", "paypal.com. ", "paypal.com"])
+def test_anchor_host_followed_by_punctuation_still_detects_mismatch(label):
+    _, result = triage(email(f'<a href="https://credential.example/login">{label}</a>'))
+    assert any(rule.id == "url.anchor_href_mismatch" for rule in result.fired)
