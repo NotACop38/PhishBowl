@@ -308,13 +308,14 @@
   <section class="verdict">
     <div class="dial">
       <div class="num">{{ r.score }}</div>
-      <div class="den">/ {{ r.max_score }} RISK</div>
+      <div class="den">/ {{ r.max_score }} SIGNAL SCORE</div>
     </div>
     <div class="vbody">
       <div class="eyebrow">Verdict</div>
       <h1>{{ r.verdict }}</h1>
+      <p>{{ r.assessment_note }}</p>
       <div class="meter"><span class="pin" style="left: {{ r.score }}%"></span></div>
-      <div class="meter-scale"><span>0 · benign</span><span>50</span><span>100 · malicious</span></div>
+      <div class="meter-scale"><span>0 · few signals</span><span>50</span><span>100 · many signals</span></div>
       <div class="vsub">
         Offline score <code>{{ r.offline_score }}</code> from
         <code>{{ r.fired_rules | length }}</code> triggered rule{{ "" if r.fired_rules|length == 1 else "s" }}
@@ -327,9 +328,9 @@
   {% if r.redaction.enabled %}
   <div class="notice">
     <span class="tag">PII redacted</span>
-    <span>Bystander PII is withheld from this report{% if r.redaction.categories %}
+    <span>Selected sensitive values are withheld from this report{% if r.redaction.categories %}
       ({{ r.redaction.categories | join(", ") }}){% endif %}.
-      Attacker-controlled indicators are shown in full.</span>
+      Review before sharing; other free text may contain PII. Vendor references are withheld when redaction is active.</span>
   </div>
   {% endif %}
 
@@ -402,7 +403,7 @@
 
     {# ---------- Authentication ---------- #}
     <div class="card">
-      <div class="card-h"><h2>Authentication</h2></div>
+      <div class="card-h"><h2>Authentication header claims (unverified)</h2></div>
       <div class="card-b">
         <div class="authrow">
           {% for a in r.auth %}
@@ -479,7 +480,7 @@
       <div class="card-h"><h2>Routing path</h2><span class="count">{{ r.routing | length }} hop{{ "" if r.routing|length == 1 else "s" }}</span></div>
       <div class="card-b">
         {% if r.sending_ip_display %}
-        <p class="sending-ip">Sending infrastructure (best public hop IP):
+        <p class="sending-ip">Received-header IP candidate (unverified):
           <b>{{ r.sending_ip_display }}</b></p>
         {% endif %}
         {% if r.routing %}

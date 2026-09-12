@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
+from urllib.parse import urlsplit
 
 from phishbowl.models import IOCs, IOCType, ParsedEmail
 
@@ -37,9 +38,7 @@ def _is_public_ip(value: str) -> bool:
         ip = ipaddress.ip_address(value.strip())
     except ValueError:
         return False
-    return not (
-        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast
-    )
+    return ip.is_global and not ip.is_multicast
 
 
 def _defang_ip(value: str) -> str:
@@ -75,7 +74,9 @@ def sending_ips(parsed: ParsedEmail) -> list[Indicator]:
     return out
 
 
-def build_targets(parsed: ParsedEmail, iocs: IOCs) -> list[Indicator]:
+def build_targets(
+    parsed: ParsedEmail, iocs: IOCs, *, excluded_domains: frozenset[str] = frozenset()
+) -> list[Indicator]:
     """Union of enrichable IOCs and routing sending-IPs, de-duplicated (PRD §9).
 
     Routing-derived sending IPs come first (highest-value pivot), then the
@@ -86,6 +87,32 @@ def build_targets(parsed: ParsedEmail, iocs: IOCs) -> list[Indicator]:
     targets: list[Indicator] = []
 
     def _add(ind: Indicator) -> None:
+        host = ind.value if ind.type == "domain" else None
+        if ind.type in {"ipv4", "ipv6"} and not _is_public_ip(ind.value):
+            return
+        if ind.type == "url":
+            try:
+                parts = urlsplit(ind.value)
+                host = parts.hostname
+            except ValueError:
+                return
+            if parts.scheme not in {"http", "https"} or not host:
+                return
+            try:
+                ipaddress.ip_address(host)
+            except ValueError:
+                if "." not in host or host.endswith((".localhost", ".local", ".internal")):
+                    return
+            else:
+                if not _is_public_ip(host):
+                    return
+                host = None  # A validated IP literal is not a DNS hostname.
+        if host:
+            host = host.casefold().rstrip(".")
+            if "." not in host or host.endswith((".localhost", ".local", ".internal")):
+                return
+            if any(host == d or host.endswith("." + d) for d in excluded_domains):
+                return
         key = (ind.type, ind.value)
         if key not in seen:
             seen.add(key)
@@ -95,6 +122,8 @@ def build_targets(parsed: ParsedEmail, iocs: IOCs) -> list[Indicator]:
         _add(ip)
 
     for ioc in iocs:
+        if ioc.type == IOCType.DOMAIN and set(ioc.provenance) <= {"header:To", "header:Cc"}:
+            continue
         if ioc.type in _ENRICHABLE:
             _add(Indicator(type=ioc.type.value, value=ioc.value, defanged=ioc.defanged))
 

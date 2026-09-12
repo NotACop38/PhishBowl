@@ -191,3 +191,20 @@ template = json.load(open("azuredeploy.json"))
 assert validate_export(playbook, XSOAR_SCHEMA_NAME) == []     # [] == conforms
 assert validate_export(template, SENTINEL_SCHEMA_NAME) == []
 ```
+
+## Literal email data and qualification
+
+Sentinel string values that could be ARM or workflow expressions are represented
+with a fixed `base64ToString` expression. Only base64 data enters its argument;
+the decoded result is a string, not another expression. Other triage values remain
+readable in the artifact. Playbook-name parameter defaults use ARM bracket escaping.
+This follows Microsoft's [ARM expression rules](https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/template-expressions)
+and [workflow expression function reference](https://learn.microsoft.com/en-us/azure/logic-apps/expression-functions-reference).
+The workflow remains disabled with manual triggers and Compose actions.
+
+Synthetic tests check artifact structure and lossless string decoding. No Azure
+or XSOAR deployment was performed during this review; the bundled schemas are
+local structural checks, not complete vendor import certification. Inspect code
+view after any edits in the Logic Apps designer, which can rewrite expressions.
+`analysis_complete` and the assessment note accompany the Sentinel triage summary;
+incomplete assessments are labeled in both platforms' draft verdicts.

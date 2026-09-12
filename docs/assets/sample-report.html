@@ -233,6 +233,40 @@
     .verdict { grid-template-columns: 1fr; gap: 20px; }
     .dl { grid-template-columns: 92px 1fr; }
   }
+
+  /* Print / PDF — ticket-friendly hard copy of the dossier. */
+  @media print {
+    body { background: #fff; color: #111; }
+    body::before, body::after { display: none !important; }
+    .wrap { max-width: none; margin: 0; padding: 0; }
+    .verdict, .card, .notice { break-inside: avoid; page-break-inside: avoid;
+      box-shadow: none; background: #fff; border-color: #ccc; }
+    .verdict { border: 2px solid #333; }
+    .badges .badge { border-color: #999; }
+    table { break-inside: auto; }
+    tr { break-inside: avoid; page-break-inside: avoid; }
+    details.headers { open: true; }
+    details.headers[open] summary { display: none; }
+    .preview { max-height: none; overflow: visible; }
+    footer.foot { break-before: avoid; }
+  }
+
+  details.headers { margin: 0; }
+  details.headers summary {
+    cursor: pointer; list-style: none; font-family: var(--font-mono);
+    font-size: 12px; color: var(--muted); padding: 4px 0 12px;
+  }
+  details.headers summary::-webkit-details-marker { display: none; }
+  details.headers summary::before { content: "▸ "; color: var(--faint); }
+  details.headers[open] summary::before { content: "▾ "; }
+  .hdr-row { display: grid; grid-template-columns: minmax(120px, 180px) 1fr;
+    gap: 8px 16px; padding: 6px 0; border-bottom: 1px solid var(--border-soft);
+    font-size: 12.5px; }
+  .hdr-row:last-child { border-bottom: none; }
+  .hdr-name { font-family: var(--font-mono); color: var(--muted); font-weight: 600; }
+  .hdr-val { font-family: var(--font-mono); color: var(--ink); word-break: break-word; }
+  .sending-ip { font-family: var(--font-mono); font-size: 13px; margin: 0 0 14px; }
+  .sending-ip b { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -248,7 +282,7 @@
         <b>source:</b> crafted_malicious.eml ·
         <b>format:</b> eml ·
         <b>parser:</b> v0.1.0 ·
-        <b>analyzed:</b> 2026-06-04T18:30:25.397752+00:00
+        <b>analyzed:</b> 2026-09-12T13:18:19.761356+00:00
       </div>
     </div>
     <div class="badges">
@@ -261,13 +295,14 @@
   <section class="verdict">
     <div class="dial">
       <div class="num">100</div>
-      <div class="den">/ 100 RISK</div>
+      <div class="den">/ 100 SIGNAL SCORE</div>
     </div>
     <div class="vbody">
       <div class="eyebrow">Verdict</div>
-      <h1>Malicious — high confidence</h1>
+      <h1>Very high suspicion</h1>
+      <p>Heuristic score, not a probability or proof of safety. Header authentication claims are unverified.</p>
       <div class="meter"><span class="pin" style="left: 100%"></span></div>
-      <div class="meter-scale"><span>0 · benign</span><span>50</span><span>100 · malicious</span></div>
+      <div class="meter-scale"><span>0 · few signals</span><span>50</span><span>100 · many signals</span></div>
       <div class="vsub">
         Offline score <code>100</code> from
         <code>13</code> triggered rules
@@ -276,6 +311,7 @@
       </div>
     </div>
   </section>
+
 
 
   <div class="grid">
@@ -374,7 +410,7 @@
             <tr>
               <td><span class="name">Urgency / financial-pressure language</span>
                   <div class="prov">content.urgency_keywords</div></td>
-              <td class="mono">urgency / financial-pressure phrasing: immediately, suspended, urgent</td>
+              <td class="mono">urgency / financial-pressure phrasing: confirm your account, immediately, suspended, urgent</td>
               <td><span class="wt">+4</span></td>
               <td class="tagsrc">offline</td>
             </tr>
@@ -383,14 +419,15 @@
       </div>
     </div>
 
+
     <div class="card">
-      <div class="card-h"><h2>Authentication</h2></div>
+      <div class="card-h"><h2>Authentication header claims (unverified)</h2></div>
       <div class="card-b">
         <div class="authrow">
             <div class="authcell bad">
               <div class="m">SPF</div>
               <div class="r">fail</div>
-<div class="d">(example.org: domain of example.com does not designate 203.0.113.99 as permitted sender) smtp.mailfrom=example.com</div>            </div>
+<div class="d">(example.org: domain of example.com does not designate 203[.]0[.]113[.]99 as permitted sender) smtp.mailfrom=example.com</div>            </div>
             <div class="authcell bad">
               <div class="m">DKIM</div>
               <div class="r">fail</div>
@@ -594,8 +631,65 @@
             <div class="idx">HOP 0</div>
             <div class="ln">
  by <b>mx.example.org</b> · 2026-06-03T03:33:09+00:00            </div>
-            <div class="raw">from unknown (unknown [203.0.113.99]) by mx.example.org (Postfix) with ESMTP id MAL999 for &lt;analyst@example.org&gt;; Wed, 03 Jun 2026 03:33:09 +0000 (UTC)</div>
+            <div class="raw">from unknown (unknown [203[.]0[.]113[.]99]) by mx.example.org (Postfix) with ESMTP id MAL999 for &lt;analyst[at]example[.]org&gt;; Wed, 03 Jun 2026 03:33:09 +0000 (UTC)</div>
           </div>
+      </div>
+    </div>
+
+    <div class="card span">
+      <div class="card-h"><h2>Headers</h2><span class="count">12</span></div>
+      <div class="card-b">
+        <details class="headers">
+          <summary>Show ordered raw headers (duplicates preserved, indicators defanged)</summary>
+          <div class="hdr-row">
+            <div class="hdr-name">Return-Path</div>
+            <div class="hdr-val">&lt;bounce[at]evil[.]example&gt;</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Received</div>
+            <div class="hdr-val">from unknown (unknown [203[.]0[.]113[.]99]) by mx.example.org (Postfix) with ESMTP id MAL999 for &lt;analyst[at]example[.]org&gt;; Wed, 03 Jun 2026 03:33:09 +0000 (UTC)</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Authentication-Results</div>
+            <div class="hdr-val">mx.example.org; spf=fail (example.org: domain of example.com does not designate 203[.]0[.]113[.]99 as permitted sender) smtp.mailfrom=example.com; dkim=fail (signature verification failed) header.d=example.com header.s=selector1; dmarc=fail (p=reject) header.from=example.com</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">From</div>
+            <div class="hdr-val">&#34;Microsoft Account Team&#34; &lt;security[at]account-secure[.]example&gt;</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Reply-To</div>
+            <div class="hdr-val">&#34;Recovery&#34; &lt;recovery[at]reply-catcher[.]example&gt;</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Sender</div>
+            <div class="hdr-val">&lt;relay[at]evil[.]example&gt;</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">To</div>
+            <div class="hdr-val">&#34;Analyst&#34; &lt;analyst[at]example[.]org&gt;</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Subject</div>
+            <div class="hdr-val">URGENT: your account has been suspended - verify immediately</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Date</div>
+            <div class="hdr-val">Wed, 03 Jun 2026 03:33:00 +0000</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Message-ID</div>
+            <div class="hdr-val">&lt;20260603033300[.]0999[at]evil[.]example&gt;</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">MIME-Version</div>
+            <div class="hdr-val">1.0</div>
+          </div>
+          <div class="hdr-row">
+            <div class="hdr-name">Content-Type</div>
+            <div class="hdr-val">multipart/alternative; boundary=&#34;mal-boundary-0999&#34;</div>
+          </div>
+        </details>
       </div>
     </div>
 

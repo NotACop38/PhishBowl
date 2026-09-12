@@ -9,9 +9,12 @@ own — enrichment only runs when the caller opts in with settings.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from phishbowl.connectors import EnrichmentReport, EnrichmentSettings, enrich_email
 from phishbowl.extract import extract_iocs
-from phishbowl.models import ParsedEmail
+from phishbowl.html_analysis import MAX_TEXT_CHARS
+from phishbowl.models import Anomaly, ParsedEmail
 from phishbowl.report import RedactionPolicy, ReportView, build_report
 from phishbowl.score import ScoreResult, ScoringConfig, load_config, score_email
 
@@ -33,12 +36,56 @@ def triage(
     """
     config = config or load_config()
     policy = policy or RedactionPolicy.disabled()
+    parsed = parsed.model_copy(deep=True)
+    for field in ("text", "html_raw"):
+        value = getattr(parsed.body, field)
+        if value and len(value) > MAX_TEXT_CHARS:
+            setattr(parsed.body, field, value[:MAX_TEXT_CHARS])
+            parsed.anomalies.append(
+                Anomaly(
+                    code="analysis_truncated",
+                    message=(
+                        f"{field} exceeds the {MAX_TEXT_CHARS}-character analysis limit; "
+                        "later content was not analyzed"
+                    ),
+                )
+            )
+    if parsed.subject and len(parsed.subject) > MAX_TEXT_CHARS:
+        parsed.subject = parsed.subject[:MAX_TEXT_CHARS]
+        parsed.anomalies.append(
+            Anomaly(code="analysis_truncated", message="Subject analysis truncated")
+        )
     iocs = extract_iocs(parsed)
+
+    result = score_email(parsed, iocs, config)
 
     report = enrichment
     if report is None and enrichment_settings is not None and enrichment_settings.enabled:
-        report = enrich_email(parsed, iocs, enrichment_settings)
+        try:
+            report = enrich_email(
+                parsed,
+                iocs,
+                replace(
+                    enrichment_settings,
+                    excluded_domains=enrichment_settings.excluded_domains | config.org_domains,
+                ),
+            )
+        except Exception:
+            from phishbowl.connectors.base import ConnectorOutcome, ConnectorStatus
 
-    result = score_email(parsed, iocs, config, enrichment=report)
+            report = EnrichmentReport(
+                enabled=True,
+                statuses=(
+                    ConnectorStatus(
+                        connector="enrichment",
+                        version="",
+                        outcome=ConnectorOutcome.FAILED,
+                        note="Enrichment failed; offline analysis retained",
+                    ),
+                ),
+            )
+
+    if report is not None:
+        result = score_email(parsed, iocs, config, enrichment=report)
     view = build_report(parsed, iocs, result, policy=policy, config=config, enrichment=report)
     return view, result

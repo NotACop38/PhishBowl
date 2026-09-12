@@ -24,6 +24,7 @@ the prose stamped into the artifact, and structurally by the schema:
 
 from __future__ import annotations
 
+import base64
 import json
 from typing import TYPE_CHECKING, Any
 
@@ -65,6 +66,29 @@ def _trigger() -> dict[str, Any]:
     }
 
 
+def _literal(value):
+    """Keep hostile strings out of ARM and Workflow Definition Language syntax.
+
+    Fixed base64ToString expressions decode data once at workflow execution;
+    the result is a value, never another expression. Ordinary strings stay readable.
+    See docs/SOAR_EXPORT.md for the platform references and qualification boundary.
+    """
+    if isinstance(value, str):
+        if value.startswith(("[", "@")) or "@{" in value:
+            encoded = base64.b64encode(value.encode("utf-8")).decode("ascii")
+            return "@base64ToString('" + encoded + "')"
+        return value
+    if isinstance(value, dict):
+        return {key: _literal(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_literal(item) for item in value]
+    return value
+
+
+def _arm_literal(value: str) -> str:
+    return "[" + value if value.startswith("[") and value.endswith("]") else value
+
+
 def _actions(core: TriageCore) -> dict[str, Any]:
     """Inert Compose actions holding the triage object and the draft review steps.
 
@@ -77,7 +101,7 @@ def _actions(core: TriageCore) -> dict[str, Any]:
         "Compose_Phishbowl_Triage_DRAFT": {
             "type": "Compose",
             "runAfter": {},
-            "inputs": summary,
+            "inputs": _literal(summary),
             "description": DRAFT_DISCLAIMER,
         },
         # The never-acts banner, surfaced on its own so it is impossible to miss.
@@ -124,7 +148,7 @@ def build_sentinel_playbook(
                 "outputs": {
                     "PhishbowlVerdict": {
                         "type": "String",
-                        "value": f"{core.verdict} ({core.score}/{core.max_score})",
+                        "value": _literal(f"{core.verdict} ({core.score}/{core.max_score})"),
                     }
                 },
             },
@@ -141,7 +165,7 @@ def build_sentinel_playbook(
         "parameters": {
             "PlaybookName": {
                 "type": "string",
-                "defaultValue": playbook_name,
+                "defaultValue": _arm_literal(playbook_name),
                 "metadata": {
                     "description": (
                         "Name for the draft Logic App. It deploys DISABLED — review and "

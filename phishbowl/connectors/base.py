@@ -196,6 +196,7 @@ class EnrichmentSettings:
     select: frozenset[str] | None = None
     disable: frozenset[str] = frozenset()
     urlscan_visibility: str = "private"
+    excluded_domains: frozenset[str] = frozenset()
     urlscan_submit: bool = False
     concurrency: int = 4
     timeout: float = 10.0

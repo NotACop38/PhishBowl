@@ -1,11 +1,9 @@
 """SSRF-guarded async HTTP client for connectors (PRD §9, §13).
 
-The single chokepoint through which every connector reaches the network. Before
-any request leaves the process the client checks the target host against the
-connector's allowlist and refuses anything else — so a connector physically
-cannot be coerced into fetching a URL taken from the analyzed email, no matter
-how its code is written or what an indicator contains. This is the load-bearing
-SSRF guarantee (PRD §9): *connectors reach only their vendor's documented API*.
+Bundled connectors use this client to check vendor hosts before requests and
+redirects. It never directly fetches an analyzed email URL. RDAP has an explicit
+HTTPS bootstrap redirect exception. Third-party plugins are trusted Python code;
+this helper is not a network or process sandbox.
 
 The client also owns reactive rate-limit handling: a ``429``/``503`` is retried
 with exponential backoff (honoring ``Retry-After`` when present), and a persistent

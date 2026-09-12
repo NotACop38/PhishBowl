@@ -28,7 +28,10 @@ from dataclasses import dataclass
 from functools import cached_property
 from urllib.parse import urlsplit
 
+from tldextract import TLDExtract
+
 from phishbowl.extract.defang import defang_domain
+from phishbowl.html_analysis import inspect_html
 from phishbowl.models import IOC, AuthResultState, IOCType, ParsedEmail
 
 from .config import ScoringConfig
@@ -36,32 +39,21 @@ from .rules import DetectorSpec, RuleSource
 
 # --- small text/domain helpers ---------------------------------------------
 
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
 _TEXT_HOST_RE = re.compile(
     r"(?:https?://)?((?:[a-z0-9](?:[a-z0-9\-]*[a-z0-9])?\.)+[a-z]{2,})", re.IGNORECASE
 )
-_ANCHOR_RE = re.compile(
-    r"<a\b[^>]*?href\s*=\s*([\"'])(?P<href>.*?)\1[^>]*>(?P<text>.*?)</a>",
-    re.IGNORECASE | re.DOTALL,
-)
-_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 
 
-def registrable_domain(host: str) -> str:
-    """Best-effort registrable domain: the last two labels of ``host``.
+_PUBLIC_SUFFIX = TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
 
-    A deliberate approximation — Phishbowl ships no Public Suffix List in the
-    offline core — so multi-label TLDs (``co.uk``) over-collapse. That's
-    acceptable here: registrable comparison only ever feeds heuristics (lookalike
-    distance, anchor/sender divergence), never a hard verdict, and the
-    fixtures/brands use single-label TLDs.
-    """
+
+def registrable_domain(host: str) -> str:
+    """Use the packaged Public Suffix List without network or cache access."""
     host = host.strip().strip(".").casefold()
-    labels = host.split(".")
-    if len(labels) <= 2:
-        return host
-    return ".".join(labels[-2:])
+    result = _PUBLIC_SUFFIX(host)
+    return result.top_domain_under_public_suffix or host
 
 
 def url_host(url: str) -> str | None:
@@ -146,9 +138,7 @@ def _first_host_in_text(text: str) -> str | None:
 
 
 def _strip_tags(html: str) -> str:
-    import html as _html
-
-    return _WS_RE.sub(" ", _html.unescape(_TAG_RE.sub(" ", html))).strip()
+    return _WS_RE.sub(" ", inspect_html(html).text).strip()
 
 
 def _dedup(items: list[str]) -> list[str]:
@@ -233,10 +223,7 @@ class ScoringContext:
         html = self.parsed.body.html_raw
         if not html:
             return []
-        out: list[tuple[str, str]] = []
-        for m in _ANCHOR_RE.finditer(html):
-            out.append((m.group("href").strip(), _strip_tags(m.group("text"))))
-        return out
+        return list(inspect_html(html).anchors)
 
 
 # --- authentication detectors (PRD §8) -------------------------------------
@@ -400,7 +387,9 @@ def lookalike(ctx: ScoringContext) -> list[str]:
         if not d.isascii() or "xn--" in d:
             continue
         reg = registrable_domain(d)
-        for target in targets:
+        if any(d == t or d.endswith("." + t) for t in targets):
+            continue
+        for target in sorted(targets):
             if len(target) < 5:
                 continue
             if reg == target or reg.endswith("." + target):

@@ -94,7 +94,7 @@ def test_html_is_self_contained_document() -> None:
     assert "</html>" in html
     assert "<style>" in html  # inline CSS, not a remote stylesheet
     # The verdict text and a defanged indicator both make it into the document.
-    assert "Malicious" in html
+    assert "Very high suspicion" in html
     assert "examp1e[.]com" in html
 
 
@@ -250,7 +250,7 @@ def test_full_offline_pipeline_is_fast_and_keyless(monkeypatch: pytest.MonkeyPat
 def test_cli_analyze_prints_verdict_and_defangs_addresses() -> None:
     result = runner.invoke(app, ["analyze", str(MALICIOUS)])
     assert result.exit_code == 0
-    assert "Malicious" in result.stdout
+    assert "Very high suspicion" in result.stdout
     # Indicators are shown defanged, never as live addresses.
     assert "security[at]account-secure[.]example" in result.stdout
     assert "security@account-secure.example" not in result.stdout

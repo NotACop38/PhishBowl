@@ -5,7 +5,7 @@
 ### Self-hostable, vendor-neutral, **defensive-only** phishing triage.
 
 *Drop in a suspicious `.eml`/`.msg` and get an analyst-ready verdict in seconds.*
-*Offline-first: a complete report with **zero API keys**, **zero network egress**, and **zero risk** to you.*
+*Offline-first: a complete report with **zero API keys** and **no network requests by the offline pipeline**.*
 
 <br>
 
@@ -21,13 +21,13 @@
 <br>
 
 > **What it does, in one breath:** PhishBowl parses a reported email, extracts and
-> **defangs** every indicator, optionally enriches them via allowlisted OSINT APIs,
+> **defangs** extracted indicators, optionally enriches them via allowlisted OSINT APIs,
 > computes a **transparent** risk score where every point traces to a named rule, and
 > renders a self-contained HTML report you would be glad to paste into a ticket.
 
 <div align="center">
 
-![PhishBowl verdict banner: Malicious, 100/100, with a per-rule score breakdown](docs/assets/sample-report-hero.png)
+![PhishBowl verdict banner: Very high suspicion, 100/100, with a per-rule score breakdown](docs/assets/sample-report-hero.png)
 
 <sub>Real output. Zero API keys. Generated offline in seconds.</sub>
 
@@ -86,17 +86,12 @@ tool? `phishbowl analyze -` reads the email from stdin and sniffs the format.
 That one command, start to finish: a colorized verdict, the per-rule score
 breakdown, authentication results, and defanged indicators, all produced offline.
 
-<div align="center">
+```bash
+phishbowl analyze tests/fixtures/crafted_malicious.eml
+```
 
-![PhishBowl analyzing a synthetic phishing sample in the terminal](docs/assets/demo.gif)
-
-<sub>Recorded from the synthetic <a href="tests/fixtures/crafted_malicious.eml"><code>crafted_malicious.eml</code></a> fixture. No API keys, no network egress.</sub>
-
-</div>
-
-The GIF is regenerated with [`make demo`](scripts/demo.sh), which drives
-[`scripts/demo.tape`](scripts/demo.tape) through [VHS](https://github.com/charmbracelet/vhs).
-Like everything else here, it only ever runs PhishBowl on a synthetic fixture.
+The CLI prints the signal score, evidence, unverified authentication header claims,
+and any analysis limitations. Use `--json -` for machine output.
 
 ---
 
@@ -124,7 +119,7 @@ make screenshot      # renders tests/fixtures/crafted_malicious.eml to docs/asse
 ```
 
 The target renders the report with a headless Chromium via Playwright if it is available
-(`npx playwright`, auto-downloaded on first run). If no headless renderer is present it
+(`playwright` and Chromium must already be installed). If no headless renderer is present it
 still writes the HTML and prints clear instructions to open it in a browser and screenshot
 it manually. See [`scripts/screenshot.sh`](scripts/screenshot.sh).
 
@@ -138,19 +133,40 @@ it manually. See [`scripts/screenshot.sh`](scripts/screenshot.sh).
 | **Reports you will actually paste into a ticket** | A self-contained HTML dossier, a rich colorized CLI summary, and complete JSON for piping downstream. |
 | **Transparent by construction** | No ML black box. The score is the sum of named, YAML-weighted rules, and every point cites the evidence that fired it. |
 | **Defensive-only, enforced in code** | Never sends, never detonates, never fetches the email's URLs, never auto-remediates, and the report does zero network egress. |
-| **Defanged everywhere** | `hxxps://evil[.]com`, `1[.]2[.]3[.]4`, `user[at]evil[.]com` in all human-facing output, so a misclick cannot hurt you. |
+| **Defanged everywhere** | `hxxps://evil[.]com`, `1[.]2[.]3[.]4`, `user[at]evil[.]com` in human-facing output. Raw machine fields remain usable indicators. |
 | **Unwraps protective wrappers offline** | Microsoft Safelinks and Proofpoint URL Defense are decoded as a pure string transform, never by fetching the link. |
 | **`.eml` and `.msg`** | Both formats normalize into one internal contract, so everything downstream is format-agnostic. |
 | **Pluggable connectors** | A stable plugin API (registry plus entry-points) so the community can ship integrations without forking. |
-| **PII redaction** | An opt-in mode strips recipients and internal hosts/IPs so a report can be shared externally. Attacker indicators stay in full. |
+| **PII redaction** | An opt-in mode withholds known recipients, configured fields and internal topology across outputs. Review other free text before sharing. |
 | **Self-hostable and vendor-neutral** | MIT-licensed, `pip install`, no SaaS, no lock-in. |
 
 ---
 
+## What the score means
+
+PhishBowl organizes evidence for an analyst. It does not verify SPF/DKIM/DMARC,
+prove that a message is safe, or replace a mail gateway or sandbox. Scores are
+hand-tuned heuristics, not probabilities; real-mail false-positive and false-negative
+rates have not been measured. A low score means few configured signals fired.
+
+Parser failures, unavailable data and analysis limits produce an **Incomplete**
+assessment. The CLI still writes requested reports, then exits **2**; a configured
+`--fail-on` score threshold exits **1** for a complete analysis. Exit **0** does not
+certify safety. Outlook messages commonly lack transport/authentication evidence.
+Compressed RTF bodies are not expanded; missing recoverable bodies are reported.
+
+Redaction covers known recipients, configured header values and internal topology.
+It is not general anonymization. Vendor references are withheld in redacted reports;
+review other free text before sharing. Redaction does not undo prior enrichment
+requests. `org_domains` are excluded from enrichment; complete public URLs may still
+contain sensitive path/query tokens.
+
+See [the critical review](docs/CRITICAL_REVIEW.md) for changes and qualification limits.
+
 ## How it works
 
 The **offline core** (parse, extract, defang, score, report) always runs and is
-always sufficient for a complete verdict. Enrichment is a distinct, optional layer that
+sufficient for an offline assessment. Enrichment is a distinct, optional layer that
 augments signals and re-scores, but the offline verdict is computed and shown regardless.
 
 ```mermaid
@@ -196,11 +212,11 @@ PhishBowl is deliberately **transparent over clever**. There is no model to seco
 
 | Score | Verdict |
 |------:|---------|
-| 0-19 | Benign. No strong indicators. |
+| 0-19 | Few signals; safety undetermined. |
 | 20-39 | Low suspicion. |
 | 40-64 | Suspicious. Analyst review. |
-| 65-84 | Likely malicious. |
-| 85-100 | Malicious. High confidence. |
+| 65-84 | High suspicion. |
+| 85-100 | Very high suspicion. |
 
 Full rule catalog and tuning instructions: [`docs/SCORING.md`](docs/SCORING.md).
 
@@ -214,7 +230,7 @@ Full rule catalog and tuning instructions: [`docs/SCORING.md`](docs/SCORING.md).
 | **HTML** | `--html report.html` | The primary deliverable: a self-contained, zero-egress dossier you can attach to a ticket. |
 | **JSON** | `--json result.json` / `--json -` | Complete structured result (defanged **and** clearly labeled raw). Use `-` for stdout. |
 | **SOAR export** | `--xsoar playbook.yml` / `--sentinel azuredeploy.json` | Cortex XSOAR and Microsoft Sentinel playbook **drafts**: inert, never auto-run. See [`docs/SOAR_EXPORT.md`](docs/SOAR_EXPORT.md). |
-| **Redaction** | `--redact` / `--redact-field` | Strip bystander PII (recipients, internal hosts/IPs) so a report can be shared externally. |
+| **Redaction** | `--redact` / `--redact-field` | Withhold selected sensitive values across outputs; review before external sharing. |
 | **Inner email** | `--inner` | Triage an attached `message/rfc822` / `.eml` instead of the outer forward wrapper. |
 | **Quiet / fail-on** | `-q` / `--fail-on suspicious` | Suppress the Rich summary; exit nonzero when severity crosses a threshold (SOAR/CI glue). |
 

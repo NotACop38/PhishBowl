@@ -218,7 +218,7 @@ def is_attachment(part: Message) -> bool:
     return maintype != "text"
 
 
-def iter_parts(part: Message, *, max_parts: int | None = None):
+def iter_parts(part: Message, *, max_parts: int | None = None, include_containers: bool = False):
     """Walk a message, treating ``message/*`` parts as opaque attachment leaves.
 
     Unlike :meth:`email.message.Message.walk`, this does not descend into an
@@ -247,6 +247,8 @@ def iter_parts(part: Message, *, max_parts: int | None = None):
             yield node
             continue
         if node.is_multipart():
+            if include_containers:
+                yield node
             payload = node.get_payload()
             if isinstance(payload, list):
                 # Push children reversed so popping restores document order.

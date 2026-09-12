@@ -65,11 +65,14 @@ def render_cli(view: ReportView, console: Console | None = None) -> None:
     style = _SEVERITY_STYLE.get(view.severity, "white")
 
     _verdict_banner(view, console, style)
+    console.print(Text(view.assessment_note, style="dim"))
+    for anomaly in view.anomalies:
+        console.print(Text(f"Analysis limitation: {anomaly.message}", style="yellow"))
     if view.redaction.enabled:
         cats = f" ({', '.join(view.redaction.categories)})" if view.redaction.categories else ""
         console.print(
             Text(
-                f"PII redaction active{cats} — recipients/internal topology withheld.",
+                f"Redaction active{cats} — review before sharing; free text may contain other PII.",
                 style="italic dim",
             )
         )

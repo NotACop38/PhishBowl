@@ -128,6 +128,8 @@ class TriageCore:
     offline_score: int
     max_score: int
     severity: str
+    analysis_complete: bool
+    assessment_note: str
 
     subject: str | None  # already defanged/control-stripped by the report layer
     sender_display: str | None
@@ -310,6 +312,8 @@ def triage_core(view: ReportView) -> TriageCore:
         offline_score=view.offline_score,
         max_score=view.max_score,
         severity=view.severity,
+        analysis_complete=view.analysis_complete,
+        assessment_note=view.assessment_note,
         subject=view.subject,
         sender_display=sender.display_name if sender else None,
         sender_addr_defanged=sender.addr_spec_display if sender else None,
@@ -352,6 +356,8 @@ def triage_summary(core: TriageCore) -> dict[str, Any]:
             "max_score": core.max_score,
             "severity": core.severity,
         },
+        "analysis_complete": core.analysis_complete,
+        "assessment_note": core.assessment_note,
         "subject": core.subject,
         "sender": {
             "display_name": core.sender_display,

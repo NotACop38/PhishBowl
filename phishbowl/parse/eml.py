@@ -17,7 +17,6 @@ sniff them — never execute, never extract an archive (CLAUDE.md).
 
 from __future__ import annotations
 
-import email
 import re
 from collections.abc import Callable
 from datetime import datetime
@@ -46,6 +45,7 @@ from .attachments import build_attachment, is_attachment, iter_parts, parts_exce
 from .auth import parse_auth
 from .charset import decode_mime_words, decode_payload
 from .limits import MAX_INPUT_BYTES, MAX_PARTS, read_within_limit
+from .mime import bounded_message
 from .routing import parse_routing
 
 T = TypeVar("T")
@@ -82,7 +82,7 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
         return parsed
 
     try:
-        msg = email.message_from_bytes(data)
+        msg = bounded_message(data)
     except Exception as exc:  # pragma: no cover - message_from_bytes is very tolerant
         parsed.anomalies.append(
             Anomaly(code="parse_error", message=f"could not parse message: {exc}")
@@ -176,24 +176,23 @@ def _date(msg: Message) -> datetime | None:
 
 
 def _build_body(msg: Message) -> Body:
-    """Collect the first text/plain and text/html body parts.
+    """Collect every non-attachment text/plain and text/html body part.
 
     ``html_raw`` is stored for analysis only and is NEVER rendered (PRD §10).
     """
-    text: str | None = None
-    html: str | None = None
+    text: list[str] = []
+    html: list[str] = []
     has_html = False
     for part in iter_parts(msg):
         if part.is_multipart() or is_attachment(part):
             continue
         ctype = part.get_content_type()
-        if ctype == "text/plain" and text is None:
-            text = decode_payload(part)
+        if ctype == "text/plain":
+            text.append(decode_payload(part) or "")
         elif ctype == "text/html":
             has_html = True
-            if html is None:
-                html = decode_payload(part)
-    return Body(text=text, html_raw=html, has_html=has_html)
+            html.append(decode_payload(part) or "")
+    return Body(text="\n".join(text) or None, html_raw="\n".join(html) or None, has_html=has_html)
 
 
 def _build_attachments(msg: Message) -> list[Attachment]:
@@ -202,7 +201,7 @@ def _build_attachments(msg: Message) -> list[Attachment]:
 
 def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:
     """Surface MIME defects and obvious missing pieces as anomaly notes."""
-    for part in msg.walk():
+    for part in iter_parts(msg, include_containers=True):
         for defect in getattr(part, "defects", []) or []:
             parsed.anomalies.append(
                 Anomaly(code="mime_defect", message=f"{type(defect).__name__}: {defect}")

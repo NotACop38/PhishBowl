@@ -67,7 +67,8 @@ def test_analyze_dash_sniffs_msg_from_stdin() -> None:
     # No suffix to dispatch on — the OLE2 magic alone must route to the .msg parser.
     result = runner.invoke(app, ["analyze", "-"], input=MSG_FIXTURE.read_bytes())
 
-    assert result.exit_code == 0
+    assert result.exit_code == 2  # Outlook fixture lacks authentication evidence
+    assert "Incomplete" in result.stdout
     assert "VERDICT" in result.stdout
     assert "stdin.msg" in result.stdout
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -112,11 +113,13 @@ class EnrichmentCache:
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
             stored_at = datetime.fromisoformat(payload["stored_at"])
-        except (OSError, ValueError, KeyError):
+            if stored_at.tzinfo is None:
+                return None
+        except (OSError, ValueError, KeyError, TypeError):
             return None
         if ttl >= 0:
             age = (self._now() - stored_at).total_seconds()
-            if age > ttl:
+            if age < 0 or age > ttl:
                 return None
         try:
             return _deserialize(payload["result"])
@@ -129,6 +132,7 @@ class EnrichmentCache:
             return
         path = self._path(result.connector, result.ioc_type, result.indicator)
         payload = {"stored_at": self._now().isoformat(), "result": _serialize(result)}
+        tmp = None
         try:
             # The cache holds the analyzed email's indicators (URLs, domains,
             # sending IPs) — keep it private to the operator on shared hosts:
@@ -136,10 +140,13 @@ class EnrichmentCache:
             path.parent.mkdir(parents=True, exist_ok=True)
             os.chmod(self._dir, 0o700)
             os.chmod(path.parent, 0o700)
-            tmp = path.with_suffix(".tmp")
-            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd, tmp_name = tempfile.mkstemp(prefix=".cache-", dir=path.parent)
+            tmp = Path(tmp_name)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(json.dumps(payload))
             tmp.replace(path)  # atomic swap — a concurrent reader sees old or new, never half
-        except OSError:
-            return  # a write failure must never crash the run (PRD §11)
+        except (OSError, TypeError, ValueError):
+            return  # cache failures do not prevent offline analysis
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)

@@ -21,6 +21,7 @@ touches the network (CLAUDE.md).
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -117,10 +118,20 @@ def _str_tuple(values: Any) -> tuple[str, ...]:
 def _build(raw: dict[str, Any]) -> ScoringConfig:
     weights = {str(k): float(v) for k, v in (raw.get("weights") or {}).items()}
 
+    if any(not math.isfinite(v) or v < 0 for v in weights.values()):
+        raise ValueError("weights must be finite and nonnegative")
+
     bands: list[Band] = []
     for entry in raw.get("bands") or []:
         bands.append(Band(max=int(entry["max"]), verdict=str(entry["verdict"])))
     bands.sort(key=lambda b: b.max)
+    if (
+        not bands
+        or bands[-1].max != 100
+        or any(b.max < 0 or b.max > 100 or not b.verdict.strip() for b in bands)
+        or len({b.max for b in bands}) != len(bands)
+    ):
+        raise ValueError("bands need unique limits in 0..100 ending at 100 and nonempty verdicts")
 
     brands_raw = raw.get("brands") or {}
     brands = {str(name).casefold(): _folded_set(domains) for name, domains in brands_raw.items()}
