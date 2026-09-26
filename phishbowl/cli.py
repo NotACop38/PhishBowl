@@ -8,8 +8,9 @@ email inside a forward wrapper (the common SOC hand-off).
 
 Exit status of ``analyze``: ``0`` analysis complete (and below any ``--fail-on``
 threshold); ``1`` the score reached the ``--fail-on`` threshold; ``2`` invalid
-usage or unreadable input; ``3`` some of the message's evidence could not be
-analyzed. Requested outputs are written before a ``1`` or ``3`` exit.
+usage, unreadable input, or an output that could not be written; ``3`` some of
+the message's evidence could not be analyzed. Requested outputs are written
+before a ``1`` or ``3`` exit.
 
 PhishBowl is defensive-only: it never sends, detonates, fetches the email's
 URLs, or auto-remediates (AGENTS.md invariants). Even with ``--enrich``, the only
@@ -18,7 +19,9 @@ network egress is to allowlisted vendor APIs — never the analyzed email's URLs
 
 from __future__ import annotations
 
+import difflib
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Annotated
@@ -27,7 +30,7 @@ import typer
 from rich.console import Console
 
 from phishbowl import __version__
-from phishbowl.connectors import EnrichmentSettings
+from phishbowl.connectors import EnrichmentSettings, discover
 from phishbowl.export import render_sentinel, render_xsoar
 from phishbowl.parse import list_embedded_emails, parse, parse_bytes, sniff_suffix
 from phishbowl.parse.limits import read_stream_within_limit, read_within_limit
@@ -49,6 +52,7 @@ app = typer.Typer(
 
 # Exit statuses of ``analyze`` (documented in the module docstring and README).
 EXIT_THRESHOLD = 1
+EXIT_USAGE = 2
 EXIT_INCOMPLETE = 3
 
 # ``--fail-on`` accepts a severity name (the report's ``severity`` field) or a
@@ -114,15 +118,10 @@ def _load_input_bytes(path: str) -> tuple[bytes, str]:
     return read_within_limit(p), p.name
 
 
-def _resolve_parsed(
-    path: str,
-    *,
-    inner: bool,
-    inner_index: int,
-):
-    """Parse ``path``, optionally swapping in an attached inner email."""
+def _resolve_parsed(path: str, *, inner_index: int | None):
+    """Parse ``path``, or the attached email at ``inner_index`` when one is given."""
     data, filename = _load_input_bytes(path)
-    if not inner:
+    if inner_index is None:
         return parse_bytes(data, filename=filename)
 
     embedded = list_embedded_emails(data)
@@ -131,7 +130,7 @@ def _resolve_parsed(
             "no attached email found to analyze with --inner "
             "(expected a message/rfc822, .eml, or Outlook item attachment)"
         )
-    if inner_index < 0 or inner_index >= len(embedded):
+    if inner_index >= len(embedded):
         raise ValueError(
             f"--inner-index {inner_index} out of range; "
             f"found {len(embedded)} attached email(s) (0..{len(embedded) - 1})"
@@ -140,8 +139,23 @@ def _resolve_parsed(
     return parse_bytes(target.data, filename=target.filename)
 
 
+def _stdin_file_id() -> tuple[int, int] | None:
+    """``(device, inode)`` of stdin when it is redirected from a regular file."""
+    try:
+        info = os.fstat(sys.stdin.fileno())
+    except (AttributeError, OSError, ValueError):
+        return None  # no real file descriptor (e.g. an in-memory test stream)
+    return (info.st_dev, info.st_ino) if stat.S_ISREG(info.st_mode) else None
+
+
 def _validate_output_paths(source: str, outputs: list[Path], config: Path | None) -> None:
-    """Reject aliases before analysis or enrichment can have side effects."""
+    """Reject unusable or aliased outputs before analysis or enrichment has side effects.
+
+    An output may not overwrite the source email (also when it arrives on stdin
+    from a file), the scoring config, or another output, and must go to a
+    directory that exists, so a typo fails fast instead of after a slow
+    enrichment run.
+    """
     from phishbowl.score.config import DEFAULT_CONFIG_PATH, ENV_CONFIG
 
     protected = [DEFAULT_CONFIG_PATH]
@@ -151,21 +165,58 @@ def _validate_output_paths(source: str, outputs: list[Path], config: Path | None
         protected.append(config)
     if os.environ.get(ENV_CONFIG):
         protected.append(Path(os.environ[ENV_CONFIG]))
+    stdin_id = _stdin_file_id() if source == "-" else None
 
     def aliases(left: Path, right: Path) -> bool:
         return left.resolve() == right.resolve() or (
             left.exists() and right.exists() and left.samefile(right)
         )
 
+    def is_stdin(output: Path) -> bool:
+        if stdin_id is None or not output.exists():
+            return False
+        info = output.stat()
+        return (info.st_dev, info.st_ino) == stdin_id
+
     try:
         for index, output in enumerate(outputs):
-            if any(aliases(output, other) for other in protected + outputs[:index]):
+            if is_stdin(output) or any(
+                aliases(output, other) for other in protected + outputs[:index]
+            ):
                 raise typer.BadParameter(
                     "output paths must be distinct from the source email, scoring config, "
                     "and other outputs (including filesystem aliases)"
                 )
+            if output.is_dir():
+                raise typer.BadParameter(f"output path is a directory: {output}")
+            if not output.resolve().parent.is_dir():
+                raise typer.BadParameter(f"output directory does not exist: {output.parent}")
     except (OSError, RuntimeError) as exc:
         raise typer.BadParameter(f"could not validate output paths: {exc}") from exc
+
+
+def _connector_names(values: list[str] | None, option: str) -> frozenset[str]:
+    """Normalize ``--connector`` names, rejecting any no installed connector has."""
+    names = frozenset(v.strip().casefold() for v in values or () if v.strip())
+    known = sorted(discover())
+    for name in sorted(names - set(known)):
+        close = difflib.get_close_matches(name, known, n=1)
+        hint = f"did you mean {close[0]!r}? " if close else ""
+        raise typer.BadParameter(
+            f"unknown connector {name!r}; {hint}available: {', '.join(known)}",
+            param_hint=f"'{option}'",
+        )
+    return names
+
+
+def _write_output(path: Path, text: str, what: str) -> bool:
+    """Write one requested output; report a failure instead of a traceback."""
+    try:
+        path.write_text(text, encoding="utf-8")
+    except OSError as exc:
+        typer.echo(f"phishbowl: could not write {what} to {path}: {exc.strerror or exc}", err=True)
+        return False
+    return True
 
 
 @app.command()
@@ -251,15 +302,16 @@ def analyze(
         ),
     ] = False,
     inner_index: Annotated[
-        int,
+        int | None,
         typer.Option(
             "--inner-index",
+            min=0,
             help=(
                 "Which attached email to triage when several are present "
-                "(0-based). Implies --inner."
+                "(0-based; default 0). Implies --inner."
             ),
         ),
-    ] = 0,
+    ] = None,
     quiet: Annotated[
         bool,
         typer.Option(
@@ -288,22 +340,25 @@ def analyze(
     OSINT enrichment (key-gated, reading secrets from the environment only). Use
     --inner when the input is a forward wrapper with the phish attached.
 
-    Exit status: 0 complete analysis, 1 --fail-on threshold reached, 2 usage or
-    input error, 3 incomplete analysis (some evidence was not analyzed).
+    Exit status: 0 complete analysis, 1 --fail-on threshold reached, 2 usage,
+    input, or output error, 3 incomplete analysis (some evidence was not analyzed).
     """
     threshold = _fail_on_threshold(fail_on) if fail_on is not None else None
+    selected = _connector_names(connector, "--connector")
+    disabled = _connector_names(disable_connector, "--disable-connector")
 
     outputs = [p for p in (html, xsoar, sentinel) if p is not None]
     if json_out is not None and json_out != "-":
         outputs.append(Path(json_out))
     _validate_output_paths(path, outputs, scoring_config)
 
-    use_inner = inner or (inner_index != 0)
+    if inner and inner_index is None:
+        inner_index = 0
     try:
         # Prefer the path-based parser when not doing --inner so existing error
         # messages for unsupported suffixes stay identical; --inner needs bytes.
-        if use_inner or path == "-":
-            parsed = _resolve_parsed(path, inner=use_inner, inner_index=inner_index)
+        if inner_index is not None or path == "-":
+            parsed = _resolve_parsed(path, inner_index=inner_index)
         else:
             parsed = parse(path)
     except (OSError, ValueError) as exc:
@@ -314,14 +369,14 @@ def analyze(
     except (OSError, ValueError) as exc:
         raise typer.BadParameter(f"scoring config: {exc}") from exc
 
-    want_enrich = bool(enrich or urlscan_submit or connector or disable_connector)
+    want_enrich = bool(enrich or urlscan_submit or selected or disabled)
     enrichment_settings: EnrichmentSettings | None = None
     if want_enrich:
         enrichment_settings = EnrichmentSettings(
             enabled=True,
             urlscan_submit=urlscan_submit,
-            select=frozenset(c.strip().casefold() for c in connector) if connector else None,
-            disable=frozenset(c.strip().casefold() for c in (disable_connector or ())),
+            select=selected or None,
+            disable=disabled,
         )
 
     extra_fields = tuple(redact_field or ())
@@ -345,33 +400,45 @@ def analyze(
     if show_cli:
         render_cli(view, Console(highlight=False))
 
+    written = True
     if html is not None:
-        html.write_text(render_html(view), encoding="utf-8")
-        if not json_to_stdout:
-            typer.echo(f"phishbowl: wrote HTML report to {html}")
+        if _write_output(html, render_html(view), "the HTML report"):
+            if not json_to_stdout:
+                typer.echo(f"phishbowl: wrote HTML report to {html}")
+        else:
+            written = False
     if json_out is not None:
         payload = render_json(view)
         if json_to_stdout:
             sys.stdout.write(payload)
             if not payload.endswith("\n"):
                 sys.stdout.write("\n")
-        else:
-            Path(json_out).write_text(payload, encoding="utf-8")
+        elif _write_output(Path(json_out), payload, "the JSON result"):
             typer.echo(f"phishbowl: wrote JSON result to {json_out}")
+        else:
+            written = False
     if xsoar is not None:
-        xsoar.write_text(render_xsoar(view), encoding="utf-8")
-        if not json_to_stdout:
-            typer.echo(
-                f"phishbowl: wrote XSOAR playbook DRAFT to {xsoar} "
-                "(manual tasks only — review before running; Phishbowl never acts)"
-            )
+        if _write_output(xsoar, render_xsoar(view), "the XSOAR playbook draft"):
+            if not json_to_stdout:
+                typer.echo(
+                    f"phishbowl: wrote XSOAR playbook DRAFT to {xsoar} "
+                    "(manual tasks only — review before running; PhishBowl never acts)"
+                )
+        else:
+            written = False
     if sentinel is not None:
-        sentinel.write_text(render_sentinel(view), encoding="utf-8")
-        if not json_to_stdout:
-            typer.echo(
-                f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
-                "(ships disabled — review and enable manually; Phishbowl never acts)"
-            )
+        if _write_output(sentinel, render_sentinel(view), "the Sentinel playbook draft"):
+            if not json_to_stdout:
+                typer.echo(
+                    f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
+                    "(ships disabled — review and enable manually; PhishBowl never acts)"
+                )
+        else:
+            written = False
+    if not written:
+        # A missing requested output outranks the verdict: whatever consumes
+        # it (a ticket, a pipeline) would otherwise act on stale or no data.
+        raise typer.Exit(EXIT_USAGE)
 
     # A score at or above the threshold is conclusive even when the analysis is
     # incomplete (the score can only be a lower bound); below it, an incomplete
@@ -402,7 +469,7 @@ def serve(
     ] = "127.0.0.1",
     port: Annotated[
         int,
-        typer.Option("--port", "-p", help="Port to listen on."),
+        typer.Option("--port", "-p", min=0, max=65535, help="Port to listen on."),
     ] = 8000,
 ) -> None:
     """Run the optional local upload UI (requires the 'web' extra).
@@ -423,8 +490,27 @@ def serve(
             "install it with: pip install 'phishbowl[web]'"
         ) from exc
 
-    typer.echo(f"phishbowl: serving the upload UI on http://{host}:{port} (Ctrl-C to stop)")
+    shown = f"[{host}]" if ":" in host else host  # an IPv6 literal needs brackets in a URL
+    typer.echo(f"phishbowl: serving the upload UI on http://{shown}:{port} (Ctrl-C to stop)")
+    if not _is_loopback(host):
+        typer.echo(
+            "phishbowl: warning — the upload UI has no authentication; binding to a "
+            "non-loopback interface lets anyone who can reach it submit files",
+            err=True,
+        )
     uvicorn.run(web_app, host=host, port=port)
+
+
+def _is_loopback(host: str) -> bool:
+    """True when ``host`` names only this machine (``localhost`` or a loopback IP)."""
+    import ipaddress
+
+    if host.strip().casefold().rstrip(".") == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host.strip().strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 if __name__ == "__main__":  # pragma: no cover

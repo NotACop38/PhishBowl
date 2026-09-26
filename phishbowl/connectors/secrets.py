@@ -47,7 +47,9 @@ def scrub_secrets(value: Any, secrets: frozenset[str]) -> Any:
         return value
     if isinstance(value, str):
         out = value
-        for secret in secrets:
+        # Longest first: a key that contains another key must go whole, not
+        # leave its remainder behind around a shorter key's placeholder.
+        for secret in sorted(secrets, key=len, reverse=True):
             if secret and secret in out:
                 out = out.replace(secret, "[redacted]")
         return out

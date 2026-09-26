@@ -215,3 +215,75 @@ def test_inner_triages_an_outlook_item_attached_to_a_msg(tmp_path: Path) -> None
     payload = json.loads(result.stdout)
     assert payload["subject"] == "Reported phish"
     assert payload["source"]["filename"] == "Reported phish.msg"
+
+
+def test_inner_index_alone_selects_an_attached_email() -> None:
+    forwarded = FIXTURES / "forwarded_eml.eml"
+    outer = json.loads(runner.invoke(app, ["analyze", "--json", "-", str(forwarded)]).stdout)
+    result = runner.invoke(app, ["analyze", "--inner-index", "0", "--json", "-", str(forwarded)])
+    assert result.exit_code in (0, 3), result.output
+    inner = json.loads(result.stdout)
+    assert inner["subject"] != outer["subject"]
+
+
+def test_negative_inner_index_is_a_usage_error() -> None:
+    result = runner.invoke(app, ["analyze", "--inner-index", "-1", str(FIXTURE)])
+    assert result.exit_code == 2
+
+
+def test_unknown_connector_names_are_rejected_with_a_suggestion() -> None:
+    result = runner.invoke(app, ["analyze", "--connector", "virustotl", str(FIXTURE)])
+    assert result.exit_code == 2
+    assert "virustotal" in result.output
+
+
+def test_output_into_a_missing_directory_fails_before_analysis(tmp_path: Path) -> None:
+    target = tmp_path / "no-such-dir" / "report.html"
+    result = runner.invoke(app, ["analyze", "--html", str(target), str(FIXTURE)])
+    assert result.exit_code == 2
+    assert "VERDICT" not in result.output  # nothing was analyzed
+    assert not target.exists()
+
+
+def test_a_failed_write_exits_2_with_a_clear_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def full_disk(self, *_args, **_kwargs):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", full_disk)
+    target = tmp_path / "report.html"
+    result = runner.invoke(app, ["analyze", "-q", "--html", str(target), str(FIXTURE)])
+    assert result.exit_code == 2
+    assert "could not write the HTML report" in result.output
+    assert "No space left on device" in result.output
+
+
+def test_output_cannot_overwrite_a_file_redirected_to_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import phishbowl.cli as cli
+
+    source = tmp_path / "mail.eml"
+    source.write_bytes(FIXTURE.read_bytes())
+    info = source.stat()
+    monkeypatch.setattr(cli, "_stdin_file_id", lambda: (info.st_dev, info.st_ino))
+    result = runner.invoke(app, ["analyze", "--html", str(source), "-"], input=FIXTURE.read_bytes())
+    assert result.exit_code == 2
+    assert source.read_bytes() == FIXTURE.read_bytes()
+
+
+def test_serve_brackets_ipv6_hosts_and_warns_off_loopback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    uvicorn = pytest.importorskip("uvicorn")
+    monkeypatch.setattr(uvicorn, "run", lambda *_args, **_kwargs: None)
+
+    local = runner.invoke(app, ["serve", "--host", "::1"])
+    assert local.exit_code == 0
+    assert "http://[::1]:8000" in local.output
+    assert "warning" not in local.output
+
+    exposed = runner.invoke(app, ["serve", "--host", "0.0.0.0", "--port", "9000"])
+    assert "http://0.0.0.0:9000" in exposed.output
+    assert "no authentication" in exposed.output

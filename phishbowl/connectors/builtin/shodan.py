@@ -9,6 +9,8 @@ only; it is never placed in a reference link or the retained raw response.
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from phishbowl.models import IOCType
 
 from ..base import (
@@ -20,6 +22,7 @@ from ..base import (
     Indicator,
 )
 from ..errors import ConnectorError
+from ..http import json_object
 from ..registry import register
 
 _SIGNAL_ID = "enrichment.shodan.exposed"
@@ -44,7 +47,7 @@ _NOTABLE_PORTS = {
 @register
 class ShodanConnector(Connector):
     name = "shodan"
-    version = "1.0.0"
+    version = "1.0.1"
     supported_ioc_types = frozenset({IOCType.IPV4.value, IOCType.IPV6.value})
     requires_api_key = True
     api_key_env = "SHODAN_API_KEY"
@@ -58,7 +61,7 @@ class ShodanConnector(Connector):
         # Key is a query parameter for Shodan; httpx attaches it to the request to
         # api.shodan.io only. It never appears in the reference or raw below.
         response = await ctx.http.get(
-            f"{self.base_url}/shodan/host/{indicator.value}",
+            f"{self.base_url}/shodan/host/{quote(indicator.value, safe=':')}",
             params={"key": ctx.api_key or ""},
         )
         if response.status_code == 404:
@@ -67,8 +70,14 @@ class ShodanConnector(Connector):
         if response.status_code != 200:
             raise ConnectorError(f"Shodan returned HTTP {response.status_code}")
 
-        body = response.json()
-        ports = sorted({int(p) for p in body.get("ports", []) if isinstance(p, int)})
+        listed = json_object(response, "Shodan").get("ports")
+        ports = sorted(
+            {
+                port
+                for port in (listed if isinstance(listed, list) else [])
+                if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536
+            }
+        )
         notable = [p for p in ports if p in _NOTABLE_PORTS]
         if not notable:
             return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, ports)
@@ -95,6 +104,6 @@ class ShodanConnector(Connector):
             indicator=indicator.value,
             verdict=verdict,
             signals=(signal,) if signal else (),
-            references=(f"https://www.shodan.io/host/{indicator.value}",),
+            references=(f"https://www.shodan.io/host/{quote(indicator.value, safe=':')}",),
             raw={"ports": ports} if ports else None,
         )

@@ -95,12 +95,29 @@ def test_validator_accepts_a_conforming_instance() -> None:
         ({}, {"type": "object", "minProperties": 1}),  # too few properties
         ("abc", {"type": "string", "pattern": "zzz"}),  # pattern miss
         (True, {"type": "integer"}),  # bool is not integer
+        (1.5, {"type": "integer"}),  # a fraction is not an integer
+        (True, {"const": 1}),  # JSON true is not the number 1
+        (False, {"enum": [0, 1]}),  # nor is false the number 0
+        ([True], {"const": [1]}),  # ... inside arrays either
         ({"x": 1}, {"type": "object", "additionalProperties": False}),  # extra prop
         ({"x": "no"}, {"additionalProperties": {"type": "integer"}}),  # extra prop wrong type
     ],
 )
 def test_validator_rejects_nonconforming_instances(instance, schema) -> None:
     assert validate(instance, schema) != []
+
+
+@pytest.mark.parametrize(
+    "instance,schema",
+    [
+        (1.0, {"type": "integer"}),  # JSON Schema: a zero fraction is an integer
+        (1.0, {"const": 1}),  # and 1.0 equals 1
+        ({"a": [1, 2.0]}, {"enum": [{"a": [1.0, 2]}]}),
+        (False, {"const": False}),
+    ],
+)
+def test_validator_compares_numbers_by_value_like_json_schema(instance, schema) -> None:
+    assert validate(instance, schema) == []
 
 
 def test_validator_resolves_local_refs() -> None:

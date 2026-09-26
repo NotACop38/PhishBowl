@@ -25,7 +25,7 @@ never fetched. The SSRF guarantee holds (PRD §9).
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
 from phishbowl.domains import registrable_domain
@@ -40,10 +40,13 @@ from ..base import (
     Indicator,
 )
 from ..errors import ConnectorError
+from ..http import json_object
 from ..registry import register
 
 _SIGNAL_ID = "enrichment.rdap.young_domain"
 _YOUNG_DOMAIN_DAYS = 30
+# A registration date further in the future than clock skew explains is bad data.
+_CLOCK_SKEW = timedelta(days=1)
 
 
 def _parse_rdap_date(value: str) -> datetime | None:
@@ -70,7 +73,7 @@ def _registration_date(events: list) -> datetime | None:
 @register
 class RDAPConnector(Connector):
     name = "rdap"
-    version = "1.1.0"
+    version = "1.1.1"
     supported_ioc_types = frozenset({IOCType.DOMAIN.value})
     requires_api_key = False
     allowed_hosts = frozenset({"rdap.org"})
@@ -97,11 +100,13 @@ class RDAPConnector(Connector):
         if response.status_code != 200:
             raise ConnectorError(f"RDAP returned HTTP {response.status_code}")
 
-        registered = _registration_date(response.json().get("events", []))
-        if registered is None:
+        events = json_object(response, "RDAP").get("events")
+        registered = _registration_date(events if isinstance(events, list) else [])
+        now = ctx.now()
+        if registered is None or registered > now + _CLOCK_SKEW:
             return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, None)
 
-        age_days = (ctx.now() - registered).days
+        age_days = (now - registered).days
         if age_days < _YOUNG_DOMAIN_DAYS:
             signal = EnrichmentSignal(
                 id=_SIGNAL_ID,

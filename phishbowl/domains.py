@@ -1,20 +1,28 @@
-"""Registrable-domain helpers backed by the packaged Public Suffix List.
+"""Host and registrable-domain helpers backed by the packaged Public Suffix List.
 
 Shared by scoring (lookalike and sender comparisons), enrichment (RDAP queries
-the registered domain, not a subdomain), and reporting. The PSL snapshot ships
-with ``tldextract``; downloads and on-disk caching are disabled, so these
-helpers never touch the network or the filesystem. Private suffixes
-(``github.io``, ``s3.amazonaws.com``, ...) are honoured, so two tenants of a
-hosting platform never compare as the same organization.
+the registered domain, not a subdomain; only public hosts are ever sent to a
+vendor), and reporting. The PSL snapshot ships with ``tldextract``; downloads
+and on-disk caching are disabled, so these helpers never touch the network or
+the filesystem. Private suffixes (``github.io``, ``s3.amazonaws.com``, ...) are
+honoured, so two tenants of a hosting platform never compare as the same
+organization.
 """
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import socket
+from typing import Literal
 
 from tldextract import TLDExtract
 
 _PUBLIC_SUFFIX = TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
+
+# Names that only resolve inside a network (RFC 6761, RFC 8375, common practice).
+_LOCAL_SUFFIXES = (".localhost", ".local", ".internal", ".home.arpa")
+_DNS_NAME = re.compile(r"[a-z0-9_-]+(?:\.[a-z0-9_-]+)+")
 
 
 def _normalize(host: str) -> str:
@@ -83,3 +91,42 @@ def web_ipv4(host: str) -> str | None:
         return socket.inet_ntoa(socket.inet_aton(host))
     except OSError:
         raise ValueError(f"invalid IPv4 host {host!r}") from None
+
+
+def is_public_ip(value: str) -> bool:
+    """True for a globally routable unicast IP literal (IPv4 or IPv6)."""
+    try:
+        ip = ipaddress.ip_address(value.strip())
+    except ValueError:
+        return False
+    return ip.is_global and not ip.is_multicast
+
+
+def public_host(host: str) -> tuple[Literal["ip", "name"], str] | None:
+    """Classify a host a request could reach, or ``None`` if it is not public.
+
+    Returns ``("ip", canonical)`` for a public IP literal — in any notation a
+    browser accepts, bracketed IPv6 included — or ``("name", ascii)`` for a
+    syntactically valid DNS name outside the local-only namespaces. Private,
+    loopback and link-local addresses, single-label and local names, and
+    malformed hosts all return ``None``.
+    """
+    host = host.strip().casefold()
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+    host = host.rstrip(".")
+    if not host or any(c.isspace() for c in host):
+        return None
+    try:
+        ip: str | None = str(ipaddress.ip_address(host))
+    except ValueError:
+        try:
+            ip = web_ipv4(host)
+        except ValueError:
+            return None  # ends in a number but is no valid IPv4: unusable host
+    if ip is not None:
+        return ("ip", ip) if is_public_ip(ip) else None
+    name = ascii_host(host)
+    if not _DNS_NAME.fullmatch(name) or name.endswith(_LOCAL_SUFFIXES):
+        return None
+    return ("name", name)

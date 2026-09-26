@@ -7,7 +7,9 @@ victim-specific data to a third party (PRD §9). So:
 
 * It defaults to a **passive search** by *domain* (never the full, possibly
   tokened URL), which answers "has urlscan seen this host, and how was it judged?"
-  without visiting anything.
+  without visiting anything. A malicious prior scan of the *same URL* counts in
+  full; one of another page on the host counts half, because shared hosting
+  puts unrelated pages under one domain.
 * Active submission is strictly opt-in (``--urlscan-submit`` / ``urlscan_submit``)
   and defaults to **private** visibility (``urlscan_visibility``). Private hides
   only the result page — the fetch still happens — so it stays a deliberate,
@@ -20,6 +22,7 @@ Key-gated (``URLSCAN_API_KEY``); never logs or returns the key.
 
 from __future__ import annotations
 
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from phishbowl.models import IOCType
@@ -33,9 +36,13 @@ from ..base import (
     Indicator,
 )
 from ..errors import ConnectorError
+from ..http import json_object
 from ..registry import register
+from ._fields import count, mapping
 
 _SIGNAL_ID = "enrichment.urlscan.malicious"
+# Evidence about another page on the same host is weaker than about the URL itself.
+_SAME_HOST_MAGNITUDE = 0.5
 
 
 def _host_of(url: str) -> str | None:
@@ -46,10 +53,31 @@ def _host_of(url: str) -> str | None:
     return host.casefold() if host else None
 
 
+def _result_link(value: object) -> str | None:
+    """``value`` if it is an https link to a urlscan.io page, else ``None``."""
+    if not isinstance(value, str):
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme != "https" or parts.hostname != "urlscan.io":
+        return None
+    return value
+
+
+class _Scan(NamedTuple):
+    """One prior scan's overall verdict, ordered so ``max`` picks the worst."""
+
+    malicious: bool
+    same_url: bool
+    score: int
+
+
 @register
 class UrlscanConnector(Connector):
     name = "urlscan"
-    version = "1.0.1"
+    version = "1.1.0"
     supported_ioc_types = frozenset({IOCType.URL.value})
     requires_api_key = True
     api_key_env = "URLSCAN_API_KEY"
@@ -77,27 +105,28 @@ class UrlscanConnector(Connector):
         if response.status_code != 200:
             raise ConnectorError(f"urlscan search returned HTTP {response.status_code}")
 
-        body = response.json()
-        results = body.get("results", []) or []
-        worst = _worst_verdict(results)
+        listed = json_object(response, "urlscan").get("results")
+        results = [r for r in listed if isinstance(r, dict)] if isinstance(listed, list) else []
         references = tuple(
-            r["result"] for r in results[:3] if isinstance(r, dict) and r.get("result")
+            link for r in results[:3] if (link := _result_link(r.get("result"))) is not None
         )
+        worst = max((_scan(r, indicator.value) for r in results), default=None)
+        if worst is None or not worst.malicious:
+            return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, references)
 
-        if worst is not None and worst.get("malicious"):
-            signal = EnrichmentSignal(
-                id=_SIGNAL_ID,
-                description="urlscan judged a prior scan of this host malicious",
-                magnitude=1.0,
-                evidence=(
-                    f"urlscan: prior scan of {indicator.defanged} judged malicious "
-                    f"(score {worst.get('score', '?')})"
-                ),
-            )
-            return self._result(indicator, EnrichmentVerdict.MALICIOUS, signal, references)
-
-        verdict = EnrichmentVerdict.UNKNOWN
-        return self._result(indicator, verdict, None, references)
+        if worst.same_url:
+            subject = f"a prior scan of {indicator.defanged}"
+            magnitude = 1.0
+        else:
+            subject = f"a prior scan of another page on {host.replace('.', '[.]')}"
+            magnitude = _SAME_HOST_MAGNITUDE
+        signal = EnrichmentSignal(
+            id=_SIGNAL_ID,
+            description="urlscan judged a prior scan of this URL or host malicious",
+            magnitude=magnitude,
+            evidence=f"urlscan: {subject} was judged malicious (score {worst.score})",
+        )
+        return self._result(indicator, EnrichmentVerdict.MALICIOUS, signal, references)
 
     async def _submit(self, indicator: Indicator, ctx: EnrichContext) -> EnrichmentResult:
         """Active submission (opt-in, private by default). The URL is *data*, not a target."""
@@ -108,8 +137,7 @@ class UrlscanConnector(Connector):
         )
         if response.status_code not in (200, 201):
             raise ConnectorError(f"urlscan submission returned HTTP {response.status_code}")
-        body = response.json()
-        result_link = body.get("result")
+        result_link = _result_link(json_object(response, "urlscan").get("result"))
         references = (result_link,) if result_link else ()
         # A submission kicks off an async scan; no verdict is available yet.
         return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, references)
@@ -132,16 +160,12 @@ class UrlscanConnector(Connector):
         )
 
 
-def _worst_verdict(results: list) -> dict | None:
-    """The most-severe ``verdicts.overall`` block across search results, if any."""
-    worst: dict | None = None
-    for entry in results:
-        if not isinstance(entry, dict):
-            continue
-        verdicts = entry.get("verdicts")
-        overall = verdicts.get("overall") if isinstance(verdicts, dict) else None
-        if not isinstance(overall, dict):
-            continue
-        if worst is None or int(overall.get("score", 0) or 0) > int(worst.get("score", 0) or 0):
-            worst = overall
-    return worst
+def _scan(entry: dict, url: str) -> _Scan:
+    """A search result's overall verdict, and whether it scanned ``url`` itself."""
+    overall = mapping(mapping(entry.get("verdicts")).get("overall"))
+    scanned = {mapping(entry.get(section)).get("url") for section in ("task", "page")} - {None}
+    return _Scan(
+        malicious=overall.get("malicious") is True,
+        same_url=url in scanned,
+        score=min(count(overall.get("score")) or 0, 100),
+    )

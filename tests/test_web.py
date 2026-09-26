@@ -203,3 +203,48 @@ def test_responses_carry_strict_no_egress_headers() -> None:
         assert "script-src 'none'" in csp
         assert response.headers["referrer-policy"] == "no-referrer"
         assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def _assert_secured(response) -> None:
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+    assert response.headers["x-frame-options"] == "DENY"
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_routing_errors_get_the_html_error_page_and_headers() -> None:
+    for response in (client.get("/no-such-page"), client.get("/analyze")):
+        assert response.status_code in (404, 405)
+        assert response.headers["content-type"].startswith("text/html")
+        assert "Back to upload" in response.text
+        _assert_secured(response)
+
+
+def test_internal_errors_are_answered_with_a_secured_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("secret internal detail")
+
+    monkeypatch.setattr(web_app_module, "triage", explode)
+    local = TestClient(web_app_module.create_app(), raise_server_exceptions=False)
+    with BENIGN.open("rb") as fh:
+        response = local.post("/analyze", files={"file": (BENIGN.name, fh, "message/rfc822")})
+    assert response.status_code == 500
+    assert "Analysis failed" in response.text
+    assert "secret internal detail" not in response.text
+    _assert_secured(response)
+
+
+def test_a_concurrent_upload_is_told_to_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    busy = threading.BoundedSemaphore(1)
+    busy.acquire()
+    monkeypatch.setattr(web_app_module, "BoundedSemaphore", lambda _value: busy)
+    local = TestClient(web_app_module.create_app())
+    with BENIGN.open("rb") as fh:
+        response = local.post("/analyze", files={"file": (BENIGN.name, fh, "message/rfc822")})
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "5"
+    assert "one email at a time" in response.text
+    _assert_secured(response)

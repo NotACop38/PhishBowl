@@ -13,13 +13,16 @@ Upload hardening (PRD §13, CHECKLIST Phase 7), in order:
 2. **Size limit** — bounded chunked read capped at ``MAX_INPUT_BYTES``.
 
 The pipeline itself reaches no network and the report loads nothing remote;
-strict ``Content-Security-Policy`` / ``Referrer-Policy`` / nosniff headers are
-attached as belt-and-suspenders. Form options (redact / analyze attached email)
-map to the same ``RedactionPolicy`` / ``--inner`` paths the CLI uses — no fork.
+strict ``Content-Security-Policy`` / ``Referrer-Policy`` / nosniff / anti-framing
+headers are attached to every response, error pages included, as
+belt-and-suspenders. One analysis runs at a time; a concurrent upload is told to
+retry rather than queued. Form options (redact / analyze attached email) map to
+the same ``RedactionPolicy`` / ``--inner`` paths the CLI uses — no fork.
 """
 
 from __future__ import annotations
 
+from html import escape
 from pathlib import Path
 from threading import BoundedSemaphore
 
@@ -27,6 +30,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.formparsers import MultiPartException, MultiPartParser
 
 from phishbowl.parse import SUPPORTED_SUFFIXES, list_embedded_emails, parse_bytes
@@ -39,8 +43,28 @@ _READ_CHUNK = 1024 * 1024
 
 _CSP = (
     "default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; "
-    "font-src 'none'; script-src 'none'; base-uri 'none'; form-action 'self'"
+    "font-src 'none'; script-src 'none'; base-uri 'none'; form-action 'self'; "
+    "frame-ancestors 'none'"
 )
+_SECURITY_HEADERS = {
+    "Content-Security-Policy": _CSP,
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
+
+# Error-page titles by status; anything else reads "Error <status>".
+_ERROR_TITLES = {
+    400: "Could not analyze",
+    403: "Upload refused",
+    404: "Not found",
+    405: "Method not allowed",
+    413: "Upload too large",
+    415: "Unsupported file type",
+    422: "No file selected",
+    500: "Analysis failed",
+    503: "Analyzer busy",
+}
 
 _MAX_MIB = MAX_INPUT_BYTES // (1024 * 1024)
 
@@ -50,7 +74,7 @@ _UPLOAD_PAGE = f"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Phishbowl — triage an email</title>
+<title>PhishBowl — triage an email</title>
 <style>
   :root {{
     color-scheme: light dark;
@@ -144,7 +168,7 @@ _UPLOAD_PAGE = f"""<!doctype html>
   <main class="wrap">
     <h1 class="brand">Phish<b>Bowl</b></h1>
     <p class="lede">Drop in a suspicious <code>.eml</code> or <code>.msg</code>.
-      Phishbowl never sends, opens, or fetches anything from the email — it only
+      PhishBowl never sends, opens, or fetches anything from the email — it only
       parses it locally and renders a self-contained report.</p>
     <form class="panel" action="analyze" method="post" enctype="multipart/form-data">
       <label class="drop" for="file">
@@ -180,18 +204,22 @@ _UPLOAD_PAGE = f"""<!doctype html>
 """
 
 
+def _secured(response: Response) -> Response:
+    """Attach the security headers every response carries."""
+    response.headers.update(_SECURITY_HEADERS)
+    return response
+
+
 def _error_page(title: str, message: str, status: int) -> HTMLResponse:
     """Self-contained HTML error page (browsers should never see raw JSON here)."""
     # title/message are tool-authored, never email-derived — still escape for safety.
-    from html import escape
-
     body = f"""<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
-<title>Phishbowl — {escape(title)}</title>
+<title>PhishBowl — {escape(title)}</title>
 <style>
   :root {{ color-scheme: light dark; }}
   body {{
@@ -215,34 +243,46 @@ def _error_page(title: str, message: str, status: int) -> HTMLResponse:
 
 
 def create_app() -> FastAPI:
-    """Build the Phishbowl upload application."""
+    """Build the PhishBowl upload application."""
     app = FastAPI(
-        title="Phishbowl",
+        title="PhishBowl",
         description="Defensive-only phishing triage — upload an email, get a report.",
         docs_url=None,
         redoc_url=None,
+        openapi_url=None,
     )
 
     @app.middleware("http")
     async def _security_headers(request: Request, call_next):
-        response = await call_next(request)
-        response.headers["Content-Security-Policy"] = _CSP
-        response.headers["Referrer-Policy"] = "no-referrer"
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        return response
+        return _secured(await call_next(request))
 
-    @app.exception_handler(HTTPException)
-    async def _html_http_error(request: Request, exc: HTTPException) -> Response:
+    # Registered for Starlette's HTTPException (FastAPI's subclasses it), so a
+    # 404 or 405 raised by routing gets the same page as the app's own errors.
+    @app.exception_handler(StarletteHTTPException)
+    async def _html_http_error(request: Request, exc: StarletteHTTPException) -> Response:
         accept = (request.headers.get("accept") or "").casefold()
         if "application/json" in accept and "text/html" not in accept:
-            return JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
-        title = {
-            413: "Upload too large",
-            415: "Unsupported file type",
-            400: "Could not analyze",
-        }.get(exc.status_code, f"Error {exc.status_code}")
-        detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
-        return _error_page(title, detail, exc.status_code)
+            response: Response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+        else:
+            title = _ERROR_TITLES.get(exc.status_code, f"Error {exc.status_code}")
+            detail = exc.detail if isinstance(exc.detail, str) else "Request failed."
+            response = _error_page(title, detail, exc.status_code)
+        if exc.headers:
+            response.headers.update(exc.headers)
+        return response
+
+    # An unexpected failure is answered outside the middleware stack, so this
+    # handler adds the security headers itself and never echoes the error (the
+    # server still logs it: Starlette re-raises after responding).
+    @app.exception_handler(Exception)
+    async def _html_server_error(request: Request, exc: Exception) -> Response:
+        page = _error_page(
+            "Analysis failed",
+            "PhishBowl hit an internal error analyzing this upload. Nothing was sent anywhere; "
+            "run `phishbowl analyze` on the file for details.",
+            500,
+        )
+        return _secured(page)
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> HTMLResponse:
@@ -256,7 +296,12 @@ def create_app() -> FastAPI:
         if origin and origin != f"{request.url.scheme}://{request.url.netloc}":
             raise HTTPException(403, "Cross-origin uploads are refused")
         if not admission.acquire(blocking=False):
-            raise HTTPException(503, "An analysis is already running; try again shortly")
+            raise HTTPException(
+                503,
+                "Another upload is being analyzed. PhishBowl analyzes one email at a time; "
+                "resubmit in a few seconds.",
+                headers={"Retry-After": "5"},
+            )
         try:
             form = await _read_form(request)
             try:

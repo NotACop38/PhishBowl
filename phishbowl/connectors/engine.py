@@ -9,14 +9,15 @@ in one place so individual connectors stay small:
   with a clear note; it is never invoked (PRD §9 graceful degrade).
 * **Caching** — every lookup checks the on-disk cache first, keyed by
   ``(connector, ioc_type, value)`` with the connector's TTL (:mod:`.cache`).
-* **Rate limiting** — proactive per-connector spacing (:mod:`.ratelimit`) plus a
-  **global concurrency cap** (an :class:`asyncio.Semaphore`) shared by all
-  connectors.
+* **Rate limiting** — proactive per-connector spacing (:mod:`.ratelimit`),
+  measured when a request is actually sent, plus a **global concurrency cap**
+  (an :class:`asyncio.Semaphore`) shared by all connectors.
 * **SSRF guard** — every connector gets an :class:`AllowlistedClient` bound to its
   own ``allowed_hosts`` and can reach nothing else (:mod:`.http`).
 * **Graceful degrade** — any connector error (missing data, network/API failure,
-  rate-limit exhaustion, even an unexpected bug) is caught and recorded as a
-  soft-fail note; it never crashes the run.
+  rate-limit exhaustion, even a connector that cannot be constructed) is caught
+  and recorded as a soft-fail note; one broken connector never costs the others
+  their results, and never crashes the run.
 * **Secret hygiene** — known key values are scrubbed from every retained raw
   response defensively (:mod:`.secrets`).
 
@@ -30,7 +31,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 
 import httpx
 
@@ -142,11 +145,21 @@ def run_enrichment(
     targets: list[Indicator],
     settings: EnrichmentSettings | None = None,
 ) -> EnrichmentReport:
-    """Synchronous wrapper around :func:`run_enrichment_async` (drives the event loop)."""
+    """Synchronous wrapper around :func:`run_enrichment_async`.
+
+    Callable from plain code and from inside a running event loop (a notebook,
+    an async web handler): in the latter case the run gets its own loop on a
+    worker thread, since a loop cannot be re-entered.
+    """
     settings = settings or EnrichmentSettings()
     if not settings.enabled:
         return EnrichmentReport(enabled=False)
-    return asyncio.run(run_enrichment_async(targets, settings))
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run_enrichment_async(targets, settings))
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phishbowl-enrich") as pool:
+        return pool.submit(lambda: asyncio.run(run_enrichment_async(targets, settings))).result()
 
 
 async def run_enrichment_async(
@@ -167,10 +180,7 @@ async def run_enrichment_async(
 
     with _scrubbed_http_logs(secrets):
         statuses = await asyncio.gather(
-            *(
-                _run_one_connector(cls(), targets, settings, cache, semaphore, secrets)
-                for cls in connectors
-            )
+            *(_run_guarded(cls, targets, settings, cache, semaphore, secrets) for cls in connectors)
         )
     # Stable, name-sorted ordering so reports read the same run to run.
     statuses = tuple(sorted(statuses, key=lambda s: s.connector))
@@ -191,6 +201,33 @@ def _select_connectors(
     return selected
 
 
+async def _run_guarded(
+    cls: type[Connector],
+    targets: list[Indicator],
+    settings: EnrichmentSettings,
+    cache: EnrichmentCache,
+    semaphore: asyncio.Semaphore,
+    secrets: frozenset[str],
+) -> ConnectorStatus:
+    """Run one connector class; anything it raises becomes a failed status.
+
+    Construction happens inside the guard too, so a third-party connector whose
+    ``__init__`` or ``prepare`` raises fails alone instead of taking the whole
+    enrichment pass (and every other connector's results) down with it.
+    """
+    try:
+        return await _run_one_connector(cls(), targets, settings, cache, semaphore, secrets)
+    except Exception:  # noqa: BLE001 - last-resort guard: a connector bug must not crash the run
+        detail = scrub_secrets(traceback.format_exc(), secrets)
+        log.warning("connector %r failed unexpectedly\n%s", cls.name, detail)
+        return ConnectorStatus(
+            connector=cls.name,
+            version=str(cls.version),
+            outcome=ConnectorOutcome.FAILED,
+            note="failed — unexpected connector error",
+        )
+
+
 async def _run_one_connector(
     connector: Connector,
     targets: list[Indicator],
@@ -207,8 +244,9 @@ async def _run_one_connector(
         hint = f"set {connector.api_key_env}" if connector.api_key_env else "none configured"
         return _status(connector, ConnectorOutcome.SKIPPED, f"skipped — no API key ({hint})")
 
-    indicators = _prepared(connector, targets)
-    indicators = indicators[: min(connector.max_indicators, settings.max_indicators)]
+    prepared = _prepared(connector, targets)
+    limit = max(0, min(connector.max_indicators, settings.max_indicators))
+    indicators = prepared[:limit]
     if not indicators:
         return _status(connector, ConnectorOutcome.SKIPPED, "skipped — no matching indicators")
 
@@ -233,7 +271,13 @@ async def _run_one_connector(
     try:
         for indicator in indicators:
             cached = (
-                cache.get(name, indicator.type, indicator.value, ttl=connector.cache_ttl)
+                cache.get(
+                    name,
+                    indicator.type,
+                    indicator.value,
+                    ttl=connector.cache_ttl,
+                    version=connector.version,
+                )
                 if use_cache
                 else None
             )
@@ -247,12 +291,19 @@ async def _run_one_connector(
             if result is not None:
                 result = _sanitize(result, secrets)
                 if use_cache:
-                    cache.put(result)
+                    cache.put(result, version=connector.version)
                 results.append(result)
     finally:
         await client.aclose()
 
-    return _summarize(connector, indicators, results, cache_hits, failures)
+    status = _summarize(connector, indicators, results, cache_hits, failures)
+    if len(prepared) > len(indicators):
+        # Say what was left out: a capped run must not read as a complete one.
+        skipped = len(prepared) - len(indicators)
+        status = replace(
+            status, note=f"{status.note}; {skipped} more not queried (limit {limit} per run)"
+        )
+    return status
 
 
 def _prepared(connector: Connector, targets: list[Indicator]) -> list[Indicator]:
@@ -279,9 +330,11 @@ async def _enrich_one(
     failures: list[str],
     secrets: frozenset[str],
 ) -> EnrichmentResult | None:
-    """One guarded enrichment call: rate-limited, concurrency-capped, soft-failing."""
-    await limiter.acquire()
+    """One guarded enrichment call: concurrency-capped, rate-limited, soft-failing."""
     async with semaphore:
+        # Spacing is measured when the request can actually go out: acquiring
+        # before the semaphore would let queued requests leave back to back.
+        await limiter.acquire()
         try:
             return await connector.enrich(indicator, ctx)
         except ConnectorError as exc:
@@ -301,8 +354,6 @@ async def _enrich_one(
 
 def _sanitize(result: EnrichmentResult, secrets: frozenset[str]) -> EnrichmentResult:
     """Defensively scrub any known key value out of a result's retained raw data."""
-    from dataclasses import replace
-
     return replace(
         result,
         raw=scrub_secrets(result.raw, secrets),

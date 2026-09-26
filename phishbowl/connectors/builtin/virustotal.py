@@ -1,9 +1,11 @@
 """VirusTotal connector (PRD §8, §9).
 
 Passive reputation lookup for URLs, domains, and file hashes against the
-VirusTotal v3 API. The contribution scales with the **detection ratio** — how
-many engines flagged the indicator — so a couple of detections nudge the score
-while a broad consensus pushes it hard (PRD §8). Key-gated (``VIRUSTOTAL_API_KEY``),
+VirusTotal v3 API. The contribution scales with the **detection ratio** — the
+share of engines that returned a verdict and flagged the indicator — so a
+couple of detections nudge the score while a broad consensus pushes it hard
+(PRD §8). Engines that timed out, failed, or do not support the file type say
+nothing and are left out of the ratio. Key-gated (``VIRUSTOTAL_API_KEY``),
 reaches only ``www.virustotal.com``, and never logs or returns the key.
 
 Free-tier friendly: a conservative request rate and a generous cache TTL keep
@@ -26,9 +28,22 @@ from ..base import (
     Indicator,
 )
 from ..errors import ConnectorError
+from ..http import json_object
 from ..registry import register
+from ._fields import count, mapping
 
 _SIGNAL_ID = "enrichment.virustotal.detections"
+# ``last_analysis_stats`` counters, as documented for URLs, domains and files.
+_STAT_KEYS = (
+    "malicious",
+    "suspicious",
+    "harmless",
+    "undetected",
+    "timeout",
+    "confirmed-timeout",
+    "failure",
+    "type-unsupported",
+)
 
 
 def _vt_url_id(url: str) -> str:
@@ -39,7 +54,7 @@ def _vt_url_id(url: str) -> str:
 @register
 class VirusTotalConnector(Connector):
     name = "virustotal"
-    version = "1.0.1"
+    version = "1.1.0"
     supported_ioc_types = frozenset({IOCType.URL.value, IOCType.DOMAIN.value, IOCType.HASH.value})
     requires_api_key = True
     api_key_env = "VIRUSTOTAL_API_KEY"
@@ -61,30 +76,28 @@ class VirusTotalConnector(Connector):
         if response.status_code != 200:
             raise ConnectorError(f"VirusTotal returned HTTP {response.status_code}")
 
-        stats = response.json().get("data", {}).get("attributes", {}).get("last_analysis_stats", {})
-        malicious = int(stats.get("malicious", 0) or 0)
-        suspicious = int(stats.get("suspicious", 0) or 0)
-        total = sum(int(v or 0) for v in stats.values())
+        body = json_object(response, "VirusTotal")
+        attributes = mapping(mapping(body.get("data")).get("attributes"))
+        reported = mapping(attributes.get("last_analysis_stats"))
+        stats = {key: n for key in _STAT_KEYS if (n := count(reported.get(key))) is not None}
+        malicious = stats.get("malicious", 0)
+        suspicious = stats.get("suspicious", 0)
+        flagged = malicious + suspicious
+        # Engines that returned a verdict; the rest say nothing either way.
+        judged = flagged + stats.get("harmless", 0) + stats.get("undetected", 0)
 
-        if malicious == 0 and suspicious == 0:
-            return self._result(
-                indicator,
-                EnrichmentVerdict.BENIGN if sum(stats.values()) > 0 else EnrichmentVerdict.UNKNOWN,
-                None,
-                gui_kind,
-                gui_id,
-                stats,
-            )
+        if flagged == 0:
+            verdict = EnrichmentVerdict.BENIGN if judged else EnrichmentVerdict.UNKNOWN
+            return self._result(indicator, verdict, None, gui_kind, gui_id, stats)
 
         # Magnitude = detection ratio (PRD §8 "scaled by detection ratio").
-        ratio = (malicious + suspicious) / total if total else 0.0
         verdict = EnrichmentVerdict.MALICIOUS if malicious else EnrichmentVerdict.SUSPICIOUS
         signal = EnrichmentSignal(
             id=_SIGNAL_ID,
             description="VirusTotal engines flagged the indicator",
-            magnitude=min(1.0, ratio),
+            magnitude=flagged / judged,
             evidence=(
-                f"VirusTotal: {malicious + suspicious}/{total} engines flagged "
+                f"VirusTotal: {flagged}/{judged} engines flagged "
                 f"{indicator.defanged} ({malicious} malicious, {suspicious} suspicious)"
             ),
         )
@@ -111,7 +124,7 @@ class VirusTotalConnector(Connector):
         signal: EnrichmentSignal | None,
         gui_kind: str,
         gui_id: str,
-        stats: dict,
+        stats: dict[str, int],
     ) -> EnrichmentResult:
         return EnrichmentResult(
             connector=self.name,

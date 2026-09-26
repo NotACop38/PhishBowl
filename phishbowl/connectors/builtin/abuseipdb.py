@@ -9,6 +9,8 @@ move the verdict. Key-gated (``ABUSEIPDB_API_KEY``), reaches only
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from phishbowl.models import IOCType
 
 from ..base import (
@@ -20,7 +22,9 @@ from ..base import (
     Indicator,
 )
 from ..errors import ConnectorError
+from ..http import json_object
 from ..registry import register
+from ._fields import count, mapping
 
 _SIGNAL_ID = "enrichment.abuseipdb.confidence"
 # Below this confidence the result is reported but contributes no score (PRD §8
@@ -31,7 +35,7 @@ _MIN_CONFIDENCE = 25
 @register
 class AbuseIPDBConnector(Connector):
     name = "abuseipdb"
-    version = "1.0.0"
+    version = "1.1.0"
     supported_ioc_types = frozenset({IOCType.IPV4.value, IOCType.IPV6.value})
     requires_api_key = True
     api_key_env = "ABUSEIPDB_API_KEY"
@@ -50,14 +54,20 @@ class AbuseIPDBConnector(Connector):
         if response.status_code != 200:
             raise ConnectorError(f"AbuseIPDB returned HTTP {response.status_code}")
 
-        data = response.json().get("data", {})
-        confidence = int(data.get("abuseConfidenceScore", 0) or 0)
-        reports = int(data.get("totalReports", 0) or 0)
+        data = mapping(json_object(response, "AbuseIPDB").get("data"))
+        score = count(data.get("abuseConfidenceScore"))
+        if score is None:
+            # No confidence score in the answer: nothing to assert either way.
+            return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, None)
+        confidence = min(score, 100)
+        reports = count(data.get("totalReports")) or 0
+        country = data.get("countryCode")
+        whitelisted = data.get("isWhitelisted")
         raw = {
             "abuseConfidenceScore": confidence,
             "totalReports": reports,
-            "countryCode": data.get("countryCode"),
-            "isWhitelisted": data.get("isWhitelisted"),
+            "countryCode": country[:8] if isinstance(country, str) else None,
+            "isWhitelisted": whitelisted if isinstance(whitelisted, bool) else None,
         }
 
         signal: EnrichmentSignal | None = None
@@ -76,13 +86,21 @@ class AbuseIPDBConnector(Connector):
             )
         else:
             verdict = EnrichmentVerdict.BENIGN if confidence == 0 else EnrichmentVerdict.UNKNOWN
+        return self._result(indicator, verdict, signal, raw)
 
+    def _result(
+        self,
+        indicator: Indicator,
+        verdict: EnrichmentVerdict,
+        signal: EnrichmentSignal | None,
+        raw: dict | None,
+    ) -> EnrichmentResult:
         return EnrichmentResult(
             connector=self.name,
             ioc_type=indicator.type,
             indicator=indicator.value,
             verdict=verdict,
             signals=(signal,) if signal else (),
-            references=(f"https://www.abuseipdb.com/check/{indicator.value}",),
+            references=(f"https://www.abuseipdb.com/check/{quote(indicator.value, safe=':')}",),
             raw=raw,
         )

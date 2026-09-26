@@ -204,7 +204,7 @@ class EnrichmentSettings:
     max_indicators: int = 16
     cache_enabled: bool = True
     cache_dir: Any = None
-    api_keys: Mapping[str, str] = field(default_factory=dict)
+    api_keys: Mapping[str, str] = field(default_factory=dict, repr=False)
     transport: Any = None
     sleep: Callable[[float], Awaitable[None]] | None = None
     now: Callable[[], datetime] | None = None
@@ -232,7 +232,7 @@ class EnrichContext:
 
     http: AllowlistedClient
     settings: EnrichmentSettings
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     now: Callable[[], datetime] = utcnow
 
 

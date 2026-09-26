@@ -51,7 +51,7 @@ from phishbowl.connectors import (
 from phishbowl.connectors import registry as registry_mod
 from phishbowl.connectors.base import ConnectorOutcome, EnrichmentSignal
 from phishbowl.connectors.cache import EnrichmentCache
-from phishbowl.connectors.errors import SSRFGuardError
+from phishbowl.connectors.errors import RateLimitedError, SSRFGuardError
 from phishbowl.connectors.http import AllowlistedClient
 from phishbowl.connectors.secrets import scrub_secrets
 from phishbowl.connectors.targets import sending_ips
@@ -1409,3 +1409,336 @@ def test_existing_cache_root_permissions_are_left_alone(tmp_path: Path) -> None:
     )
     assert stat.S_IMODE(shared.stat().st_mode) == 0o755
     assert stat.S_IMODE((shared / "rdap").stat().st_mode) == 0o700
+
+
+# --------------------------------------------------------------------------- #
+# 11. Hostile vendors, broken connectors, and bounded egress                  #
+# --------------------------------------------------------------------------- #
+
+
+def _client_get(client: AllowlistedClient, url: str):
+    import asyncio
+
+    async def go():
+        try:
+            return await client.get(url)
+        finally:
+            await client.aclose()
+
+    return asyncio.run(go())
+
+
+def test_plain_http_vendor_urls_are_refused() -> None:
+    # A plaintext request would expose the API key and the result on the wire.
+    calls: list[str] = []
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"api.vendor.example"}),
+        transport=httpx.MockTransport(lambda r: calls.append(str(r.url)) or httpx.Response(200)),
+    )
+    with pytest.raises(SSRFGuardError):
+        _client_get(client, "http://api.vendor.example/v1/lookup")
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://10.0.0.5/domain/x.example",
+        "https://[::1]/domain/x.example",
+        "https://2130706433/domain/x.example",
+        "https://8.8.8.8/domain/x.example",
+        "https://rdap.localhost/domain/x.example",
+        "https://intranet/domain/x.example",
+    ],
+)
+def test_bootstrap_redirect_never_designates_an_ip_or_local_host(location: str) -> None:
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        return httpx.Response(302, headers={"Location": location})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+    )
+    with pytest.raises(SSRFGuardError):
+        _client_get(client, "https://rdap.org/domain/x.example")
+    assert seen_hosts == ["rdap.org"]
+
+
+def test_bootstrap_designated_host_is_not_retried() -> None:
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        if request.url.host == "rdap.org":
+            return httpx.Response(302, headers={"Location": "https://rdap.registry.example/d"})
+        return httpx.Response(429)
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+        sleep=_nosleep,
+        max_retries=3,
+    )
+    with pytest.raises(RateLimitedError) as excinfo:
+        _client_get(client, "https://rdap.org/domain/x.example")
+    assert seen_hosts == ["rdap.org", "rdap.registry.example"]
+    # The error names the host, never the path that carried the indicator.
+    assert str(excinfo.value).startswith("rdap.registry.example ")
+    assert "/d" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("header", ["nan", "inf", "-inf", "Wed, 21 Oct 2026 07:28:00 GMT"])
+def test_unusable_retry_after_falls_back_to_exponential_backoff(header: str) -> None:
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": header})
+
+    target = Indicator("domain", "x.example", "x[.]example")
+    settings = make_settings(handler, select=frozenset({"rdap"}), sleep=record_sleep, max_retries=2)
+    status = run_enrichment([target], settings).status_for("rdap")
+    assert sleeps == [1.0, 2.0]
+    assert status.outcome is ConnectorOutcome.FAILED
+    assert "/domain/" not in status.note  # host only, never the indicator path
+
+
+def test_a_connector_that_cannot_be_constructed_fails_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BrokenInit(Connector):
+        name = "broken-init"
+        supported_ioc_types = frozenset({"domain"})
+        requires_api_key = False
+        allowed_hosts = frozenset({"api.broken.example"})
+
+        def __init__(self) -> None:
+            raise RuntimeError("misconfigured plugin")
+
+        async def enrich(self, indicator: Indicator, ctx) -> EnrichmentResult:  # pragma: no cover
+            raise AssertionError("never constructed")
+
+    fake_ep = types.SimpleNamespace(name="broken-init", load=lambda: _BrokenInit)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    settings = make_settings(
+        rdap_response("2026-05-30T00:00:00Z"), select=frozenset({"rdap", "broken-init"})
+    )
+    report = run_enrichment([Indicator("domain", "new.example", "new[.]example")], settings)
+
+    assert report.status_for("broken-init").outcome is ConnectorOutcome.FAILED
+    assert report.status_for("broken-init").note == "failed — unexpected connector error"
+    # The healthy connector still delivered its result.
+    assert report.status_for("rdap").outcome is ConnectorOutcome.USED
+
+
+def test_abstract_connectors_are_rejected_at_registration() -> None:
+    class _Incomplete(Connector):
+        name = "incomplete"
+
+    with pytest.raises(ValueError, match="abstract"):
+        registry_mod.register(_Incomplete)
+
+
+def test_capped_runs_say_how_many_indicators_were_not_queried() -> None:
+    targets = [Indicator("domain", f"d{i}.example", f"d{i}[.]example") for i in range(5)]
+    settings = make_settings(
+        rdap_response("1998-01-01T00:00:00Z"), select=frozenset({"rdap"}), max_indicators=2
+    )
+    status = run_enrichment(targets, settings).status_for("rdap")
+    assert status.queried == 2
+    assert status.note.endswith("; 3 more not queried (limit 2 per run)")
+
+
+def test_run_enrichment_works_inside_a_running_event_loop() -> None:
+    import asyncio
+
+    settings = make_settings(rdap_response("2026-05-30T00:00:00Z"), select=frozenset({"rdap"}))
+
+    async def caller() -> EnrichmentReport:
+        # A synchronous caller that happens to run inside a loop (a notebook
+        # cell, an async web handler) cannot re-enter it.
+        return run_enrichment([Indicator("domain", "new.example", "new[.]example")], settings)
+
+    report = asyncio.run(caller())
+    assert report.status_for("rdap").outcome is ConnectorOutcome.USED
+
+
+def test_cache_ignores_entries_for_another_key_or_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    cache = EnrichmentCache(tmp_path, enabled=True, now=_fixed_now)
+    cache.put(
+        EnrichmentResult("rdap", "domain", "planted.example", verdict=EnrichmentVerdict.BENIGN),
+        version="1.0",
+    )
+    planted = cache._path("rdap", "domain", "planted.example", "1.0")
+    assert cache.get("rdap", "domain", "planted.example", ttl=3600, version="1.0") is not None
+
+    # A result filed under another indicator's key is not that indicator's answer.
+    target = cache._path("rdap", "domain", "victim.example", "1.0")
+    target.write_bytes(planted.read_bytes())
+    assert cache.get("rdap", "domain", "victim.example", ttl=3600, version="1.0") is None
+
+    # A connector upgrade never reads its predecessor's results.
+    assert cache.get("rdap", "domain", "planted.example", ttl=3600, version="1.1") is None
+
+    # Nor does anyone else's file count, or a link to one.
+    link = cache._path("rdap", "domain", "linked.example", "1.0")
+    link.symlink_to(planted)
+    assert cache.get("rdap", "domain", "linked.example", ttl=3600, version="1.0") is None
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(planted).st_uid + 1, raising=False)
+    assert cache.get("rdap", "domain", "planted.example", ttl=3600, version="1.0") is None
+
+
+def test_settings_and_context_reprs_never_show_keys() -> None:
+    from phishbowl.connectors.base import EnrichContext
+
+    settings = EnrichmentSettings(api_keys={"virustotal": "vt-secret-value"})
+    context = EnrichContext(http=None, settings=settings, api_key="vt-secret-value")  # type: ignore[arg-type]
+    assert "vt-secret-value" not in repr(settings)
+    assert "vt-secret-value" not in repr(context)
+
+
+def test_scrub_replaces_the_longest_overlapping_secret_whole() -> None:
+    secrets = frozenset({"key123", "key123456"})
+    assert scrub_secrets("token=key123456;", secrets) == "token=[redacted];"
+
+
+def _vt(stats) -> httpx.Response:
+    return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": stats}}})
+
+
+def test_virustotal_ratio_counts_only_engines_that_returned_a_verdict() -> None:
+    stats = {"malicious": 2, "suspicious": 0, "harmless": 3, "undetected": 5, "timeout": 20}
+    status = run_one(
+        "virustotal", Indicator("domain", "evil.example", "evil[.]example"), lambda r: _vt(stats)
+    )
+    signal = status.results[0].signals[0]
+    assert signal.magnitude == pytest.approx(0.2)
+    assert "2/10 engines" in signal.evidence
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _vt(None),
+        _vt({"malicious": None, "harmless": "many", "undetected": -1}),
+        httpx.Response(200, json={"data": None}),
+        httpx.Response(200, json=[1, 2, 3]),
+    ],
+)
+def test_virustotal_malformed_answers_are_unknown_not_a_crash(response) -> None:
+    status = run_one(
+        "virustotal", Indicator("domain", "evil.example", "evil[.]example"), lambda r: response
+    )
+    if status.outcome is ConnectorOutcome.USED:
+        assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+        assert status.results[0].signals == ()
+    else:
+        assert status.note == "failed — VirusTotal returned an unexpected JSON document"
+
+
+def test_virustotal_only_timeouts_is_unknown_not_benign() -> None:
+    status = run_one(
+        "virustotal",
+        Indicator("domain", "evil.example", "evil[.]example"),
+        lambda r: _vt({"timeout": 70, "type-unsupported": 3}),
+    )
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+
+
+def test_non_json_vendor_body_soft_fails_with_a_clear_note() -> None:
+    status = run_one(
+        "virustotal",
+        Indicator("domain", "evil.example", "evil[.]example"),
+        lambda r: httpx.Response(200, text="<html>maintenance</html>"),
+    )
+    assert status.outcome is ConnectorOutcome.FAILED
+    assert status.note == "failed — VirusTotal returned a non-JSON response"
+
+
+def test_abuseipdb_without_a_score_is_unknown_not_benign() -> None:
+    status = run_one(
+        "abuseipdb",
+        Indicator("ipv4", "8.8.8.8", "8[.]8[.]8[.]8"),
+        lambda r: httpx.Response(200, json={"data": {"totalReports": 0}}),
+    )
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+    assert status.results[0].signals == ()
+
+
+def _urlscan(*results) -> httpx.Response:
+    return httpx.Response(200, json={"results": list(results)})
+
+
+def test_urlscan_prefers_a_malicious_scan_over_a_higher_benign_score() -> None:
+    url = "https://evil.example/a?t=1"
+    response = _urlscan(
+        {"verdicts": {"overall": {"malicious": False, "score": 50}}},
+        {"task": {"url": url}, "verdicts": {"overall": {"malicious": True, "score": 0}}},
+    )
+    status = run_one(
+        "urlscan", Indicator("url", url, "hxxps://evil[.]example/a?t=1"), lambda r: response
+    )
+    signal = status.results[0].signals[0]
+    assert status.results[0].verdict is EnrichmentVerdict.MALICIOUS
+    assert signal.magnitude == 1.0  # a scan of this very URL
+
+
+def test_urlscan_evidence_about_another_page_on_the_host_counts_half() -> None:
+    response = _urlscan(
+        {
+            "task": {"url": "https://shared.example/someone-else"},
+            "verdicts": {"overall": {"malicious": True, "score": 100}},
+        }
+    )
+    status = run_one(
+        "urlscan",
+        Indicator("url", "https://shared.example/mine", "hxxps://shared[.]example/mine"),
+        lambda r: response,
+    )
+    signal = status.results[0].signals[0]
+    assert signal.magnitude == 0.5
+    assert "another page on shared[.]example" in signal.evidence
+
+
+def test_urlscan_keeps_only_urlscan_result_links() -> None:
+    response = _urlscan(
+        {"result": "javascript:alert(1)"},
+        {"result": "https://evil.example/fake-result"},
+        {"result": "https://urlscan.io/result/abc/"},
+    )
+    status = run_one(
+        "urlscan",
+        Indicator("url", "https://evil.example/a", "hxxps://evil[.]example/a"),
+        lambda r: response,
+    )
+    assert status.results[0].references == ("https://urlscan.io/result/abc/",)
+
+
+def test_shodan_ignores_ports_that_are_not_ports() -> None:
+    status = run_one(
+        "shodan",
+        Indicator("ipv4", "8.8.8.8", "8[.]8[.]8[.]8"),
+        lambda r: httpx.Response(200, json={"ports": [True, -22, 70000, "3389", 22.0, 22]}),
+    )
+    assert status.results[0].raw == {"ports": [22]}
+
+
+def test_rdap_registration_in_the_future_is_unknown() -> None:
+    status = run_one(
+        "rdap",
+        Indicator("domain", "odd.example", "odd[.]example"),
+        rdap_response("2030-01-01T00:00:00Z"),
+    )
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+    assert status.results[0].signals == ()
