@@ -7,79 +7,152 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A hardening and usability release. It adds the optional upload UI, inner-email triage,
+and explicit incomplete-analysis reporting, and closes a series of hostile-input,
+redaction, and enrichment gaps found in review.
+
+### Breaking changes
+
+- **Severity names:** the lowest severity is now `minimal` (was `benign`), and the
+  default verdict wording no longer implies certainty: "Few signals — safety
+  undetermined", "Low suspicion", "Suspicious — analyst review", "High suspicion",
+  "Very high suspicion". Few signals is not proof of safety.
+- **New exit status:** `phishbowl analyze` exits with `3` when some evidence could not
+  be analyzed. A reached `--fail-on` threshold (status `1`) takes precedence. Status `2`
+  now also covers an output that could not be written.
+- **Scoring configuration is validated strictly.** Unknown keys and rule IDs (reported
+  with the closest valid ID), weights that are not numbers from 0 to 100, and malformed
+  bands are errors instead of silently changing verdicts. An empty `weights:` or
+  `brands:` key is an error; an empty brand list removes that brand.
+- **`identity.freemail_brand` is now `identity.freemail_role`:** it fires when a
+  free-webmail sender presents as an organizational role from the new `role_keywords`
+  list. Rename the key in any override.
+- **The bundled `example` brand is removed** from `brands`.
+- **Weight 0 means observe:** a rule weighted 0 still fires and lists its evidence at
+  `+0`.
+- **Python API:** `ParsedEmail.iocs` is removed (extraction returns indicators
+  separately); `parse_auth(headers, *, from_domain=None)` returns
+  `(Auth, anomalies)`; `list_embedded_emails(data)` no longer takes a filename and raises
+  `MIMEBudgetError` when the message cannot be walked;
+  `EnrichmentSettings.api_key_for()` takes the connector rather than its name; and
+  `phishbowl.connectors.secrets.ENV_KEYS`, `env_var_for`, and `active_key_values` are
+  replaced by the `Connector.api_key_env` attribute.
+- **Connectors reach vendors over HTTPS only**, and enrichment cache entries are keyed by
+  connector version, so entries written by earlier versions are ignored.
+
 ### Added
 
-- **Inner-email triage** — `phishbowl analyze --inner` (and the upload UI's
-  “Analyze attached email” option) re-triages an attached `message/rfc822` /
-  `.eml` instead of the outer forward wrapper. The common SOC hand-off of
-  “Fwd: reported message” now scores the enclosed phish. Outer reports note
-  when attached emails are present.
-- **Full headers + sending IP in reports** — the HTML/JSON dossier now includes
-  the ordered header set (collapsible in HTML) and highlights the best public
-  sending-IP candidate from the `Received` chain.
-- **HTML body preview** — HTML-only messages now show de-tagged visible text
-  in the body preview (markup is still never rendered).
-- **Print stylesheet** — `@media print` rules so the HTML dossier prints cleanly
-  for tickets / PDF archival.
-- **CLI ergonomics** — `--version`, `--quiet`/`-q`, `--json -` (stdout),
-  `--scoring-config PATH`, `--connector` / `--disable-connector`,
-  `--fail-on low|suspicious|likely|malicious` (nonzero exit for SOAR/CI glue).
-- **Web UI polish** — redesigned zero-egress upload form, HTML error pages for
-  413/415/400 (instead of raw JSON), and form options for inner-email triage
-  and PII redaction. Shared `phishbowl.pipeline.triage` keeps CLI and web in lockstep.
-- **`attach.archive` scoring rule** — plain zip/rar/7z/… attachments now
-  contribute to the offline score (weight 10); password-protected archives
-  remain the heavier signal.
-- **`make install`** bootstrap target; `.env.example` documents
-  `PHISHBOWL_SCORING_CONFIG` and `PHISHBOWL_CACHE_DIR`.
-- **Stdin input** — `phishbowl analyze -` reads the email from stdin (PRD §6.1),
-  so it can be piped straight from another tool (e.g.
-  `curl … | phishbowl analyze -`). The format is sniffed from the bytes (OLE2
-  magic → `.msg`, else `.eml`), the read is bounded by the same size cap as
-  files and uploads, and an empty stream is a clean usage error.
+- **Upload UI** (`phishbowl serve`, behind the `web` extra): a local FastAPI app that runs
+  the same pipeline and returns the same HTML report, with options for inner-email
+  triage and redaction.
+- **Inner-email triage:** `--inner` analyzes the email attached to a forward
+  (`message/rfc822`, `.eml`, or an Outlook item) instead of the wrapper;
+  `--inner-index N` picks among several and implies `--inner`. Outer reports note when
+  attached emails are present.
+- **Incomplete-analysis reporting:** every output carries `analysis_complete` and an
+  assessment note; gaps are listed as *Not analyzed*, separately from informational
+  notes, and the verdict gains the suffix `(incomplete analysis)`.
+- **CLI:** `--version`; `--quiet`/`-q`; `--json -` for standard output; `-` to read the
+  message from standard input, with the format sniffed; `--scoring-config`;
+  `--connector` and `--disable-connector`; and `--fail-on` with a severity (`low`,
+  `elevated`, `high`, `critical`) or a score from 0 to 100.
+- **Rules:** `identity.multiple_from` (20), `identity.freemail_role` (12), `attach.html`
+  (14), and `attach.archive` (10), plus the `role_keywords` configuration list.
+- **Link wrappers:** Barracuda Link Protection and Cisco Secure Email links are decoded
+  offline; Mimecast links stay wrapped but record their target domain.
+- **Extraction:** links and resources from `srcset`, CSS `url()`, meta refresh, form
+  actions, and `ping`; text hidden in `script`, `style`, and `template` elements; and
+  inline text parts such as calendar invitations, which are also kept as hashed
+  attachments.
+- **Reports:** the full ordered header set, the best public sending-IP candidate, a
+  plaintext preview of HTML-only bodies, an *Analysis notes* section, a print
+  stylesheet, and a Content-Security-Policy in the HTML report.
+- **Connector API:** `Connector.api_key_env` names a connector's key variable (so
+  third-party connectors are key-gated and scrubbed like bundled ones),
+  `Connector.prepare()` maps an indicator before lookup, and
+  `phishbowl.connectors.http.json_object()` reads a vendor response defensively.
+- **Documentation images:** `make screenshot` renders the HTML report and the terminal
+  summary from a synthetic fixture.
+
+### Changed
+
+- **Authentication results are trusted only from the topmost receiving server** (its
+  `authserv-id`); results from other servers are ignored and noted, and only the topmost
+  `Received-SPF` is read. `Authentication-Results` is split only outside quoted strings
+  and comments. With several DKIM signatures, the one aligned with From is reported.
+- **RFC 2047 encoded-words are decoded only in unstructured headers and display names.**
+- **Lookalike detection** recognizes folded look-alike characters, a brand embedded as a
+  hyphenated part, and near-miss spellings (with adjacent transpositions counted as one
+  edit), keeps the first letter fixed, and skips short names, reducing false positives.
+- **Homograph detection** follows Unicode TR39: mixed scripts outside the highly
+  restrictive profile, or non-ASCII labels that fold to a known brand or org name.
+- **Domain comparisons** use registered domains from the Public Suffix List (private
+  suffixes included) and treat Unicode and punycode spellings as equal.
+- **Redaction** covers every delivery header (`Bcc`, `Delivered-To`, `X-Original-To`,
+  `Resent-*`, …) and `Received … for` clauses, matches whole tokens only, replaces values
+  in place with typed placeholders, and hides everything derived from a
+  `--redact-field` header.
+- **Enrichment:** VirusTotal's detection ratio counts only engines that returned a
+  verdict; urlscan prefers malicious scans and weighs evidence about another page on the
+  host at half; AbuseIPDB and VirusTotal report missing data as unknown rather than
+  benign; RDAP queries the registered domain and treats a future registration date as
+  unknown.
+- **`--quiet`** now also silences write confirmations, and CLI help is plain text.
+- **The terminal summary and HTML report** count enrichment rules separately from
+  offline rules.
 
 ### Fixed
 
-- **`content.urgency_keywords` now scans HTML bodies** — urgency language that
-  only lives in an HTML part (common for phishing) previously scored 0 on this
-  rule because only the plaintext part was searched.
-- Defanging a `javascript:`/`data:`/`vbscript:` URI no longer doubles the
-  colon (`javascript[:]:…` → `javascript[:]…`), restoring the documented
-  lossless `refang` round-trip for those URIs.
-- `make test` / `make lint` / `make format` now invoke pytest and ruff via
-  `python3 -m …` instead of bare executables, so they always run from the
-  interpreter that has PhishBowl's dependencies installed (a bare `pytest` on
-  PATH may live in an unrelated, isolated tool environment).
+- Malformed `From` headers (an address as the display name, unquoted commas) no longer
+  lose the sender; they are read as mail clients display them and noted.
+- RFC 2231 parameters, surrogate escapes, overflowing dates, and unknown or dangerous
+  charsets no longer crash parsing or produce invalid text.
+- A part or attachment that fails to parse no longer loses the rest of the message; a
+  message over the MIME budget is analyzed from its headers instead of not at all.
+- Base64-encoded `message/rfc822` parts are decoded before being treated as emails.
+- Strict email extraction no longer glues a preceding word onto an address; `mailto:`
+  links yield their addresses.
+- Proofpoint v3 links, trailing-dot hosts, and overlong or deeply nested wrappers unwrap
+  correctly or are marked unresolved.
+- Defanging is idempotent and neutralizes every non-web scheme; `javascript:`, `data:`,
+  and `vbscript:` URIs no longer double their colon.
+- `content.urgency_keywords` now scans HTML bodies.
+- `make test`, `make lint`, and `make format` run tools through `python3 -m`, so they
+  always use the interpreter that has PhishBowl's dependencies.
 
 ### Security
 
-- **SSRF guard now holds across redirects.** The connector HTTP client no
-  longer delegates redirect-following to httpx (which re-checks nothing):
-  redirects are followed hop-by-hop with the host allowlist re-applied to every
-  redirect target before any connection, and a chain longer than 5 hops
-  soft-fails. Previously a vendor 3xx could bounce the one redirect-following
-  connector (RDAP) to a non-allowlisted host unchecked. RDAP's legitimate
-  bootstrap flow (`rdap.org` → authoritative registry) still works via a
-  narrow, declared exception: exactly one redirect issued by the allowlisted
-  redirector may leave the allowlist (https only), and the designated registry
-  may not redirect again.
-- **API keys are scrubbed from descendant HTTP loggers too** (e.g.
-  `httpcore.http11`): logging filters on a parent logger do not apply to
-  child-logger records, so each existing `httpx.*`/`httpcore.*` logger gets
-  the scrub filter for the duration of an enrichment run.
-- **API keys are scrubbed from HTTP debug logs.** httpx logs every request URL
-  at INFO/DEBUG, and Shodan's API key rides in the query string — with verbose
-  logging enabled, the key landed in the operator's logs. Known key values
-  (env *and* programmatic) are now scrubbed from the `httpx`/`httpcore` loggers
-  for the duration of an enrichment run, and from connector crash tracebacks.
-- **Enrichment cache entries are now private** (`0700` directories, `0600`
-  files): they hold the analyzed email's indicators, which other local users on
-  a shared host should not be able to read.
-- **Received-hop text, address display names, and auth details are now
-  defanged** in all outputs, closing the gap where a forged `Received` header
-  or a URL-bearing display name could hand an analyst a live IP/URL on
-  copy-paste (the view contract already promised this).
-- Raised the `urllib3` transitive floor to `>=2.7.0` (PYSEC-2026-141/142).
+- Text-processing patterns avoid catastrophic backtracking (possessive or linear
+  constructions, and time budgets on the indicator passes), with time-budget
+  regression tests for adversarial input.
+- The connector client re-checks the allowlist on every redirect, allows only HTTPS, and
+  limits RDAP's bootstrap redirect to one HTTPS hop to a public DNS name, without
+  retries.
+- Enrichment never sends non-public IP addresses in any notation, local names, hosts
+  under `org_domains`, recipient-only domains, or email addresses.
+- API keys are scrubbed, longest first, from results, notes, cache entries, tracebacks,
+  and all `httpx`/`httpcore` loggers, and are kept out of object representations.
+- Cache entries are private (`0600` files, `0700` directories) and used only when owned
+  by the current user and recording the exact key.
+- One failing connector, including one that cannot be constructed, no longer affects the
+  others; vendor responses are parsed defensively.
+- XSOAR playbook inputs withhold values containing `,` or `${`; Sentinel drafts encode
+  expression-like strings as literal data.
+- Upload UI: request bytes are counted before multipart parsing, one analysis runs at a
+  time, and every response, error pages included, carries anti-framing and
+  content-security headers.
+- Terminal control characters are stripped from every field, including attachment
+  types; received-hop text, display names, and authentication details are defanged.
+- The CLI refuses outputs that would overwrite the input (including a file redirected to
+  standard input), the scoring configuration, or each other.
+- Raised transitive floors: `urllib3>=2.7.0` (PYSEC-2026-141/142).
+
+### Removed
+
+- The VHS terminal-demo recording (`make demo`, `docs/assets/demo.gif`); `make
+  screenshot` now renders a static terminal image instead.
+- `docs/CRITICAL_REVIEW.md`; its findings are covered by this entry and by
+  `SECURITY.md`.
 
 ## [0.1.0] — 2026-06-05
 

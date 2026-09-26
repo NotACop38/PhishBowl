@@ -68,6 +68,11 @@ checklist); no task binds an automation command.
    `PhishbowlFileHashes`). Wire them into your own (reviewed) sub-playbooks or
    commands *if and when you decide to act* — the draft never does so for you.
 
+Input values are comma-separated, and XSOAR evaluates `${…}` in them as an expression.
+An indicator containing a comma or `${` is therefore withheld from the inputs, still
+listed defanged in the task notes, and counted in the playbook description, so no
+message content can split an input or become an expression.
+
 ### Field mapping
 
 | XSOAR playbook field | Source (from `ParsedEmail` + verdict + IOCs) |
@@ -80,9 +85,9 @@ checklist); no task binds an automation command.
 | `tasks` (`regular`, manual) | Review verdict · Review indicators (defanged) · Review authentication · Decide containment (manual) |
 | `tasks[*].task.iscommand` | Always `false` — **no command binding** |
 | `tasks[*].task.brand` | Always `""` — **no integration bound** |
-| `inputs[].PhishbowlVerdict` | Verdict band text |
+| `inputs[].PhishbowlVerdict` | Verdict band text (a verdict containing `,` or `${` reads "see playbook description") |
 | `inputs[].PhishbowlScore` | `"<score>/100"` |
-| `inputs[].PhishbowlUrls` / `Domains` / `Ips` / `Emails` / `FileHashes` | **Raw** indicators (comma-separated), redaction-respecting; file hashes include attachment MD5/SHA1/SHA256 |
+| `inputs[].PhishbowlUrls` / `Domains` / `Ips` / `Emails` / `FileHashes` | **Raw** indicators (comma-separated), redaction-respecting, without values containing `,` or `${`; file hashes include attachment MD5/SHA1/SHA256 |
 | task note: "Why this score" | Each fired rule: description, defanged evidence, weight, source tag |
 | task note: indicators | Defanged URLs / domains / IPs / emails / hashes |
 | task note: authentication | SPF / DKIM / DMARC results |
@@ -123,10 +128,9 @@ trigger, with only inert `Compose` actions that hold the triage data.
 | Sentinel / ARM field | Source |
 |----------------------|--------|
 | `$schema` | ARM deployment-template schema |
-| `parameters.PlaybookName` | Logic App name (default `Phishbowl-Triage-Draft`) |
+| `parameters.PlaybookName` | Logic App name; defaults to `Phishbowl-Triage-Draft-<analysis-seed>`, unique per analysis |
 | `resources[0].type` | `Microsoft.Logic/workflows` |
 | `resources[0].properties.state` | Always `"Disabled"` — **ships off** |
-| `parameters.PlaybookName.defaultValue` | `Phishbowl-Triage-Draft-<analysis-seed>` — unique per analysis |
 | `…definition.triggers` | Exactly one manual HTTP `Request` trigger — **not** an automatic Sentinel alert/incident trigger |
 | `…actions` | Inert `Compose` actions only (each `type` is `Compose`) |
 | `…actions.Compose_Phishbowl_Triage_DRAFT.inputs` | The full triage object (below) |
@@ -188,7 +192,7 @@ from phishbowl.export import validate_export, XSOAR_SCHEMA_NAME, SENTINEL_SCHEMA
 playbook = yaml.safe_load(open("playbook.yml"))
 template = json.load(open("azuredeploy.json"))
 
-assert validate_export(playbook, XSOAR_SCHEMA_NAME) == []     # [] == conforms
+assert validate_export(playbook, XSOAR_SCHEMA_NAME) == []  # [] == conforms
 assert validate_export(template, SENTINEL_SCHEMA_NAME) == []
 ```
 
@@ -202,9 +206,9 @@ This follows Microsoft's [ARM expression rules](https://learn.microsoft.com/en-u
 and [workflow expression function reference](https://learn.microsoft.com/en-us/azure/logic-apps/expression-functions-reference).
 The workflow remains disabled with manual triggers and Compose actions.
 
-Synthetic tests check artifact structure and lossless string decoding. No Azure
-or XSOAR deployment was performed during this review; the bundled schemas are
-local structural checks, not complete vendor import certification. Inspect code
-view after any edits in the Logic Apps designer, which can rewrite expressions.
-`analysis_complete` and the assessment note accompany the Sentinel triage summary;
-incomplete assessments are labeled in both platforms' draft verdicts.
+Synthetic tests check artifact structure and lossless string decoding. The bundled
+schemas are local structural checks, not vendor import certification: no Azure or
+XSOAR deployment is part of the test suite. Inspect the code view after any edit in
+the Logic Apps designer, which can rewrite expressions. `analysis_complete` and the
+assessment note accompany the Sentinel triage summary, and an incomplete assessment's
+verdict carries the `(incomplete analysis)` suffix in both platforms' drafts.

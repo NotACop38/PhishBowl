@@ -1,226 +1,228 @@
-# Scoring configuration guide
+# Scoring guide
 
-PhishBowl's risk score is **transparent and tunable**: there's no model to
-second-guess, and every number that produces a verdict lives in editable YAML.
-This guide explains how scoring works and how to tune it to your environment.
+PhishBowl's risk score is transparent and tunable. There is no model to second-guess:
+the score is the sum of named rules, every rule records the evidence that made it fire,
+and every number lives in editable YAML. This guide explains how the score is computed,
+what each rule means, and how to tune it.
 
-See also: [`PRD.md` §8](PRD.md) (the scoring model) and the bundled defaults at
-[`phishbowl/score/defaults.yaml`](../phishbowl/score/defaults.yaml).
+The bundled configuration is
+[`phishbowl/score/defaults.yaml`](../phishbowl/score/defaults.yaml). The design
+rationale is in [`PRD.md` §8](PRD.md).
 
----
+## How the score is computed
 
-## How the score works
+1. **Rules run** against the parsed message and its extracted indicators. Each rule
+   has an ID, a description, a weight, and a source (`offline` or `enrichment`).
+2. **Fired rules add their weight once.** A rule triggered by several indicators still
+   counts once and lists every piece of evidence. Related rules do not score the same
+   fact twice: a homograph domain fires `url.idn_homograph`, not also `url.punycode`,
+   and a lookalike check skips domains the homograph rules own.
+3. **The total is clamped to 0–100**, with halves rounded up. Clamping, not rescaling,
+   keeps the model additive: each point traces to one rule, and adding a rule never
+   dilutes the others.
+4. **The score selects a band**, which gives the verdict text and a severity name.
 
-1. **Detectors run** against the `ParsedEmail` + extracted IOCs. Each *rule* is
-   `{id, description, weight, source, detector}`.
-2. **Fired rules sum their weights.** The score is the **sum of the weights of
-   every rule that fired**, then **clamped to 0–100** (clamped, not rescaled —
-   so every point still traces to exactly one named rule).
-3. **The score maps to a verdict band** (Benign → Malicious).
-4. **Every fired rule emits a reason and its evidence**, tagged by `source`
-   (`offline` vs `[enrichment]`).
-
-A clean email fires nothing and scores **0**. No single rule — and no missing
-enrichment connector — can zero out or dominate a verdict by itself.
-
+```text
+offline_score = clamp(0, 100, Σ weight(rule) for each fired offline rule)
+score         = clamp(0, 100, offline total + Σ weight(signal) × magnitude for each enrichment signal)
+verdict       = the first band whose max is ≥ score
 ```
-score = clamp(0, 100, Σ weight(rule) for each fired rule)
-verdict = first band where score <= band.max
+
+A message that fires nothing scores 0. That means "few signals", not "safe".
+
+### Observe mode: weight 0
+
+A rule whose weight is 0 still fires and still lists its evidence, at `+0`. This is how
+you switch a noisy rule off without hiding what it saw. It applies to enrichment
+signals too.
+
+### Incomplete analysis
+
+When some of a message's evidence could not be analyzed (a malformed MIME structure, a
+part that failed to parse, a truncated text budget, an extraction timeout), the score is
+a lower bound. The verdict gains the suffix `(incomplete analysis)`,
+`analysis_complete` is `false`, and `phishbowl analyze` exits with status 3 unless a
+`--fail-on` threshold was reached (status 1).
+
+## Verdict bands and severity
+
+| Score | Default verdict | Severity |
+|------:|-----------------|----------|
+| 0–19 | Few signals — safety undetermined | `minimal` |
+| 20–39 | Low suspicion | `low` |
+| 40–64 | Suspicious — analyst review | `elevated` |
+| 65–84 | High suspicion | `high` |
+| 85–100 | Very high suspicion | `critical` |
+
+The verdict text and band limits come from `bands` in the configuration. The severity
+name comes from the fixed limits above, whatever the bands say, so colors and
+automation stay stable when an operator rewords or re-bands verdicts. `--fail-on`
+accepts a severity name (`low`, `elevated`, `high`, `critical`) or a score from 0 to 100.
+
+## Rule catalog
+
+The defaults below are hand-set heuristics, checked against the synthetic fixtures in
+`tests/fixtures/` and not calibrated against real mail. Treat them as starting points.
+
+### Authentication claims
+
+These read the results the receiving mail servers recorded in `Authentication-Results`
+(and, for SPF only, `Received-SPF`). PhishBowl trusts only the results written by the
+topmost receiving server, because lower headers arrive with the message and can be
+forged; it does not re-verify signatures or DNS records.
+
+| Rule ID | Weight | Fires when |
+|---------|------:|------------|
+| `auth.spf_fail` | 15 | SPF failed. |
+| `auth.spf_softfail` | 8 | SPF soft-failed. |
+| `auth.dkim_fail` | 12 | DKIM failed. When a message carries several signatures, the one aligned with the From domain is used. |
+| `auth.dkim_none` | 5 | The message carries no DKIM signature. |
+| `auth.dmarc_fail` | 18 | DMARC failed. |
+| `auth.results_missing` | 8 | No `Authentication-Results` header at all. Not raised for an Outlook item without transport headers, which cannot carry one. |
+
+### Sender identity
+
+| Rule ID | Weight | Fires when |
+|---------|------:|------------|
+| `identity.display_name_brand_mismatch` | 20 | The From display name names a brand from `brands`, but the From domain is not one of that brand's domains. |
+| `identity.multiple_from` | 20 | The message has more than one From header. Mail clients disagree on which to show. |
+| `identity.reply_to_mismatch` | 12 | Reply-To is under a different registered domain than From. |
+| `identity.freemail_role` | 12 | A sender on a free-webmail domain presents as an organizational role from `role_keywords` ("IT Support", "Payroll"). |
+| `identity.return_path_mismatch` | 10 | Return-Path is under a different registered domain than From. |
+| `identity.sender_mismatch` | 8 | Sender is under a different registered domain than From. |
+| `identity.display_name_is_email` | 8 | The From display name contains an email address other than the actual sender. |
+
+Domain comparisons use registered domains from the Public Suffix List (so
+`bounce.example.com` matches `example.com`, but two tenants of a hosting platform such as
+`github.io` do not), and compare Unicode and punycode spellings as equal.
+
+### Links and domains
+
+| Rule ID | Weight | Fires when |
+|---------|------:|------------|
+| `url.idn_homograph` | 18 | A domain label (decoded from punycode) mixes writing systems outside Unicode TR39's highly restrictive profile, or is non-ASCII and folds to a brand or `org_domains` name once look-alike letters and accents are normalized (`раypal` with Cyrillic letters). |
+| `url.lookalike` | 18 | A domain imitates a brand or `org_domains` entry: the same name after folding lookalike characters (`paypa1`), the name as a hyphenated part (`paypal-secure`), or a near-miss spelling that keeps the first letter (one edit for names up to 8 characters, two for longer ones; names shorter than 6 characters are compared only for the first two patterns). |
+| `url.anchor_href_mismatch` | 16 | A link's visible text names a different domain than the one it points to. |
+| `url.punycode` | 12 | A punycode (`xn--`) domain is present that the homograph rule did not already score. |
+| `url.raw_ip_host` | 12 | A URL uses an IP address as its host, in any notation a browser accepts (`http://3232235777/`). |
+| `url.wrapped_divergence` | 10 | A protected link unwraps to a domain unrelated to the sender. |
+| `url.credential_keywords` | 8 | A URL path or query contains a phrase from `credential_keywords`. |
+| `url.shortener` | 6 | A link uses a domain from `url_shorteners`. |
+
+### Attachments
+
+Attachments are typed by their content (magic bytes and markup sniffing), never opened
+by an external program, and never extracted.
+
+| Rule ID | Weight | Fires when |
+|---------|------:|------------|
+| `attach.double_extension` | 22 | A filename hides its real type (`invoice.pdf.exe`), including with Unicode direction-override characters. |
+| `attach.executable` | 22 | An executable, script, shortcut, disk image (ISO, IMG, VHD), OneNote notebook, or other directly dangerous type (`.chm`, `.hta`, `.xll`, `.msix`, …). |
+| `attach.type_mismatch` | 16 | The declared content type or the extension contradicts the detected content. |
+| `attach.macro_capable` | 14 | A macro-capable Office document (`.docm`, `.xlsm`, `.pptm`, `.ppsm`, `.xlsb`, legacy `.doc`/`.xls`, and similar). |
+| `attach.password_protected_archive` | 14 | An encrypted archive, which scanners cannot inspect. Such an archive does not also fire `attach.archive`. |
+| `attach.html` | 14 | An HTML or SVG document, which opens in a browser (credential forms, HTML smuggling). |
+| `attach.archive` | 10 | Any other archive (ZIP, RAR, 7z, …). |
+
+### Content
+
+| Rule ID | Weight | Fires when |
+|---------|------:|------------|
+| `content.urgency_keywords` | 4 | The subject or body contains a phrase from `urgency_keywords`. Deliberately weak: pressure language is common in legitimate mail. |
+
+### Enrichment
+
+Enrichment signals exist only when you run with `--enrich` and the connector has what it
+needs. They are tagged `[enrichment]` in every output, add to the offline score, and
+never replace it. Scaled signals multiply the weight by a 0–1 magnitude the connector
+computes.
+
+| Signal ID | Weight | Fires when |
+|-----------|------:|------------|
+| `enrichment.virustotal.detections` | 45 | VirusTotal engines flagged the URL, domain, or file hash. Scaled by the share of engines that returned a verdict and flagged it; timeouts and unsupported types are not counted. |
+| `enrichment.abuseipdb.confidence` | 25 | AbuseIPDB's abuse confidence for an IP is at least 25%. Scaled by the confidence. |
+| `enrichment.urlscan.malicious` | 20 | urlscan.io judged a prior scan malicious: in full when the scan was of the same URL, at half when it was of another page on the host. |
+| `enrichment.rdap.young_domain` | 18 | The registered domain is less than 30 days old. |
+| `enrichment.shodan.exposed` | 6 | An IP exposes remote-access, file-sharing, or database services. Scaled by how many (one third each, up to three). |
+
+Signals from several indicators with the same ID count once, at the strongest
+magnitude, with every indicator's evidence listed. Third-party connectors define their
+own `enrichment.*` IDs; see [`CONNECTORS.md`](CONNECTORS.md).
+
+## Configuration
+
+| Key | Type | Purpose |
+|-----|------|---------|
+| `weights` | mapping | Rule ID to weight, a number from 0 to 100. |
+| `bands` | list | `{max, verdict}` entries: integer limits, unique, ending at 100. |
+| `freemail_domains` | list | Free webmail providers, for `identity.freemail_role`. Recipient addresses on these domains are redacted without redacting the shared domain. |
+| `url_shorteners` | list | Shortener domains, for `url.shortener`. |
+| `credential_keywords` | list | Phrases matched in URL paths and queries. |
+| `urgency_keywords` | list | Pressure phrases matched in the subject and body. |
+| `role_keywords` | list | Organizational roles matched as whole words in display names. |
+| `brands` | mapping | Brand keyword to the domains that legitimately belong to it. An empty list removes a bundled brand. |
+| `org_domains` | list | Your own domains: lookalikes of them fire `url.lookalike`, hosts under them are redacted as internal by `--redact`, and they are never sent to enrichment services. |
+
+Matching is case-insensitive throughout.
+
+### Overriding the defaults
+
+Overrides are deep-merged over the bundled defaults, so you specify only what you change.
+Sources are applied in this order, later ones winning:
+
+1. the bundled `defaults.yaml`;
+2. the file named by `$PHISHBOWL_SCORING_CONFIG`;
+3. the file passed with `--scoring-config` (or `load_config(path=...)`);
+4. a dictionary passed as `load_config(overrides=...)`.
+
+Mappings (`weights`, `brands`) merge key by key; lists and scalars replace the default
+wholesale. To extend a list, copy the default list and add to it.
+
+```yaml
+# site-scoring.yaml
+org_domains:
+  - acme-corp.example            # your domains: lookalikes of these fire url.lookalike
+weights:
+  content.urgency_keywords: 0    # observe only
+  url.shortener: 10
+brands:
+  chase: []                      # remove a brand that matches too many senders
+  acme payroll: [acme-corp.example]
 ```
-
----
-
-## The config file
-
-Everything tunable lives in [`phishbowl/score/defaults.yaml`](../phishbowl/score/defaults.yaml):
-
-| Key | What it controls |
-|-----|------------------|
-| `weights` | Per-rule point values. Set a rule to `0` to effectively disable it. |
-| `bands` | Score→verdict thresholds (low-to-high; last `max` must be `100`). |
-| `freemail_domains` | Free webmail providers (fuels `identity.freemail_brand`). |
-| `url_shorteners` | Link-shortener domains (`url.shortener`). |
-| `credential_keywords` | Substrings in a URL path/query that suggest credential harvest. |
-| `urgency_keywords` | Pressure phrases in subject/body (`content.urgency_keywords`). |
-| `brands` | Brand keyword → its legitimate domains (fuels brand-mismatch + lookalike). |
-| `org_domains` | **Your** domains, so impersonations of *you* trip `url.lookalike`. |
-
-> **`defaults.yaml` is the bundled baseline.** Don't edit it for a deployment —
-> layer an override on top (next section) so you can pull upstream updates
-> cleanly.
-
----
-
-## Overriding the defaults
-
-Overrides are a **deep merge**: load the bundled defaults, then layer your file
-and/or a dict on top. You only specify the keys you want to change. Resolution
-order, lowest → highest precedence:
-
-1. bundled `defaults.yaml`
-2. the file at `$PHISHBOWL_SCORING_CONFIG` (if set)
-3. an explicit `path=` argument to `load_config()`
-4. an explicit `overrides=` dict argument to `load_config()`
-
-### From the CLI
-
-Pass a site override with ``--scoring-config``, or set the
-``PHISHBOWL_SCORING_CONFIG`` environment variable:
 
 ```bash
-phishbowl analyze suspicious.eml --scoring-config /etc/phishbowl/scoring.yaml --html report.html
-
-# equivalent:
-export PHISHBOWL_SCORING_CONFIG=/etc/phishbowl/scoring.yaml
-phishbowl analyze suspicious.eml --html report.html
+phishbowl analyze reported.eml --scoring-config site-scoring.yaml
 ```
-
-### From Python
 
 ```python
 from phishbowl.score import load_config
 
-# A site file layered over the bundled defaults…
-config = load_config(path="scoring.yaml")
-
-# …and/or a programmatic override dict (highest precedence):
-config = load_config(overrides={"weights": {"content.urgency_keywords": 6}})
+config = load_config(path="site-scoring.yaml", overrides={"weights": {"url.shortener": 8}})
 ```
 
-### Merge semantics (important)
+### Validation
 
-- **Mappings merge key-by-key.** Setting one weight leaves all other weights at
-  their defaults.
-- **Lists and scalars replace wholesale.** If you set `url_shorteners`, you get
-  *exactly* your list — not your list appended to the defaults. To extend a
-  list, copy the default and add to it.
+A configuration error stops the run with a message that names the problem, instead of
+silently changing verdicts:
 
-A minimal site override that bumps a weight, adds an org domain, and loosens a
-band:
+- an unknown top-level key;
+- an unknown rule ID under `weights`, reported with the closest valid ID (IDs starting
+  with `enrichment.` are accepted, since connectors define them);
+- a weight that is not a number from 0 to 100 (booleans are rejected);
+- a band whose `max` is not an integer, duplicate or out-of-range limits, a last band
+  that does not end at 100, or an empty verdict;
+- a scalar where a list belongs, an empty `weights:` or `brands:` key, or a file that is
+  not valid YAML.
 
-```yaml
-# scoring.yaml — only the keys you change
-weights:
-  content.urgency_keywords: 6      # nudge urgency a little higher
+## Tuning advice
 
-org_domains:
-  - acme-corp.com                   # catch typosquats of us
-  - acme.io
-
-bands:
-  - {max: 14, verdict: "Benign — no strong indicators"}
-  - {max: 39, verdict: "Low suspicion"}
-  - {max: 64, verdict: "Suspicious — analyst review"}
-  - {max: 84, verdict: "Likely malicious"}
-  - {max: 100, verdict: "Malicious — high confidence"}
-```
-
----
-
-## Rule catalog (offline)
-
-Default weights from [`defaults.yaml`](../phishbowl/score/defaults.yaml). All are
-`source: offline`. Weights were calibrated against the synthetic fixtures in
-`tests/fixtures/` — treat them as sane starting points and tune for your mail.
-
-### Authentication
-
-| Rule ID | Default | Fires when |
-|---------|:------:|------------|
-| `auth.spf_fail` | 15 | SPF check failed. |
-| `auth.spf_softfail` | 8 | SPF soft-failed (`~all`). |
-| `auth.dkim_fail` | 12 | DKIM signature verification failed. |
-| `auth.dkim_none` | 5 | No DKIM signature present. |
-| `auth.dmarc_fail` | 18 | DMARC failed — strongest single auth signal. |
-| `auth.results_missing` | 8 | No `Authentication-Results` header at all. |
-
-### Identity / spoofing
-
-| Rule ID | Default | Fires when |
-|---------|:------:|------------|
-| `identity.display_name_brand_mismatch` | 20 | From display name claims a brand whose domain it doesn't own. |
-| `identity.return_path_mismatch` | 10 | Return-Path domain ≠ From domain. |
-| `identity.reply_to_mismatch` | 12 | Reply-To domain ≠ From domain. |
-| `identity.sender_mismatch` | 8 | Envelope sender ≠ From. |
-| `identity.freemail_brand` | 12 | Freemail From while display/body claims a company. |
-| `identity.display_name_is_email` | 8 | The display name is itself an email address. |
-
-### Domain / URL
-
-| Rule ID | Default | Fires when |
-|---------|:------:|------------|
-| `url.punycode` | 12 | A `xn--` punycode domain is present. |
-| `url.idn_homograph` | 18 | Mixed-script / confusable (homograph) domain. |
-| `url.lookalike` | 18 | Domain is a near-miss (edit distance) of a brand/org domain. |
-| `url.anchor_href_mismatch` | 16 | Link anchor text domain ≠ the actual href domain. |
-| `url.raw_ip_host` | 12 | A URL uses a raw IP as its host. |
-| `url.shortener` | 6 | A known URL shortener is present. |
-| `url.credential_keywords` | 8 | Credential-harvest keywords in a URL path/query. |
-| `url.wrapped_divergence` | 10 | An unwrapped link points somewhere different-looking. |
-
-### Attachments
-
-| Rule ID | Default | Fires when |
-|---------|:------:|------------|
-| `attach.macro_capable` | 14 | Macro-capable Office doc (`.docm`/`.xlsm`/…). |
-| `attach.double_extension` | 22 | Double extension (`invoice.pdf.exe`). |
-| `attach.type_mismatch` | 16 | Declared content-type ≠ detected magic bytes. |
-| `attach.executable` | 22 | Executable / script / LNK / ISO / disk-image attachment. |
-| `attach.password_protected_archive` | 14 | Password-protected archive. |
-| `attach.archive` | 10 | Plain archive attachment (zip/rar/7z/…). |
-
-### Content (deliberately weak)
-
-| Rule ID | Default | Fires when |
-|---------|:------:|------------|
-| `content.urgency_keywords` | 4 | Urgency / financial-pressure phrases in subject, plaintext, or visible HTML text. Low weight on purpose — high false-positive rate, so it only ever *nudges*. |
-
-### Enrichment (opt-in, key-gated)
-
-These fire only when you run with `--enrich` and the relevant API key is set.
-Every one is tagged `[enrichment]` in all outputs and only ever **adds** on top
-of the offline base — the offline verdict is always computed independently
-(PRD §8 combination rule), so a zero-key run is unaffected. A signal marked
-*scaled* multiplies its base weight by a `0..1` factor the connector computes.
-
-| Rule ID | Default | Fires when |
-|---------|:------:|------------|
-| `enrichment.virustotal.detections` | 45 | VirusTotal engines flag the URL/domain/hash (*scaled* by detection ratio). |
-| `enrichment.urlscan.malicious` | 20 | urlscan judged a prior scan of the host malicious. |
-| `enrichment.abuseipdb.confidence` | 25 | AbuseIPDB abuse confidence over threshold for the sending IP (*scaled* by confidence). |
-| `enrichment.rdap.young_domain` | 18 | Domain registered < 30 days ago — a strong phishing signal. |
-| `enrichment.shodan.exposed` | 6 | Related IP exposes admin/remote-access services (contextual). |
-
-Disable any of them — like any rule — by setting its weight to `0`. See the
-[connector-authoring guide](CONNECTORS.md) to add your own.
-
----
-
-## Verdict bands (default)
-
-| Score | Verdict |
-|------:|---------|
-| 0–19 | Benign — no strong indicators |
-| 20–39 | Low suspicion |
-| 40–64 | Suspicious — analyst review |
-| 65–84 | Likely malicious |
-| 85–100 | Malicious — high confidence |
-
-Bands must be listed low-to-high and the last `max` must be `100` (the first band
-whose `max` the score is `<=` wins).
-
----
-
-## Tuning tips
-
-- **Add your own domains to `org_domains`** first — it's the single highest-value
-  change, turning lookalike detection toward the impersonations that target *you*.
-- **Prune the `brands` list** to the brands your users actually receive mail from.
-  `example` is included only so the synthetic fixtures exercise the no-fire path —
-  remove it in production.
-- **Don't chase a single number.** Real phishing trips several rules; weights are
-  designed so no single content signal can convict on its own.
-- **Disable a rule** by setting its weight to `0` rather than deleting it — that
-  keeps the merge predictable and the intent explicit.
-- **Re-validate after tuning** with `make test`, and eyeball a couple of your own
-  (synthetic!) samples to confirm the bands still feel right.
+- **Set `org_domains` first.** It points lookalike detection at the impersonations that
+  target you, keeps your domains out of enrichment queries, and lets `--redact` hide
+  your internal hosts.
+- **Prune `brands`** to the brands your users actually receive mail from. Keywords that
+  are also common words or names ("chase", "apple") can match unrelated senders.
+- **Observe before removing.** Set a noisy rule to 0 and watch its evidence for a while.
+- **Judge the combination.** Real phishing fires several rules; no single content signal
+  should decide a verdict.
+- **Re-run the tests** (`make test`) after changing the bundled defaults, and check a few
+  synthetic samples that resemble your mail.

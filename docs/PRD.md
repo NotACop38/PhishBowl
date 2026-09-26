@@ -1,6 +1,6 @@
 # PhishBowl — Product Requirements Document
 
-**Status:** v1 (living document; all phases incl. the Phase 7 stretch are built) · **Owner:** project lead · **Last updated:** 2026-06-12
+**Status:** v1 (living document; all phases incl. the Phase 7 stretch are built) · **Owner:** project lead · **Last updated:** 2026-09-26
 
 A self-hostable, vendor-neutral phishing triage tool. Drop in a suspicious email → parse it → extract and defang IOCs → enrich via OSINT → risk-score → produce an analyst-ready report, with optional SOAR playbook export.
 
@@ -62,8 +62,8 @@ Everything downstream consumes one internal contract: the `ParsedEmail` model (�
 ### 6.1 Ingest & parse
 - Accept `.eml` (RFC 822/MIME) and `.msg` (Outlook OLE) input by path or stdin.
 - Parse full headers, **preserving order and duplicates** (Received hops and others repeat — this matters for analysis).
-- Decode RFC 2047 encoded-words in subject and display names (a common obfuscation vector).
-- Extract authentication results — SPF, DKIM, DMARC — from `Authentication-Results` and `Received-SPF`, with result state and detail.
+- Decode RFC 2047 encoded-words in unstructured headers (e.g. Subject) and display names (a common obfuscation vector), and nowhere else: decoding a structured header would let a sender smuggle in forged values.
+- Extract authentication results — SPF, DKIM, DMARC — from `Authentication-Results` and `Received-SPF`, with result state and detail. Trust only results written by the topmost receiving server (its `authserv-id`); lower headers arrive with the message and can be forged.
 - Reconstruct the routing path from ordered `Received` hops (from / by / with / timestamp where parseable).
 - Separate display name from addr-spec for `From`, `Reply-To`, `Return-Path`, `Sender`, `To`, `Cc`.
 - Extract body parts (text + HTML), flagging which were present. Store raw HTML but **never render it**; extraction works on a parsed/sanitized representation.
@@ -75,7 +75,8 @@ Everything downstream consumes one internal contract: the `ParsedEmail` model (�
 - **Unwrap protective wrappers** as a pure string transformation (never by fetching):
   - Microsoft Safelinks (`*.safelinks.protection.outlook.com`) — decode the `url` param.
   - Proofpoint URL Defense v1/v2/v3.
-  - Note others (Mimecast, Barracuda, Cisco); where not reversible offline, keep wrapped form and mark "wrapped, unresolved."
+  - Barracuda Link Protection and Cisco Secure Email, which carry the destination in the link.
+  - Mimecast, which is not reversible offline: keep the wrapped form, mark it "wrapped, unresolved," and record the target domain when the link names it.
   - Always retain both the wrapped and unwrapped forms.
 - **Defang by default** in all human-facing output (`hxxps://evil[.]com`, `1[.]2[.]3[.]4`, `user[at]evil[.]com`). JSON output offers both defanged and (clearly labeled) raw for tool interchange.
 - Deduplicate and normalize indicators; preserve provenance (which header/part each came from).
@@ -87,7 +88,7 @@ See §8. Transparent, additive, YAML-defined weighted rules → numeric score �
 - **HTML** — the primary deliverable and the community hook. Self-contained single file (see §10).
 - **Rich CLI** — colorized terminal summary via `rich`: verdict banner, top reasons, IOC tables (defanged), auth results.
 - **JSON** — complete structured output for piping to other tools.
-- **PII redaction** — an opt-in mode that redacts recipient addresses, internal hostnames/IPs from Received hops, and other configured PII so reports can be shared externally.
+- **PII redaction** — an opt-in mode that redacts every recipient (address headers, delivery headers, `Received … for` clauses), internal hostnames and non-public IPs, and operator-named header fields with everything derived from them, so reports can be shared more safely. Selected-value removal, not anonymization.
 
 ### 6.5 Enrichment (layer, not dependency)
 See §9. Pluggable, key-gated connectors: VirusTotal, urlscan, AbuseIPDB, Shodan, WHOIS/RDAP. Caching, rate-limit handling, graceful offline degrade.
@@ -107,8 +108,9 @@ The single internal model everything downstream consumes. Pydantic v2 (validatio
 - **Subject**, **Date**.
 - **Body** — `text`, `html_raw` (stored, never rendered), `has_html`.
 - **Attachments** — list of `{filename, declared_type, detected_type, size, md5, sha1, sha256, flags[]}`.
-- **IOCs** — extracted + defanged collection with provenance.
-- **Anomalies** — structural notes from parsing.
+- **Anomalies** — notes from parsing. A *coverage gap* means some evidence was not analyzed and makes the assessment incomplete; an informational note does not.
+
+IOCs are not part of `ParsedEmail`: extraction produces them as a separate, defanged collection with provenance.
 
 Design notes: From/Return-Path/Reply-To must be trivially comparable (mismatch is a core scoring signal). Encoding/charset handling is centralized here so downstream never re-decodes.
 
@@ -118,7 +120,7 @@ Design notes: From/Return-Path/Reply-To must be trivially comparable (mismatch i
 
 **Combination rule.** Offline rules produce a base score that is always computed. Enrichment rules add on top, each tagged `[enrichment]`. No single missing connector can zero out a verdict; no signal is double-counted across detectors.
 
-**Signal catalog** *(weights below are starting points — calibrated against synthetic samples in Phase 3, not fixed now)*:
+**Signal catalog** *(default weights: hand-set heuristics checked against the synthetic fixtures, not calibrated against real mail; the authoritative list is `docs/SCORING.md`)*:
 
 | Signal | Source | Starting weight |
 |---|---|---|
@@ -130,21 +132,24 @@ Design notes: From/Return-Path/Reply-To must be trivially comparable (mismatch i
 | Return-Path domain ≠ From domain | offline | 10 |
 | Reply-To domain ≠ From domain | offline | 12 |
 | Envelope sender ≠ From | offline | 8 |
-| Freemail From while body/display claims a company | offline | 12 |
+| Freemail sender presenting as an organizational role ("IT Support", "Payroll") | offline | 12 |
+| More than one From header | offline | 20 |
 | Display-name is itself an email address | offline | 8 |
 | Punycode / `xn--` domain present | offline | 12 |
 | IDN homograph / mixed-script confusable | offline | 18 |
-| Lookalike (edit distance) to impersonation list / configured org domains | offline | 18 |
+| Lookalike of the impersonation list / configured org domains (confusable letters, embedded name, near-miss spelling) | offline | 18 |
 | URL anchor text domain ≠ actual href domain | offline | 16 |
 | Raw IP as URL host | offline | 12 |
 | URL shortener present | offline | 6 |
-| Credential-harvest keywords in URL path (login/verify/secure/account) | offline | 8 |
+| Credential-harvest keywords in URL path or query (login/verify/secure/account) | offline | 8 |
 | Wrapped link unwrapped to a different-looking domain | offline | 10 |
 | Macro-capable office doc (.docm/.xlsm/…) | offline | 14 |
 | Double extension (invoice.pdf.exe) | offline | 22 |
 | Declared content-type ≠ detected magic bytes | offline | 16 |
 | Executable / script / LNK / ISO / disk image attachment | offline | 22 |
 | Password-protected archive | offline | 14 |
+| HTML or SVG document attachment | offline | 14 |
+| Other archive attachment | offline | 10 |
 | Urgency / financial-pressure keywords | offline | 4 *(weak signal — deliberately low; high false-positive rate)* |
 | VirusTotal: N engines flag URL/domain/hash | enrichment | scaled by detection ratio |
 | urlscan: malicious / known-phishing verdict | enrichment | 20 |
@@ -152,7 +157,7 @@ Design notes: From/Return-Path/Reply-To must be trivially comparable (mismatch i
 | RDAP/WHOIS: domain age < 30 days | enrichment | 18 *(strong phishing signal)* |
 | Shodan: suspicious exposed services on related IP | enrichment | 6 *(contextual)* |
 
-**Verdict bands** *(provisional, tuned in Phase 3):*
+**Verdict bands** *(defaults; each band also has a fixed severity name — `minimal`, `low`, `elevated`, `high`, `critical`)*:
 
 | Score | Verdict |
 |---|---|
@@ -168,17 +173,17 @@ This is the community contribution surface, so the *interface* is designed befor
 
 **Discovery.** Support both an in-repo registry (decorator-based) and Python entry-points (`phishbowl.connectors` group), so a third party can ship a pip package that auto-registers without forking.
 
-**Connector interface (intended shape):**
-- `name`, `version`, `supported_ioc_types` (which of ip/domain/url/hash/email it enriches).
-- `requires_api_key: bool`, plus a config schema.
-- `async def enrich(indicator, ctx) -> EnrichmentResult`.
-- Each connector owns its own rate limiting, cache key, and normalization. It returns a **normalized** `EnrichmentResult` (verdict, signal contributions, retained raw response, reference links) so the scorer needs no per-vendor logic.
+**Connector interface (as built; see `docs/CONNECTORS.md`):**
+- `name`, `version`, `supported_ioc_types` (which of ipv4/ipv6/domain/url/hash it enriches; email addresses are never sent).
+- `requires_api_key: bool` and `api_key_env`, the environment variable holding the key.
+- Declared `allowed_hosts`, `cache_ttl`, `rate_limit_per_min`, and `max_indicators`, enforced by the orchestrator; an optional `prepare(indicator)` maps an indicator to the form the vendor is queried with.
+- `async def enrich(indicator, ctx) -> EnrichmentResult`, returning a **normalized** result (verdict, signal contributions, retained raw response, reference links) so the scorer needs no per-vendor logic.
 
 **Cross-cutting connector requirements:**
-- **Caching** — on-disk, keyed by `(connector, ioc_type, value)`, TTL per connector, so repeat runs and the demo are fast and don't burn quota.
+- **Caching** — on-disk, keyed by `(connector, version, ioc_type, value)`, TTL per connector, so repeat runs and the demo are fast and don't burn quota.
 - **Rate limits** — respect documented free-tier limits (e.g., VT public ≈ 4 req/min), with backoff and a global concurrency cap.
 - **Graceful degrade** — missing key → connector skipped with a clear report note ("VirusTotal: skipped, no API key"); network/API error → soft-fail with note, never crash the run.
-- **Allowlisted egress** — connectors may only reach their vendor's documented API base URL. They must never be coerced into fetching an arbitrary URL taken from the email (SSRF guard).
+- **Allowlisted egress** — connectors may only reach their vendor's documented API hosts, over HTTPS, with every redirect re-checked. They must never be coerced into fetching an arbitrary URL taken from the email (SSRF guard).
 
 **urlscan operational-security note.** urlscan is the one connector that causes a URL to be *visited* (on urlscan's infrastructure, not ours) — so it is never part of the offline default pipeline and is strictly **operator opt-in**. Submissions must default to **private** scans, but private is not a safety guarantee: it only hides the *result page*. The request to the (possibly attacker-controlled) host still happens — which can tip off an attacker that the email was detected — and phishing URLs often carry a per-victim token, so submitting the raw URL can leak victim-specific data to a third party. Prefer passive lookups/searches where they answer the question; treat active submission as a deliberate, per-run choice. A public scan compounds both risks; if we ever expose a public option it must be explicit and carry a warning.
 
@@ -198,8 +203,8 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 ## 11. Cross-cutting concerns
 
 - **Secrets** — API keys via env vars / a gitignored config file. Never logged, never written into the report or JSON, redacted from any debug output. Ship `.env.example`.
-- **Config** — YAML for scoring weights, verdict bands, connector toggles, org domains (for lookalike detection), and redaction rules. Sensible zero-config defaults.
-- **PII redaction** — opt-in; clearly defines and redacts recipients, internal hostnames/IPs, and configured fields.
+- **Config** — YAML for scoring weights, verdict bands, keyword and brand lists, and org domains (for lookalike detection, internal-host redaction, and enrichment exclusion), validated strictly. Connector selection and redaction are per-run options. Sensible zero-config defaults.
+- **PII redaction** — opt-in; clearly defines and redacts recipients, internal hostnames/IPs, and operator-named fields (§6.4).
 - **Logging** — quiet by default and secret-safe: API-key values are scrubbed
   even from the HTTP libraries' debug logs and connector crash tracebacks.
   Parse-layer issues surface as report *anomalies* (visible to the analyst)
@@ -250,14 +255,16 @@ The HTML report renders adversarial content — subject, sender, body, and URLs 
 - Multi-email / mailbox batch triage.
 - Case-management features (we export to those systems, we don't become one).
 
-## Critical review revision (2026-09-12)
+## Assessment qualification
 
-This maintenance revision supersedes any stronger wording above about complete
-verdicts, confidence or sharing safety. The product is an offline evidence and
-heuristic triage aid. Report/JSON/SOAR consumers receive `analysis_complete` and
-an assessment note; any recorded parse/analysis anomaly makes the assessment
-incomplete. Authentication header claims are not independently verified. Scores
-are not calibrated against real mail and are not probabilities.
+This section supersedes any stronger wording above about complete verdicts,
+confidence, or sharing safety. The product is an offline evidence and heuristic
+triage aid. Report, JSON, and SOAR consumers receive `analysis_complete` and an
+assessment note. A coverage gap (evidence that was not analyzed) makes the
+assessment incomplete: the verdict is suffixed `(incomplete analysis)` and the CLI
+exits with status 3 unless a `--fail-on` threshold was reached. Informational notes
+do not. Authentication header claims are not independently verified. Scores are not
+calibrated against real mail and are not probabilities.
 
 Resource budgets, redaction limits and deployment assumptions are documented in
 SECURITY.md. MIME construction is bounded before node allocation; all ordinary

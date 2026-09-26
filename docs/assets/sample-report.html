@@ -2,6 +2,7 @@
 <html lang="en" class="sev-critical">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>PhishBowl — crafted_malicious.eml</title>
@@ -18,7 +19,7 @@
     --accent: #5ed3c9;
   }
   /* Severity accent — drives the verdict banner and score. */
-  .sev-benign  { --sev: #4cae8a; --sev-soft: rgba(76,174,138,.14); }
+  .sev-minimal { --sev: #6f9fb4; --sev-soft: rgba(111,159,180,.13); }
   .sev-low     { --sev: #86b54a; --sev-soft: rgba(134,181,74,.14); }
   .sev-elevated{ --sev: #d8a52a; --sev-soft: rgba(216,165,42,.15); }
   .sev-high    { --sev: #e08a3c; --sev-soft: rgba(224,138,60,.16); }
@@ -245,8 +246,8 @@
     .badges .badge { border-color: #999; }
     table { break-inside: auto; }
     tr { break-inside: avoid; page-break-inside: avoid; }
-    details.headers { open: true; }
-    details.headers[open] summary { display: none; }
+    details.headers::details-content { content-visibility: visible; }
+    details.headers summary { display: none; }
     .preview { max-height: none; overflow: visible; }
     footer.foot { break-before: avoid; }
   }
@@ -264,7 +265,7 @@
     font-size: 12.5px; }
   .hdr-row:last-child { border-bottom: none; }
   .hdr-name { font-family: var(--font-mono); color: var(--muted); font-weight: 600; }
-  .hdr-val { font-family: var(--font-mono); color: var(--ink); word-break: break-word; }
+  .hdr-val { font-family: var(--font-mono); color: var(--text); word-break: break-word; }
   .sending-ip { font-family: var(--font-mono); font-size: 13px; margin: 0 0 14px; }
   .sending-ip b { color: var(--accent); }
 </style>
@@ -282,7 +283,7 @@
         <b>source:</b> crafted_malicious.eml ·
         <b>format:</b> eml ·
         <b>parser:</b> v0.1.0 ·
-        <b>analyzed:</b> 2026-09-12T13:18:19.761356+00:00
+        <b>analyzed:</b> 2026-09-26T04:44:43.760530+00:00
       </div>
     </div>
     <div class="badges">
@@ -305,7 +306,7 @@
       <div class="meter-scale"><span>0 · few signals</span><span>50</span><span>100 · many signals</span></div>
       <div class="vsub">
         Offline score <code>100</code> from
-        <code>13</code> triggered rules
+        <code>12</code> triggered rules
         over <code>19</code> extracted indicators.
         Every point traces to a named reason below.
       </div>
@@ -314,11 +315,12 @@
 
 
 
+
   <div class="grid">
 
     <div class="card span">
       <div class="card-h"><h2>Score breakdown</h2>
-        <span class="count">13 rules fired</span></div>
+        <span class="count">12 rules fired</span></div>
       <div class="card-b flush">
         <table>
           <thead><tr><th>Reason</th><th>Evidence</th><th>Weight</th><th>Source</th></tr></thead>
@@ -334,13 +336,6 @@
               <td><span class="name">DMARC authentication failed</span>
                   <div class="prov">auth.dmarc_fail</div></td>
               <td class="mono">dmarc=fail — (p=reject) header.from=example.com</td>
-              <td><span class="wt">+18</span></td>
-              <td class="tagsrc">offline</td>
-            </tr>
-            <tr>
-              <td><span class="name">Lookalike domain (edit distance) to a known brand/org</span>
-                  <div class="prov">url.lookalike</div></td>
-              <td class="mono">examp1e[.]com is a lookalike of example[.]com (edit distance 1)</td>
               <td><span class="wt">+18</span></td>
               <td class="tagsrc">offline</td>
             </tr>
@@ -368,14 +363,14 @@
             <tr>
               <td><span class="name">Punycode / xn-- domain present</span>
                   <div class="prov">url.punycode</div></td>
-              <td class="mono">punycode/xn-- domain present: xn--mple-0na[.]com</td>
+              <td class="mono">punycode/xn-- domain present: xn--mple-0na[.]com (màple[.]com)</td>
               <td><span class="wt">+12</span></td>
               <td class="tagsrc">offline</td>
             </tr>
             <tr>
               <td><span class="name">URL uses a raw IP as its host</span>
                   <div class="prov">url.raw_ip_host</div></td>
-              <td class="mono">URL uses a raw IP host: hxxp://198[[.]]51[[.]]100[[.]]99/account/login</td>
+              <td class="mono">URL uses a raw IP host: hxxp://198[.]51[.]100[.]99/account/login</td>
               <td><span class="wt">+12</span></td>
               <td class="tagsrc">offline</td>
             </tr>
@@ -394,16 +389,16 @@
               <td class="tagsrc">offline</td>
             </tr>
             <tr>
-              <td><span class="name">Credential-harvest keywords in URL path</span>
+              <td><span class="name">Credential-harvest keywords in a URL path or query</span>
                   <div class="prov">url.credential_keywords</div></td>
-              <td class="mono">credential-harvest keywords in URL path (account, login): hxxp://198[[.]]51[[.]]100[[.]]99/account/login<br>credential-harvest keywords in URL path (account, verify): hxxps://examp1e[[.]]com/account/verify<br>credential-harvest keywords in URL path (secure): hxxp://xn--mple-0na[[.]]com/secure<br>credential-harvest keywords in URL path (account): hxxps://www[[.]]example[[.]]com/account</td>
+              <td class="mono">credential-harvest keywords in URL path or query (account, login): hxxp://198[.]51[.]100[.]99/account/login<br>credential-harvest keywords in URL path or query (account, verify): hxxps://examp1e[.]com/account/verify<br>credential-harvest keywords in URL path or query (secure): hxxp://xn--mple-0na[.]com/secure<br>credential-harvest keywords in URL path or query (account): hxxps://www[.]example[.]com/account</td>
               <td><span class="wt">+8</span></td>
               <td class="tagsrc">offline</td>
             </tr>
             <tr>
               <td><span class="name">URL shortener present</span>
                   <div class="prov">url.shortener</div></td>
-              <td class="mono">URL shortener hides destination: hxxps://bit[[.]]ly/synthetic-test</td>
+              <td class="mono">URL shortener hides destination: hxxps://bit[.]ly/synthetic-test</td>
               <td><span class="wt">+6</span></td>
               <td class="tagsrc">offline</td>
             </tr>
@@ -477,25 +472,25 @@
           <tbody>
             <tr>
               <td class="mono">hxxp://198[.]51[.]100[.]99/account/login</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
             <tr>
               <td class="mono">hxxps://examp1e[.]com/account/verify</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
             <tr>
               <td class="mono">hxxp://xn--mple-0na[.]com/secure</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
             <tr>
               <td class="mono">hxxps://bit[.]ly/synthetic-test</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
@@ -541,19 +536,19 @@
             </tr>
             <tr>
               <td class="mono">examp1e[.]com</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
             <tr>
               <td class="mono">xn--mple-0na[.]com</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
             <tr>
               <td class="mono">bit[.]ly</td>
-              <td class="prov">body:text, body:html</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
@@ -615,7 +610,7 @@
           <tbody>
             <tr>
               <td class="mono">198[.]51[.]100[.]99</td>
-              <td class="prov">body:text</td>
+              <td class="prov">body:html, body:text</td>
               <td>
               </td>
             </tr>
@@ -630,7 +625,7 @@
           <div class="hop">
             <div class="idx">HOP 0</div>
             <div class="ln">
- by <b>mx.example.org</b> · 2026-06-03T03:33:09+00:00            </div>
+from <b>unknown</b> by <b>mx[.]example[.]org</b> with ESMTP · 2026-06-03T03:33:09+00:00            </div>
             <div class="raw">from unknown (unknown [203[.]0[.]113[.]99]) by mx.example.org (Postfix) with ESMTP id MAL999 for &lt;analyst[at]example[.]org&gt;; Wed, 03 Jun 2026 03:33:09 +0000 (UTC)</div>
           </div>
       </div>
@@ -703,7 +698,7 @@
     <div class="card span">
       <div class="card-h"><h2>Body preview</h2><span class="count">plaintext · defanged · never rendered</span></div>
       <div class="card-b">
-<div class="preview">This is a SYNTHETIC, obviously-fake phishing sample for PhishBowl&#39;s test suite.
+<div class="preview">This is a SYNTHETIC, obviously-fake phishing sample for Phishbowl&#39;s test suite.
 All indicators use reserved example-only values (RFC 2606 / RFC 5737) or
 obviously-fake typosquat markers, and nothing here is ever fetched.
 
