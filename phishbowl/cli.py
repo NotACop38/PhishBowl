@@ -48,6 +48,8 @@ from phishbowl.score import load_config
 app = typer.Typer(
     add_completion=False,
     no_args_is_help=True,
+    # Help text is plain text: "phishbowl[web]" must not be read as Rich markup.
+    rich_markup_mode=None,
 )
 
 # Exit statuses of ``analyze`` (documented in the module docstring and README).
@@ -317,7 +319,7 @@ def analyze(
         typer.Option(
             "--quiet",
             "-q",
-            help="Suppress the rich CLI summary (still writes --html/--json/etc.).",
+            help="Print no summary or status messages. Outputs are still written.",
         ),
     ] = False,
     fail_on: Annotated[
@@ -393,17 +395,17 @@ def analyze(
         enrichment_settings=enrichment_settings,
     )
 
-    # JSON to stdout suppresses the Rich summary unless the operator also asked
-    # for HTML/SOAR (those still need a place to acknowledge writes).
+    # Standard output belongs to the JSON when it is written there, so the
+    # summary and the write confirmations stay out of it; --quiet drops both.
     json_to_stdout = json_out == "-"
-    show_cli = not quiet and not json_to_stdout
-    if show_cli:
+    announce = not quiet and not json_to_stdout
+    if announce:
         render_cli(view, Console(highlight=False))
 
     written = True
     if html is not None:
         if _write_output(html, render_html(view), "the HTML report"):
-            if not json_to_stdout:
+            if announce:
                 typer.echo(f"phishbowl: wrote HTML report to {html}")
         else:
             written = False
@@ -414,12 +416,13 @@ def analyze(
             if not payload.endswith("\n"):
                 sys.stdout.write("\n")
         elif _write_output(Path(json_out), payload, "the JSON result"):
-            typer.echo(f"phishbowl: wrote JSON result to {json_out}")
+            if announce:
+                typer.echo(f"phishbowl: wrote JSON result to {json_out}")
         else:
             written = False
     if xsoar is not None:
         if _write_output(xsoar, render_xsoar(view), "the XSOAR playbook draft"):
-            if not json_to_stdout:
+            if announce:
                 typer.echo(
                     f"phishbowl: wrote XSOAR playbook DRAFT to {xsoar} "
                     "(manual tasks only — review before running; PhishBowl never acts)"
@@ -428,7 +431,7 @@ def analyze(
             written = False
     if sentinel is not None:
         if _write_output(sentinel, render_sentinel(view), "the Sentinel playbook draft"):
-            if not json_to_stdout:
+            if announce:
                 typer.echo(
                     f"phishbowl: wrote Microsoft Sentinel playbook DRAFT to {sentinel} "
                     "(ships disabled — review and enable manually; PhishBowl never acts)"

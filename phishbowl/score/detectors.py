@@ -407,7 +407,7 @@ def punycode(ctx: ScoringContext) -> list[str]:
         if "xn--" not in d or d in ctx.homographs:
             continue  # a homograph is scored once, by url.idn_homograph
         decoded = ".".join(decode_label(label) for label in d.split("."))
-        hits.append(f"punycode/xn-- domain present: {defang_domain(d)} ({decoded})")
+        hits.append(f"punycode/xn-- domain present: {defang_domain(d)} ({defang_domain(decoded)})")
     return list(dict.fromkeys(hits))
 
 
@@ -523,8 +523,9 @@ def credential_keywords(ctx: ScoringContext) -> list[str]:
         haystack = f"{parts.path}?{parts.query}".casefold()
         found = sorted({kw for kw in ctx.config.credential_keywords if kw in haystack})
         if found:
+            keywords = ", ".join(found)
             hits.append(
-                f"credential-harvest keywords in URL path ({', '.join(found)}): {ioc.defanged}"
+                f"credential-harvest keywords in URL path or query ({keywords}): {ioc.defanged}"
             )
     return list(dict.fromkeys(hits))
 
@@ -700,7 +701,7 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
     ),
     DetectorSpec(
         "url.lookalike",
-        "Lookalike domain (edit distance) to a known brand/org",
+        "Lookalike of a known brand or org domain",
         RuleSource.OFFLINE,
         lookalike,
     ),
@@ -716,7 +717,7 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
     DetectorSpec("url.shortener", "URL shortener present", RuleSource.OFFLINE, shortener),
     DetectorSpec(
         "url.credential_keywords",
-        "Credential-harvest keywords in URL path",
+        "Credential-harvest keywords in a URL path or query",
         RuleSource.OFFLINE,
         credential_keywords,
     ),

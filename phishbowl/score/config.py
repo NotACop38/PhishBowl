@@ -73,9 +73,8 @@ class ScoringConfig:
     def weight(self, rule_id: str) -> float:
         """Weight for ``rule_id``; ``0.0`` if the rule isn't in the config.
 
-        A rule absent from ``weights`` is effectively disabled (it can fire but
-        contributes nothing), which is the intended way to switch a rule off via
-        config without code changes.
+        A rule weighted 0 still fires and reports its evidence, at +0: that is
+        how a rule is switched off without hiding what it observed.
         """
         return float(self.weights.get(rule_id, 0.0))
 

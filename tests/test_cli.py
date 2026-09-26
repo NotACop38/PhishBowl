@@ -287,3 +287,13 @@ def test_serve_brackets_ipv6_hosts_and_warns_off_loopback(
     exposed = runner.invoke(app, ["serve", "--host", "0.0.0.0", "--port", "9000"])
     assert "http://0.0.0.0:9000" in exposed.output
     assert "no authentication" in exposed.output
+
+
+def test_inner_explains_when_the_message_is_too_large_to_walk(tmp_path: Path) -> None:
+    oversized = tmp_path / "wide.eml"
+    oversized.write_bytes(
+        b"From: sender@example.com\r\nContent-Type: text/plain\r\n\r\n" + b"a" * (70 * 1024)
+    )
+    result = runner.invoke(app, ["analyze", "--inner", str(oversized)])
+    assert result.exit_code == 2
+    assert "attached emails could not be listed" in result.output

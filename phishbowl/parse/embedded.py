@@ -14,14 +14,17 @@ the result to :func:`~phishbowl.parse.parse_bytes`.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from email.message import Message
 from pathlib import Path
 
 from .attachments import OLE_MAGIC, iter_parts, message_part_bytes
 from .charset import decode_mime_words
-from .mime import bounded_message
+from .mime import MIMEBudgetError, bounded_message
 from .msg import embedded_emails as msg_embedded_emails
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -43,6 +46,10 @@ def list_embedded_emails(data: bytes) -> list[EmbeddedEmail]:
     files. Results are in document order, 0-indexed, and each ``data`` blob is
     suitable for :func:`~phishbowl.parse.parse_bytes` (its filename's suffix
     selects the parser).
+
+    Raises :class:`~phishbowl.parse.mime.MIMEBudgetError` (a ``ValueError``)
+    when the outer message is too large or deep to walk, so a caller can say
+    why no attachment was found instead of reporting that there is none.
     """
     if data.startswith(OLE_MAGIC):
         return [
@@ -52,7 +59,10 @@ def list_embedded_emails(data: bytes) -> list[EmbeddedEmail]:
 
     try:
         msg = bounded_message(data)
+    except MIMEBudgetError as exc:
+        raise MIMEBudgetError(f"attached emails could not be listed: {exc}") from exc
     except Exception:
+        log.warning("could not parse the message to list its attached emails", exc_info=True)
         return []
 
     found: list[EmbeddedEmail] = []
@@ -60,6 +70,7 @@ def list_embedded_emails(data: bytes) -> list[EmbeddedEmail]:
         try:
             embedded = _maybe_embedded(part)
         except Exception:  # one unreadable part never hides the others
+            log.warning("skipped an attached email that could not be read", exc_info=True)
             continue
         if embedded is None:
             continue

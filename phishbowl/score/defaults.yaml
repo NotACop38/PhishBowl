@@ -92,7 +92,7 @@ weights:
   # offline verdict is always computed independently of every one of these, and
   # setting any to 0 disables that enrichment signal without touching code.
   enrichment.virustotal.detections: 45    # scaled by detection ratio
-  enrichment.urlscan.malicious: 20        # urlscan judged a prior scan malicious
+  enrichment.urlscan.malicious: 20        # a prior scan judged malicious (host-only match: half)
   enrichment.abuseipdb.confidence: 25     # scaled by abuse-confidence fraction
   enrichment.rdap.young_domain: 18        # domain registered < 30 days ago (strong)
   enrichment.shodan.exposed: 6            # exposed services on a related IP (contextual)
@@ -106,8 +106,10 @@ bands:
   - {max: 84, verdict: "High suspicion"}
   - {max: 100, verdict: "Very high suspicion"}
 
-# Free webmail providers. A "brand" sender using one of these is a classic
-# impersonation tell (identity.freemail_brand). Case-insensitive.
+# Free webmail providers. A sender on one of these presenting as an
+# organizational role fires identity.freemail_role; with --redact, recipient
+# addresses here are hidden but the shared domain is not (it identifies no one).
+# Case-insensitive.
 freemail_domains:
   - gmail.com
   - googlemail.com
@@ -242,8 +244,9 @@ brands:
   wells fargo: [wellsfargo.com]
   bank of america: [bankofamerica.com, bofa.com]
 
-# Operator-configured organization domains for lookalike detection (PRD §12 —
-# ships day one). Empty by default; a deployment adds the domains it expects to
-# be impersonated (its own and its key vendors') so near-miss typosquats of them
-# fire url.lookalike. Example: [acme-corp.com, acme.io]
+# Operator-configured organization domains (PRD §12). Empty by default; a
+# deployment adds its own domains (and its key vendors') so that near-miss
+# typosquats of them fire url.lookalike, hosts under them are redacted as
+# internal topology by --redact, and they are never sent to enrichment vendors.
+# Example: [acme-corp.com, acme.io]
 org_domains: []

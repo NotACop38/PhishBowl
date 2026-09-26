@@ -640,7 +640,7 @@ def test_punycode_evidence_shows_the_decoded_name() -> None:
         f.id: f for f in _score_raw(_html_eml('<a href="https://xn--mnchen-3ya.de/">x</a>')).fired
     }
     assert fired["url.punycode"].evidence == [
-        "punycode/xn-- domain present: xn--mnchen-3ya[.]de (münchen.de)"
+        "punycode/xn-- domain present: xn--mnchen-3ya[.]de (münchen[.]de)"
     ]
 
 
