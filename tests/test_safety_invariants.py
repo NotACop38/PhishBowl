@@ -1,10 +1,10 @@
-"""End-to-end safety-invariant tests for the offline core (CLAUDE.md / PRD §4).
+"""End-to-end safety-invariant tests for the offline core (AGENTS.md / PRD §4).
 
 These are the load-bearing *defensive* guarantees, asserted across the whole
 offline pipeline — parse → extract → score → report — on every bundled fixture:
 
 1. **No egress.** Running the pipeline opens no outbound socket and makes no
-   SMTP connection. Phishbowl never sends, never calls back the email's
+   SMTP connection. PhishBowl never sends, never calls back the email's
    infrastructure, and the offline core never reaches the network.
 2. **Inert reports.** The generated HTML report contains no remote URL and no
    remotely-loading / executable markup, so opening a report about a phishing
@@ -257,7 +257,7 @@ def test_report_has_no_remote_or_executable_markup(fixture: Path) -> None:
 # the environment — nothing in a synthetic email would ever contain it.
 _SECRET = "phishbowl-sentinel-secret-DEADBEEF-do-not-leak-1337"
 
-# The connector key names Phishbowl recognizes (.env.example), plus a generic
+# The connector key names PhishBowl recognizes (.env.example), plus a generic
 # one, all seeded with the sentinel. The offline core reads none of them.
 _SECRET_ENV = {
     "VIRUSTOTAL_API_KEY": _SECRET + "-vt",

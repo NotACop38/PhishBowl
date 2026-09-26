@@ -21,7 +21,7 @@ HTTP — no live calls ever leave the process**:
   signal, defanged.
 
 Crafted inputs use reserved example-only values (RFC 2606 / RFC 5737) and
-obviously-fake markers — never a real sample (CLAUDE.md).
+obviously-fake markers — never a real sample (AGENTS.md).
 """
 
 from __future__ import annotations

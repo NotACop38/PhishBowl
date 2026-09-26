@@ -23,7 +23,7 @@ ENV/
 .mypy_cache/
 .cache/
 
-# Phishbowl local runtime artifacts (on-disk enrichment cache, generated reports)
+# PhishBowl local runtime artifacts (on-disk enrichment cache, generated reports)
 .phishbowl_cache/
 *.report.html
 

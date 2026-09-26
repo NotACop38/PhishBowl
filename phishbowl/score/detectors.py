@@ -139,17 +139,6 @@ def _strip_tags(html: str) -> str:
     return _WS_RE.sub(" ", inspect_html(html).text).strip()
 
 
-def _dedup(items: list[str]) -> list[str]:
-    """Order-preserving de-duplication of evidence strings."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for it in items:
-        if it not in seen:
-            seen.add(it)
-            out.append(it)
-    return out
-
-
 # --- scoring context --------------------------------------------------------
 
 
@@ -419,11 +408,11 @@ def punycode(ctx: ScoringContext) -> list[str]:
             continue  # a homograph is scored once, by url.idn_homograph
         decoded = ".".join(decode_label(label) for label in d.split("."))
         hits.append(f"punycode/xn-- domain present: {defang_domain(d)} ({decoded})")
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def idn_homograph(ctx: ScoringContext) -> list[str]:
-    return _dedup(list(ctx.homographs.values()))
+    return list(dict.fromkeys(list(ctx.homographs.values())))
 
 
 # Brand/org labels shorter than this are too short to compare meaningfully
@@ -481,7 +470,7 @@ def lookalike(ctx: ScoringContext) -> list[str]:
                     f"{defang_domain(reg)} is a lookalike of {defang_domain(target)} ({reason})"
                 )
                 break
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
@@ -500,7 +489,7 @@ def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
                 f"link text shows {defang_domain(text_host)} but href points to "
                 f"{defang_domain(href_host)}"
             )
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def raw_ip_host(ctx: ScoringContext) -> list[str]:
@@ -509,7 +498,7 @@ def raw_ip_host(ctx: ScoringContext) -> list[str]:
         host = url_host(ioc.value)
         if host and is_ip_literal(host):
             hits.append(f"URL uses a raw IP host: {ioc.defanged}")
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def shortener(ctx: ScoringContext) -> list[str]:
@@ -518,7 +507,7 @@ def shortener(ctx: ScoringContext) -> list[str]:
         host = url_host(ioc.value)
         if host and registrable_domain(host) in ctx.config.url_shorteners:
             hits.append(f"URL shortener hides destination: {ioc.defanged}")
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def credential_keywords(ctx: ScoringContext) -> list[str]:
@@ -537,7 +526,7 @@ def credential_keywords(ctx: ScoringContext) -> list[str]:
             hits.append(
                 f"credential-harvest keywords in URL path ({', '.join(found)}): {ioc.defanged}"
             )
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def wrapped_divergence(ctx: ScoringContext) -> list[str]:
@@ -558,7 +547,7 @@ def wrapped_divergence(ctx: ScoringContext) -> list[str]:
                 f"{ioc.wrapper} link unwraps to {defang_domain(reg)} "
                 f"(unrelated to sender {defang_domain(from_reg)})"
             )
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 # --- attachment detectors (PRD §8) -----------------------------------------

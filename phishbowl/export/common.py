@@ -19,7 +19,7 @@ Two channels, by design — the same dual-channel contract the JSON report uses:
 
 **Draft / export only.** Nothing here (or in the artifacts it feeds) executes,
 sends, fetches, or remediates. :data:`DRAFT_DISCLAIMER` is stamped into every
-export; Phishbowl proposes a human-review playbook and never acts (CLAUDE.md).
+export; PhishBowl proposes a human-review playbook and never acts (AGENTS.md).
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ if TYPE_CHECKING:
 _SCHEMA_DIR = Path(__file__).with_name("schemas")
 
 # Stamped verbatim into every exported artifact. The load-bearing safety framing
-# (PRD §4, CLAUDE.md): an export is a *draft* a human reviews and runs — Phishbowl
+# (PRD §4, AGENTS.md): an export is a *draft* a human reviews and runs — PhishBowl
 # itself never quarantines, blocks, sends, detonates, fetches, or acts.
 DRAFT_DISCLAIMER = (
-    "DRAFT EXPORT — Phishbowl produced this triage verdict and a response-playbook "
+    "DRAFT EXPORT — PhishBowl produced this triage verdict and a response-playbook "
     "draft only. It never quarantines, blocks, sends, replies, detonates, fetches the "
     "email's URLs, or auto-remediates. Every step in this artifact is inert and must be "
     "reviewed, and explicitly executed, by a human analyst in your SOAR platform."
@@ -209,7 +209,7 @@ class TriageCore:
                 lines.append(f"  - {value}")
             hidden = len(values) - min(len(values), _MAX_LINES_PER_BUCKET)
             if hidden > 0:
-                lines.append(f"  … and {hidden} more (see the full Phishbowl report)")
+                lines.append(f"  … and {hidden} more (see the full PhishBowl report)")
         return "\n".join(lines) if lines else "No indicators were extracted."
 
     def reason_block(self) -> str:
@@ -232,13 +232,13 @@ class TriageCore:
     def recommended_review(self) -> list[str]:
         """The draft, analyst-driven review steps (proposals — never executed)."""
         return [
-            "Confirm the Phishbowl verdict and score against your environment's context.",
+            "Confirm the PhishBowl verdict and score against your environment's context.",
             "Review every extracted indicator (shown defanged) before acting on it.",
             "Check sender authentication (SPF/DKIM/DMARC) and the From/Reply-To/Return-Path"
             " alignment for spoofing.",
             "If warranted, an analyst may MANUALLY block the sender, domains, URLs, or file"
             " hashes; search the mailbox for other recipients; and raise an incident."
-            " Phishbowl performs none of these — it only proposes them.",
+            " PhishBowl performs none of these — it only proposes them.",
             "Treat this playbook as a starting draft: tailor the steps to your runbooks"
             " before enabling or running anything.",
         ]

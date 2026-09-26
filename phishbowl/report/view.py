@@ -396,7 +396,7 @@ def _body(parsed: ParsedEmail, redactor: Redactor) -> tuple[str | None, str | No
         return (text or None), note
     if parsed.body.has_html:
         return None, (
-            "This message had an HTML body only. Phishbowl never renders attacker "
+            "This message had an HTML body only. PhishBowl never renders attacker "
             "markup, and no readable text could be recovered for preview."
         )
     return None, "No body content was parsed from this message."
@@ -415,8 +415,15 @@ def _enrichment_view(enrichment: EnrichmentReport | None, redactor: Redactor) ->
         return EnrichmentView(enabled=False)
     connectors: list[ConnectorStatusView] = []
     for status in enrichment.statuses:
-        raw_refs = _dedup_refs(
-            ref for result in status.results if not redactor.active for ref in result.references
+        # Vendor links name the indicator, so redaction withholds them all.
+        raw_refs = list(
+            dict.fromkeys(
+                ref
+                for result in status.results
+                if not redactor.active
+                for ref in result.references
+                if ref
+            )
         )
         connectors.append(
             ConnectorStatusView(
@@ -432,16 +439,6 @@ def _enrichment_view(enrichment: EnrichmentReport | None, redactor: Redactor) ->
             )
         )
     return EnrichmentView(enabled=True, connectors=connectors)
-
-
-def _dedup_refs(refs) -> list[str]:
-    seen: set[str] = set()
-    out: list[str] = []
-    for ref in refs:
-        if ref and ref not in seen:
-            seen.add(ref)
-            out.append(ref)
-    return out
 
 
 def build_report(

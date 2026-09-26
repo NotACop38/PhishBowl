@@ -1,15 +1,15 @@
 # SOAR export guide
 
-Phishbowl can export a completed triage as a **playbook draft** for two SOAR
+PhishBowl can export a completed triage as a **playbook draft** for two SOAR
 platforms — **Cortex XSOAR** and **Microsoft Sentinel**. This is Phase 6 of the
 [checklist](CHECKLIST.md) and implements [PRD §6.6](PRD.md).
 
 > [!IMPORTANT]
-> **These exports are drafts. Phishbowl never acts.**
+> **These exports are drafts. PhishBowl never acts.**
 > An export is a starting-point playbook, seeded with the verdict and indicators,
-> that an analyst **reviews and runs** in their own platform. Phishbowl itself
+> that an analyst **reviews and runs** in their own platform. PhishBowl itself
 > never quarantines, blocks, sends, replies, detonates, fetches the email's URLs,
-> or auto-remediates ([CLAUDE.md](../CLAUDE.md) / [PRD §4](PRD.md)). The artifacts
+> or auto-remediates ([AGENTS.md](../AGENTS.md) / [PRD §4](PRD.md)). The artifacts
 > are inert *by construction* — and the guarantee is enforced by their schemas, not
 > just asserted in prose (see [Why these are safe](#why-these-are-safe-by-construction)).
 
@@ -72,11 +72,11 @@ checklist); no task binds an automation command.
 
 | XSOAR playbook field | Source (from `ParsedEmail` + verdict + IOCs) |
 |----------------------|----------------------------------------------|
-| `name` | `"Phishbowl Triage — <verdict> (DRAFT)"` |
+| `name` | `"PhishBowl Triage — <verdict> (DRAFT)"` |
 | `description` | Disclaimer + verdict/score/auth/indicator-count summary |
 | `tags` | `phishbowl`, `phishing`, `triage`, `draft`, `manual`, `no-auto-remediation` |
 | `tasks["0"]` (`start`) | Mandatory start node |
-| `tasks["1"]` (`title`) | "Phishbowl Triage (DRAFT — review before acting)" |
+| `tasks["1"]` (`title`) | "PhishBowl Triage (DRAFT — review before acting)" |
 | `tasks` (`regular`, manual) | Review verdict · Review indicators (defanged) · Review authentication · Decide containment (manual) |
 | `tasks[*].task.iscommand` | Always `false` — **no command binding** |
 | `tasks[*].task.brand` | Always `""` — **no integration bound** |
@@ -179,7 +179,7 @@ so "it validates" genuinely means "it cannot auto-remediate."
 
 The schemas are standard JSON Schema (draft 2020-12) and live under
 [`phishbowl/export/schemas/`](../phishbowl/export/schemas/). Validate with any
-JSON-Schema tool, or with Phishbowl's bundled (dependency-free) validator:
+JSON-Schema tool, or with PhishBowl's bundled (dependency-free) validator:
 
 ```python
 import json, yaml

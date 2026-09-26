@@ -165,3 +165,13 @@ def test_addresses_mismatch_properties() -> None:
     assert not sparse.reply_to_mismatch
     assert not sparse.return_path_mismatch
     assert not sparse.sender_mismatch
+
+
+def test_unicode_and_punycode_spellings_of_one_domain_are_the_same_domain() -> None:
+    unicode_form = Address(addr_spec="billing@bücher.example", domain="bücher.example")
+    ascii_form = Address(addr_spec="reply@xn--bcher-kva.example", domain="xn--bcher-kva.example")
+    addresses = Addresses(**{"from": unicode_form}, reply_to=ascii_form, return_path=ascii_form)
+
+    assert unicode_form.domain_matches(ascii_form)
+    assert not addresses.reply_to_mismatch
+    assert not addresses.return_path_mismatch

@@ -267,7 +267,7 @@ def unwrap_url(url: str) -> UnwrapResult | None:
 
     Reversible wrappers are decoded (chasing nested layers up to ``_MAX_DEPTH``);
     non-reversible ones are returned unchanged and flagged ``unresolved``. This is
-    a pure string transform — it never fetches ``url`` (CLAUDE.md).
+    a pure string transform — it never fetches ``url`` (AGENTS.md).
     """
     original = url
     outer: str | None = None

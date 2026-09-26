@@ -2,7 +2,7 @@
 
 Two things matter here. First, **conformance**: each export must validate against
 its committed expected schema on every fixture — that is the Phase 6 DoD. Second,
-and load-bearing, the **never-acts invariant** (CLAUDE.md / PRD §4): a draft export
+and load-bearing, the **never-acts invariant** (AGENTS.md / PRD §4): a draft export
 must be inert by construction, and the schemas encode that (XSOAR ``iscommand`` is
 ``const false``; Sentinel ``state`` is ``const "Disabled"``), so the same
 validation that proves conformance also proves the artifact can't auto-remediate.
@@ -55,7 +55,7 @@ ALL_FIXTURES = sorted(
 
 runner = CliRunner()
 
-# Sentinel actions Phishbowl emits are all inert "Compose" steps — they hold data
+# Sentinel actions PhishBowl emits are all inert "Compose" steps — they hold data
 # and call nothing. A draft export must never contain a connector/HTTP action that
 # could egress or remediate, so the allowed set is deliberately this small.
 _INERT_ACTION_TYPES = {"Compose"}

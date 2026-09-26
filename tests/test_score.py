@@ -11,7 +11,7 @@ Covers the Phase 3 definition of done:
 
 Crafted inputs are tiny synthetic ``.eml`` blobs or directly-built models, using
 reserved example-only values (RFC 2606 / RFC 5737) and obviously-fake markers —
-never a real sample (CLAUDE.md).
+never a real sample (AGENTS.md).
 """
 
 from __future__ import annotations

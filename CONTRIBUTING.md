@@ -1,8 +1,8 @@
-# Contributing to Phishbowl
+# Contributing to PhishBowl
 
-Thanks for your interest! Phishbowl is an early, phase-by-phase build. Please
+Thanks for your interest! PhishBowl is an early, phase-by-phase build. Please
 read [`docs/PRD.md`](docs/PRD.md) (the product spec) and
-[`CLAUDE.md`](CLAUDE.md) (the invariants and working rules) first — together
+[`AGENTS.md`](AGENTS.md) (the invariants and working rules) first — together
 with [`docs/CHECKLIST.md`](docs/CHECKLIST.md) they are the source of truth.
 
 ## 🚫 Never commit real phishing samples
@@ -24,10 +24,10 @@ real samples will be rejected.
 
 ## Defensive scope
 
-Phishbowl is **defensive-only**. It never sends, never detonates attachments,
+PhishBowl is **defensive-only**. It never sends, never detonates attachments,
 never fetches the analyzed email's URLs, and never auto-remediates — and the
 HTML report does zero network egress when opened. Every contribution must
-preserve these invariants (see [`CLAUDE.md`](CLAUDE.md)).
+preserve these invariants (see [`AGENTS.md`](AGENTS.md)).
 
 ## Development
 

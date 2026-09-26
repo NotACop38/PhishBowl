@@ -7,7 +7,7 @@ Resource Manager (ARM) template. This module maps the triage triple —
 (``azuredeploy.json``). See ``docs/SOAR_EXPORT.md`` for the field mapping and the
 deploy/import steps.
 
-**Draft / export only — never acts (CLAUDE.md, PRD §4).** The emitted workflow is
+**Draft / export only — never acts (AGENTS.md, PRD §4).** The emitted workflow is
 inert by construction and the invariant is enforced three ways — in this code, in
 the prose stamped into the artifact, and structurally by the schema:
 
@@ -169,7 +169,7 @@ def build_sentinel_playbook(
                 "metadata": {
                     "description": (
                         "Name for the draft Logic App. It deploys DISABLED — review and "
-                        "enable it manually; Phishbowl never acts."
+                        "enable it manually; PhishBowl never acts."
                     )
                 },
             }

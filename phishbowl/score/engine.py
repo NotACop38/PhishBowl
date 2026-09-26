@@ -63,17 +63,6 @@ def _magnitude(value: float) -> float:
     return min(1.0, max(0.0, value)) if math.isfinite(value) else 0.0
 
 
-def _dedup(items: list[str]) -> list[str]:
-    """Order-preserving de-duplication of evidence strings."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for item in items:
-        if item not in seen:
-            seen.add(item)
-            out.append(item)
-    return out
-
-
 def _fold_enrichment(
     enrichment: EnrichmentReport,
     config: ScoringConfig,
@@ -109,7 +98,7 @@ def _fold_enrichment(
                 description=signals[0].description,
                 weight=weight,
                 source=RuleSource.ENRICHMENT,
-                evidence=_dedup([s.evidence for s in signals]),
+                evidence=list(dict.fromkeys(s.evidence for s in signals)),
             )
         )
     return fired

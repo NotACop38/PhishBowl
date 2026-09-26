@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Generate the README's HTML-report screenshot from a bundled SYNTHETIC fixture.
 #
-# This is a docs/marketing helper, NOT part of the test gate (CLAUDE.md keeps
+# This is a docs/marketing helper, NOT part of the test gate (AGENTS.md keeps
 # `make test` cheap). It does two things:
 #   1. Always: run the offline pipeline on a synthetic fixture and write the
 #      self-contained HTML report to docs/assets/sample-report.html.

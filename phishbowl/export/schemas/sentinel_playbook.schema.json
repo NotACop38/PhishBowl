@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://phishbowl.dev/schemas/sentinel_playbook.schema.json",
-  "title": "Phishbowl Microsoft Sentinel playbook (draft export)",
-  "description": "Schema for the Microsoft Sentinel playbook artifact Phishbowl emits: an Azure Resource Manager deployment template for a Logic App workflow. DRAFT / EXPORT ONLY: the workflow ships disabled (properties.state is const \"Disabled\") behind a manual request trigger and carries only inert Compose actions that hold the triage verdict and indicators. Importing it never auto-runs, and Phishbowl never quarantines, blocks, sends, or acts.",
+  "title": "PhishBowl Microsoft Sentinel playbook (draft export)",
+  "description": "Schema for the Microsoft Sentinel playbook artifact PhishBowl emits: an Azure Resource Manager deployment template for a Logic App workflow. DRAFT / EXPORT ONLY: the workflow ships disabled (properties.state is const \"Disabled\") behind a manual request trigger and carries only inert Compose actions that hold the triage verdict and indicators. Importing it never auto-runs, and PhishBowl never quarantines, blocks, sends, or acts.",
   "type": "object",
   "additionalProperties": true,
   "required": ["$schema", "contentVersion", "parameters", "resources"],

@@ -1,4 +1,4 @@
-# Phishbowl — Product Requirements Document
+# PhishBowl — Product Requirements Document
 
 **Status:** v1 (living document; all phases incl. the Phase 7 stretch are built) · **Owner:** project lead · **Last updated:** 2026-06-12
 
@@ -10,7 +10,7 @@ A self-hostable, vendor-neutral phishing triage tool. Drop in a suspicious email
 
 Phishing triage is the highest-volume, most repetitive task in a SOC. Tier 1 analysts burn hours pulling headers apart, checking auth results, copying indicators into a dozen lookup tabs, and re-typing the same summary into a ticket. Commercial SOAR platforms automate this but are expensive, heavyweight, and lock teams into a vendor.
 
-There's a clear gap for a clean, open, vendor-neutral tool that does the grunt work and outputs something *presentable* — good enough to paste straight into a ticket. Phishbowl targets that gap. The bet for community traction is simple: `pip install` → run on a bundled sample → see a gorgeous, shareable HTML report in under a minute, with zero API keys required.
+There's a clear gap for a clean, open, vendor-neutral tool that does the grunt work and outputs something *presentable* — good enough to paste straight into a ticket. PhishBowl targets that gap. The bet for community traction is simple: `pip install` → run on a bundled sample → see a gorgeous, shareable HTML report in under a minute, with zero API keys required.
 
 ## 2. Goals & non-goals
 
@@ -37,13 +37,13 @@ Broad appeal is the point. Defaults must be sane for someone running it for the 
 
 ## 4. Defensive scope & safety guarantees (load-bearing)
 
-Phishbowl analyzes emails the user **received or was forwarded**, for triage. This boundary is not negotiable and every feature decision references it.
+PhishBowl analyzes emails the user **received or was forwarded**, for triage. This boundary is not negotiable and every feature decision references it.
 
 **Hard guarantees, enforced in code and tested:**
 - **No sending.** No SMTP, no replies, no read receipts, no callbacks of any kind to the email's infrastructure.
 - **No detonation.** Attachments are hashed and inspected by metadata/magic bytes only. Contents are never executed; archives are not auto-extracted in the MVP.
-- **No fetching of the email's URLs by Phishbowl itself.** We never open the suspicious links. Indicators are only ever submitted to *allowlisted third-party APIs* (see §9), and even there the operator chooses what is shared.
-- **No auto-remediation.** Phishbowl produces a verdict and (optionally) a playbook *draft*. It never quarantines, blocks, or acts.
+- **No fetching of the email's URLs by PhishBowl itself.** We never open the suspicious links. Indicators are only ever submitted to *allowlisted third-party APIs* (see §9), and even there the operator chooses what is shared.
+- **No auto-remediation.** PhishBowl produces a verdict and (optionally) a playbook *draft*. It never quarantines, blocks, or acts.
 - **No report beaconing.** The HTML report performs zero network egress when opened — no remote images, fonts, scripts, or trackers. A report about a phishing email must never phone home to the attacker (see §10).
 - **Safe samples only.** All bundled fixtures are synthetic, authored by us, using `example.com`-class indicators and obviously-fake malicious markers. Real phishing samples (which may carry live links, real PII, or actual malware) are never committed.
 
@@ -93,7 +93,7 @@ See §8. Transparent, additive, YAML-defined weighted rules → numeric score �
 See §9. Pluggable, key-gated connectors: VirusTotal, urlscan, AbuseIPDB, Shodan, WHOIS/RDAP. Caching, rate-limit handling, graceful offline degrade.
 
 ### 6.6 SOAR export
-- Export triage results as **Cortex XSOAR** and **Microsoft Sentinel** playbook artifacts. This is a draft/export — Phishbowl never executes remediation itself.
+- Export triage results as **Cortex XSOAR** and **Microsoft Sentinel** playbook artifacts. This is a draft/export — PhishBowl never executes remediation itself.
 
 ## 7. The `ParsedEmail` contract (sketch)
 

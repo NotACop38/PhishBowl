@@ -41,7 +41,7 @@ __all__ = [
 _EML_SUFFIXES = {".eml"}
 _MSG_SUFFIXES = {".msg"}
 
-# The input formats Phishbowl accepts, for callers (e.g. the upload UI) that need
+# The input formats PhishBowl accepts, for callers (e.g. the upload UI) that need
 # to validate a filename's type *before* handing bytes to a parser.
 SUPPORTED_SUFFIXES = frozenset(_EML_SUFFIXES | _MSG_SUFFIXES)
 

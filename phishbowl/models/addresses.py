@@ -31,21 +31,24 @@ class Address(PhishbowlModel):
     def domain_matches(self, other: Address | None) -> bool:
         """True iff both addresses have a domain and they're equal.
 
-        Case-insensitive. Returns ``False`` when either domain is missing —
-        absence is not a match.
+        Case-insensitive, and Unicode and punycode spellings of one domain
+        (``bücher.example`` / ``xn--bcher-kva.example``) are equal. Returns
+        ``False`` when either domain is missing — absence is not a match.
         """
         if other is None or not self.domain or not other.domain:
             return False
-        return self.domain.casefold() == other.domain.casefold()
+        from phishbowl.domains import ascii_host  # a leaf helper; no cycle
+
+        return ascii_host(self.domain) == ascii_host(other.domain)
 
 
 def _domains_differ(a: Address | None, b: Address | None) -> bool:
     """True only when both addresses have a domain under different registered domains."""
     if a is None or b is None or not a.domain or not b.domain:
         return False
-    from phishbowl.domains import registrable_domain  # a leaf helper; no cycle
+    from phishbowl.domains import ascii_host, registrable_domain  # a leaf helper; no cycle
 
-    return registrable_domain(a.domain) != registrable_domain(b.domain)
+    return registrable_domain(ascii_host(a.domain)) != registrable_domain(ascii_host(b.domain))
 
 
 class Addresses(PhishbowlModel):

@@ -15,11 +15,11 @@ and :func:`validate_export` checks an artifact against it (the Phase 6 validatio
 DoD) with a small, dependency-free validator — no third-party library, fully
 offline, in keeping with ``make test`` staying self-contained.
 
-**Draft / export only — Phishbowl never acts (CLAUDE.md, PRD §4).** Both artifacts
+**Draft / export only — PhishBowl never acts (AGENTS.md, PRD §4).** Both artifacts
 are inert by construction *and* by schema: every XSOAR task is a manual task
 (``iscommand`` is ``const false``) and the Sentinel workflow ships disabled
 (``state`` is ``const "Disabled"``) behind a manual trigger with no remediation
-connector. Importing either one triggers nothing — Phishbowl proposes a
+connector. Importing either one triggers nothing — PhishBowl proposes a
 human-review playbook seeded with the verdict and indicators; an analyst reviews
 and runs it. See ``docs/SOAR_EXPORT.md`` for the field mappings and import steps.
 """

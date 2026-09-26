@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Record the README's terminal demo GIF from a bundled SYNTHETIC fixture.
 #
-# Docs/marketing helper, NOT part of the test gate (CLAUDE.md keeps `make test`
+# Docs/marketing helper, NOT part of the test gate (AGENTS.md keeps `make test`
 # cheap). Drives scripts/demo.tape with VHS to render docs/assets/demo.gif: the
 # offline pipeline triaging a synthetic sample and printing a colorized verdict.
 #

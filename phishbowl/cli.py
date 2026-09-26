@@ -89,7 +89,7 @@ def main(
         bool,
         typer.Option(
             "--version",
-            help="Print the Phishbowl version and exit.",
+            help="Print the PhishBowl version and exit.",
             is_eager=True,
             callback=_version_callback,
         ),

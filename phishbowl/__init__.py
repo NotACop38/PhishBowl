@@ -1,4 +1,4 @@
-"""Phishbowl — a self-hostable, defensive-only phishing triage tool.
+"""PhishBowl — a self-hostable, defensive-only phishing triage tool.
 
 Parse a suspicious ``.eml``/``.msg`` → extract and defang IOCs → risk-score it
 → produce an analyst-ready report. Offline-first: the core pipeline always

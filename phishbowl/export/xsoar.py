@@ -124,12 +124,12 @@ def _inputs(core: TriageCore) -> list[dict[str, Any]]:
         _input(
             "PhishbowlVerdict",
             core.verdict if _safe_input_value(core.verdict) else "see playbook description",
-            "Phishbowl verdict band for the message.",
+            "PhishBowl verdict band for the message.",
         ),
         _input(
             "PhishbowlScore",
             f"{core.score}/{core.max_score}",
-            "Phishbowl risk score (0-100) and its maximum.",
+            "PhishBowl risk score (0-100) and its maximum.",
         ),
     ]
     raw, _ = _input_buckets(core)
@@ -164,7 +164,7 @@ def _description(core: TriageCore) -> str:
     _, withheld = _input_buckets(core)
     return (
         f"{DRAFT_DISCLAIMER}\n\n"
-        f"Phishbowl triage summary\n"
+        f"PhishBowl triage summary\n"
         f"Verdict: {core.verdict} (score {core.score}/{core.max_score}, "
         f"offline {core.offline_score}).\n"
         f"Source: {core.source_filename or 'message'} ({core.source_format}).\n"
@@ -210,12 +210,12 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
         f"Sender authentication: {core.auth_summary() or 'n/a'}.\n"
         "Review SPF/DKIM/DMARC and the From / Reply-To / Return-Path alignment for spoofing."
     )
-    containment_note = "DRAFT — Phishbowl proposes; it never acts.\n\n" + "\n".join(
+    containment_note = "DRAFT — PhishBowl proposes; it never acts.\n\n" + "\n".join(
         f"- {step}" for step in core.recommended_review()
     )
 
     steps = [
-        ("Review Phishbowl verdict", verdict_note),
+        ("Review PhishBowl verdict", verdict_note),
         ("Review extracted indicators (defanged)", indicators_note),
         ("Review sender authentication", auth_note),
         ("Decide containment & response (MANUAL — analyst-driven)", containment_note),
@@ -228,7 +228,7 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
         seed=seed,
         seq=1,
         task_type="title",
-        name="Phishbowl Triage (DRAFT — review before acting)",
+        name="PhishBowl Triage (DRAFT — review before acting)",
         description=DRAFT_DISCLAIMER,
         next_seq=2,
     )
@@ -247,7 +247,7 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
     return {
         "id": stable_uuid("xsoar-playbook", seed),
         "version": -1,
-        "name": f"Phishbowl Triage — {core.verdict} (DRAFT)",
+        "name": f"PhishBowl Triage — {core.verdict} (DRAFT)",
         "description": _description(core),
         "starttaskid": "0",
         "tasks": tasks,

@@ -1,6 +1,6 @@
 # Security Policy
 
-Phishbowl is a **defensive-only** phishing-triage tool. It parses a suspicious
+PhishBowl is a **defensive-only** phishing-triage tool. It parses a suspicious
 `.eml`/`.msg`, extracts and defangs indicators, scores the message, and produces
 an analyst report — entirely offline by default. This document describes the
 security model it guarantees, how those guarantees are tested, and how to report
@@ -16,10 +16,10 @@ are non-negotiable, enforced in code, and covered by the routine test suite
   to the email's infrastructure.
 - **Never detonate.** Attachments are hashed and inspected by metadata/magic
   bytes only; they are never executed and archives are never auto-extracted.
-- **Never fetch the analyzed email's URLs.** Phishbowl never opens the suspicious
+- **Never fetch the analyzed email's URLs.** PhishBowl never opens the suspicious
   links. Indicators are only ever submitted to allowlisted third-party APIs the
   operator has explicitly configured (the optional, key-gated enrichment layer).
-- **Never auto-remediate.** Phishbowl produces a verdict and an optional playbook
+- **Never auto-remediate.** PhishBowl produces a verdict and an optional playbook
   *draft*; it never quarantines, blocks, or acts.
 - **Zero network egress from the report.** The self-contained HTML report loads
   no remote images, fonts, scripts, or trackers and beacons nothing — opening a
@@ -90,7 +90,7 @@ ever appears in the HTML, JSON, or CLI output.
 
 ## Static & dependency scanning
 
-Per the project's CI philosophy (`CLAUDE.md`), the routine gate is a fast
+Per the project's CI philosophy (`AGENTS.md`), the routine gate is a fast
 `pytest` run; the heavier security scanners are **run once, on demand — not wired
 into `make test` and never in GitHub Actions**. Run them manually:
 

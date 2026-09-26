@@ -7,8 +7,8 @@ tool interchange (clearly labeled raw). ``provenance`` records which
 header/part each indicator came from.
 
 Protective link wrappers (Microsoft Safelinks, Proofpoint URL Defense) are
-unwrapped as a pure **string transform** — Phishbowl never fetches anything
-(CLAUDE.md). Both forms are retained: ``value`` holds the unwrapped target and
+unwrapped as a pure **string transform** — PhishBowl never fetches anything
+(AGENTS.md). Both forms are retained: ``value`` holds the unwrapped target and
 ``wrapped`` the original on-wire wrapper string. ``wrapper`` names the detected
 wrapper, and ``unresolved`` is set for wrappers we can detect but cannot reverse
 offline (Mimecast / Barracuda / Cisco), whose ``value`` stays the wrapped form.

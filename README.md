@@ -287,7 +287,7 @@ a public service. The defensive invariants below hold here exactly as on the CLI
 ## Defensive use and safety (non-negotiable)
 
 PhishBowl analyzes emails you **received or were forwarded**, for triage. This boundary is
-load-bearing and enforced in code and tests ([`CLAUDE.md`](CLAUDE.md), [`docs/PRD.md` §4](docs/PRD.md)):
+load-bearing and enforced in code and tests ([`AGENTS.md`](AGENTS.md), [`docs/PRD.md` §4](docs/PRD.md)):
 
 - **Never sends.** No SMTP, no replies, no read receipts, no callback of any kind to the email's infrastructure.
 - **Never detonates.** Attachments are hashed and inspected by metadata/magic bytes only, never executed, and archives are not auto-extracted.

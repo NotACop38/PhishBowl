@@ -3,7 +3,7 @@
 A ``.msg`` is an OLE/CFB compound document carrying MAPI property streams, not
 an RFC 822 text file — so unlike the ``.eml`` fixtures we can't hand-author it
 in a text editor. This script builds one **from scratch and entirely
-synthetically** (CLAUDE.md: only synthetic samples are ever committed — no real
+synthetically** (AGENTS.md: only synthetic samples are ever committed — no real
 message, no live links, no PII, no malware) and writes the bytes to
 ``synthetic_phish.msg`` next to it.
 
