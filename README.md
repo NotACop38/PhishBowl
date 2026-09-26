@@ -282,8 +282,10 @@ What leaves the machine, and what never does:
   a URL from the analyzed message.
 - Non-public IP addresses (private, loopback, link-local, reserved) in any notation,
   local host names, hosts under your `org_domains`, domains seen only in recipient
-  headers, and email addresses are never sent.
-- urlscan.io searches by domain by default and never submits a URL unless you pass
+  headers, and email addresses are never sent, whether as indicators or as the host of
+  a URL. A URL that passes is sent whole to VirusTotal, so its path and query go with
+  it.
+- urlscan.io searches by host name by default and never submits a URL unless you pass
   `--urlscan-submit`. A submission makes urlscan visit the URL, which can alert the
   attacker and can leak a per-victim token in the URL; submissions are private, but
   private only hides the result page.

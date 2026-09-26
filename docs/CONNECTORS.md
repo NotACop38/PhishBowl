@@ -30,7 +30,9 @@ Run them with `--enrich`, choose with `--connector NAME` or skip with
 
 Connectors receive indicators, never the message. The orchestrator builds the list:
 public sending IPs from the `Received` chain first, then attachment SHA-256 hashes, then
-the extracted URLs, domains, and IP addresses. It never sends:
+the other extracted indicators (URLs, domains, IP addresses, and hash-shaped strings
+from the text) in the order they were found. It never sends, as an indicator or as the
+host of a URL:
 
 - non-public IP addresses (private, loopback, link-local, reserved), in any notation;
 - local host names (single-label names and `.localhost`, `.local`, `.internal`,
@@ -39,7 +41,13 @@ the extracted URLs, domains, and IP addresses. It never sends:
 - domains that appear only in recipient headers;
 - email addresses.
 
-**urlscan.io** searches by domain by default, so a per-victim token in a URL never leaves.
+A URL whose host passes is sent whole to URL-reputation services, so its path and query
+go with it. A connector that derives a host from a URL must read it the way the filter
+does (a browser treats `\` as `/`) and should check it with
+`phishbowl.domains.public_host`.
+
+**urlscan.io** searches by host name by default, so a per-victim token in a URL's path
+or query never leaves (a token in the host name itself does).
 `--urlscan-submit` makes it submit URLs for scanning instead: urlscan then visits the URL,
 which can alert the attacker, and a token in the URL reaches a third party. Submissions
 are private, but private only hides the result page. Submissions bypass the cache in
@@ -48,8 +56,9 @@ both directions.
 **RDAP** queries the registered domain (`login.evil.example` is looked up as
 `evil.example`). `rdap.org` answers with a redirect to the authoritative registry; that
 one redirect may leave the allowlist, only over HTTPS, only to a public DNS name (never an
-IP literal or a local name), and the registry gets exactly one request with no retries.
-A further redirect from the registry is refused.
+IP literal or a local name), and the registry gets exactly one plain GET, without the
+connector's headers and with no retries. A further redirect from the registry is
+refused.
 
 ## Rules every connector follows
 
@@ -254,7 +263,9 @@ For each selected connector, `run_enrichment` (and the pipeline's `enrich_email`
 - **Paces:** requests are spaced to `rate_limit_per_min`, measured when each request is
   sent; at most four requests are in flight across all connectors; `429` and `503`
   responses are retried with exponential backoff (honoring a finite `Retry-After`, capped
-  at 30 seconds) up to three times.
+  at 30 seconds) up to three times. If a request is still rate-limited after that, the
+  connector's remaining indicators are not queried in this run (cached results are
+  still used), and the status says how many were left out.
 - **Contains failures:** each connector runs in its own guard, and its outcome is
   reported as `used`, `skipped`, or `failed`, with a note.
 

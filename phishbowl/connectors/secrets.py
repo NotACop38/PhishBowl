@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 from collections.abc import Iterable
 from typing import Any
+from urllib.parse import quote, quote_plus
 
 
 def api_key_from_env(env_var: str) -> str | None:
@@ -33,6 +34,20 @@ def key_values(env_vars: Iterable[str]) -> frozenset[str]:
     even if a vendor were to echo it back (PRD §11).
     """
     return frozenset(value for var in env_vars if (value := api_key_from_env(var)))
+
+
+def secret_forms(secrets: Iterable[str]) -> frozenset[str]:
+    """Each secret together with the percent-encoded forms it takes in a URL.
+
+    HTTP libraries log request URLs with query values percent-encoded, so a key
+    containing ``+``, ``/`` or ``=`` appears in a log line only in encoded form;
+    scrubbing every form keeps it out regardless.
+    """
+    forms: set[str] = set()
+    for secret in secrets:
+        if secret:
+            forms.update((secret, quote(secret, safe=""), quote_plus(secret)))
+    return frozenset(forms)
 
 
 def scrub_secrets(value: Any, secrets: frozenset[str]) -> Any:

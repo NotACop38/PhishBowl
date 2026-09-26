@@ -50,11 +50,11 @@ from .base import (
     Indicator,
 )
 from .cache import EnrichmentCache
-from .errors import ConnectorError
+from .errors import ConnectorError, RateLimitedError
 from .http import AllowlistedClient
 from .ratelimit import RateLimiter
 from .registry import discover
-from .secrets import key_values, scrub_secrets
+from .secrets import key_values, scrub_secrets, secret_forms
 from .targets import build_targets
 
 log = logging.getLogger(__name__)
@@ -173,8 +173,9 @@ async def run_enrichment_async(
     # Everything key-shaped we know about — every connector's env var (selected
     # or not) *and* programmatic overrides — so the defensive scrub covers the
     # library-use path too.
-    secrets = key_values(cls.api_key_env for cls in available.values()) | frozenset(
-        v for v in settings.api_keys.values() if v
+    secrets = secret_forms(
+        key_values(cls.api_key_env for cls in available.values())
+        | frozenset(v for v in settings.api_keys.values() if v)
     )
     semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
@@ -268,6 +269,8 @@ async def _run_one_connector(
     results: list[EnrichmentResult] = []
     failures: list[str] = []
     cache_hits = 0
+    queried = 0
+    throttled = 0  # indicators not queried because the vendor kept rate-limiting
     try:
         for indicator in indicators:
             cached = (
@@ -284,10 +287,23 @@ async def _run_one_connector(
             if cached is not None:
                 results.append(_sanitize(cached, secrets).as_cached())
                 cache_hits += 1
+                queried += 1
                 continue
-            result = await _enrich_one(
-                connector, indicator, ctx, limiter, semaphore, failures, secrets
-            )
+            if throttled:
+                # The vendor is out of patience (an exhausted quota, typically):
+                # asking again for every remaining indicator would only repeat
+                # the full backoff each time.
+                throttled += 1
+                continue
+            queried += 1
+            try:
+                result = await _enrich_one(
+                    connector, indicator, ctx, limiter, semaphore, failures, secrets
+                )
+            except RateLimitedError as exc:
+                failures.append(scrub_secrets(str(exc), secrets))
+                throttled = 1
+                continue
             if result is not None:
                 result = _sanitize(result, secrets)
                 if use_cache:
@@ -296,9 +312,13 @@ async def _run_one_connector(
     finally:
         await client.aclose()
 
-    status = _summarize(connector, indicators, results, cache_hits, failures)
+    status = _summarize(connector, queried, results, cache_hits, failures)
+    # Say what was left out: a capped or throttled run must not read as complete.
+    if throttled > 1:
+        status = replace(
+            status, note=f"{status.note}; {throttled - 1} more not queried (rate-limited)"
+        )
     if len(prepared) > len(indicators):
-        # Say what was left out: a capped run must not read as a complete one.
         skipped = len(prepared) - len(indicators)
         status = replace(
             status, note=f"{status.note}; {skipped} more not queried (limit {limit} per run)"
@@ -330,13 +350,19 @@ async def _enrich_one(
     failures: list[str],
     secrets: frozenset[str],
 ) -> EnrichmentResult | None:
-    """One guarded enrichment call: concurrency-capped, rate-limited, soft-failing."""
+    """One guarded enrichment call: concurrency-capped, rate-limited, soft-failing.
+
+    A :class:`RateLimitedError` propagates so the caller can stop asking; every
+    other failure is recorded in ``failures`` and yields ``None``.
+    """
     async with semaphore:
         # Spacing is measured when the request can actually go out: acquiring
         # before the semaphore would let queued requests leave back to back.
         await limiter.acquire()
         try:
             return await connector.enrich(indicator, ctx)
+        except RateLimitedError:
+            raise
         except ConnectorError as exc:
             failures.append(scrub_secrets(str(exc), secrets) or exc.__class__.__name__)
         except httpx.HTTPError as exc:
@@ -381,7 +407,7 @@ def _status(connector: Connector, outcome: ConnectorOutcome, note: str) -> Conne
 
 def _summarize(
     connector: Connector,
-    indicators: list[Indicator],
+    queried: int,
     results: list[EnrichmentResult],
     cache_hits: int,
     failures: list[str],
@@ -410,7 +436,7 @@ def _summarize(
         version=connector.version,
         outcome=outcome,
         note=note,
-        queried=len(indicators),
+        queried=queried,
         cache_hits=cache_hits,
         results=tuple(results),
     )

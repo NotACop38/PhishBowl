@@ -221,6 +221,30 @@ def _write_output(path: Path, text: str, what: str) -> bool:
     return True
 
 
+def _write_stdout(text: str) -> bool:
+    """Write the JSON result to standard output; report a failure instead of a traceback."""
+    try:
+        sys.stdout.write(text if text.endswith("\n") else text + "\n")
+        sys.stdout.flush()
+    except OSError as exc:
+        # Send the unwritable remainder to devnull, so the interpreter's own
+        # final flush cannot fail again after the error has been reported.
+        try:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            try:
+                os.dup2(devnull, sys.stdout.fileno())
+            finally:
+                os.close(devnull)
+        except (OSError, ValueError):
+            pass
+        typer.echo(
+            f"phishbowl: could not write the JSON result to standard output: {exc.strerror or exc}",
+            err=True,
+        )
+        return False
+    return True
+
+
 @app.command()
 def analyze(
     path: Annotated[
@@ -412,9 +436,7 @@ def analyze(
     if json_out is not None:
         payload = render_json(view)
         if json_to_stdout:
-            sys.stdout.write(payload)
-            if not payload.endswith("\n"):
-                sys.stdout.write("\n")
+            written = _write_stdout(payload) and written
         elif _write_output(Path(json_out), payload, "the JSON result"):
             if announce:
                 typer.echo(f"phishbowl: wrote JSON result to {json_out}")

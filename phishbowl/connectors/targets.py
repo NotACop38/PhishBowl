@@ -9,7 +9,7 @@ hops, de-duplicated and ordered by pivot value: routing IPs first, then
 attachment hashes, then everything else in collection order. Per-connector caps
 therefore drop body padding before they drop the sending IP or a file hash.
 
-What is never sent to a third party:
+What is never sent to a third party, as an indicator or as a URL's host:
 
 * non-public IP addresses, however they are written — including the legacy
   notations browsers still accept as IPv4 (``127.1``, ``0x7f.0.0.1``, a
@@ -19,6 +19,9 @@ What is never sent to a third party:
 * hosts under a configured organization domain (``excluded_domains``), compared
   in IDNA form and with backslashes read as browsers read them;
 * domains seen only in recipient headers, and email addresses (often PII).
+
+A URL whose host passes is sent whole to URL-reputation services, so its path
+and query travel with it.
 """
 
 from __future__ import annotations
@@ -35,6 +38,9 @@ from .base import Indicator
 # Indicator types a connector might enrich. Email addresses are deliberately
 # excluded — no bundled connector consumes them, and they are often recipient PII.
 _ENRICHABLE = (IOCType.URL, IOCType.DOMAIN, IOCType.IPV4, IOCType.IPV6, IOCType.HASH)
+
+# Provenance of an attachment's SHA-256 (see phishbowl.extract).
+_ATTACHMENT_HASH = "attachment:sha256"
 
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 # Bracketed IPv6 as it appears in Received hops, e.g. "[2001:db8::1]".
@@ -83,9 +89,10 @@ def build_targets(
 ) -> list[Indicator]:
     """Union of enrichable IOCs and routing sending-IPs, de-duplicated (PRD §9).
 
-    Order: routing sending IPs, then attachment hashes, then the remaining IOCs
-    in collection order. De-duplication is by ``(type, value)`` so an IP that
-    appears both in a hop and in the body is enriched once.
+    Order: routing sending IPs, then attachment SHA-256 hashes, then the
+    remaining IOCs (hash-shaped strings from text included) in collection
+    order. De-duplication is by ``(type, value)`` so an IP that appears both in
+    a hop and in the body is enriched once.
     """
     excluded = frozenset(normalize_domain_pattern(d) for d in excluded_domains if d.strip())
     seen: set[tuple[str, str]] = set()
@@ -103,7 +110,10 @@ def build_targets(
     for ip in sending_ips(parsed):
         add(ip)
 
-    iocs_in_order = sorted(iocs, key=lambda ioc: ioc.type is not IOCType.HASH)
+    # Attachment hashes go ahead of everything else, but only those: a
+    # hash-shaped string in the body is attacker-controlled text, and letting it
+    # jump the queue would let a sender push real links past a connector's cap.
+    iocs_in_order = sorted(iocs, key=lambda ioc: _ATTACHMENT_HASH not in ioc.provenance)
     for ioc in iocs_in_order:
         if ioc.type not in _ENRICHABLE:
             continue

@@ -297,3 +297,21 @@ def test_inner_explains_when_the_message_is_too_large_to_walk(tmp_path: Path) ->
     result = runner.invoke(app, ["analyze", "--inner", str(oversized)])
     assert result.exit_code == 2
     assert "attached emails could not be listed" in result.output
+
+
+@pytest.mark.skipif(not Path("/dev/full").exists(), reason="needs a device that refuses writes")
+def test_json_to_an_unwritable_stdout_exits_2_without_a_traceback() -> None:
+    import subprocess
+    import sys
+
+    with open("/dev/full", "w") as full:
+        completed = subprocess.run(
+            [sys.executable, "-m", "phishbowl.cli", "analyze", str(FIXTURE), "--json", "-"],
+            stdout=full,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    assert completed.returncode == 2
+    assert "could not write the JSON result to standard output" in completed.stderr
+    assert "Traceback" not in completed.stderr

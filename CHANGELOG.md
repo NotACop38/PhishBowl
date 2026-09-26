@@ -126,16 +126,20 @@ redaction, and enrichment gaps found in review.
   constructions, and time budgets on the indicator passes), with time-budget
   regression tests for adversarial input.
 - The connector client re-checks the allowlist on every redirect, allows only HTTPS, and
-  limits RDAP's bootstrap redirect to one HTTPS hop to a public DNS name, without
-  retries.
+  limits RDAP's bootstrap redirect to one HTTPS hop to a public DNS name: a bare GET
+  without the connector's headers, and without retries.
 - Enrichment never sends non-public IP addresses in any notation, local names, hosts
-  under `org_domains`, recipient-only domains, or email addresses.
-- API keys are scrubbed, longest first, from results, notes, cache entries, tracebacks,
-  and all `httpx`/`httpcore` loggers, and are kept out of object representations.
+  under `org_domains`, recipient-only domains, or email addresses, as indicators or as
+  URL hosts; urlscan reads a URL's host exactly as the filter does. Attachment hashes
+  go first in the queue, but hash-shaped text cannot push links past a per-run limit.
+- API keys are scrubbed, longest first and in percent-encoded form too, from results,
+  notes, cache entries, tracebacks, and all `httpx`/`httpcore` loggers, and are kept
+  out of object representations.
 - Cache entries are private (`0600` files, `0700` directories) and used only when owned
   by the current user and recording the exact key.
 - One failing connector, including one that cannot be constructed, no longer affects the
-  others; vendor responses are parsed defensively.
+  others; vendor responses are parsed defensively, and a connector that stays
+  rate-limited is not asked again for the rest of the run.
 - XSOAR playbook inputs withhold values containing `,` or `${`; Sentinel drafts encode
   expression-like strings as literal data.
 - Upload UI: request bytes are counted before multipart parsing, one analysis runs at a

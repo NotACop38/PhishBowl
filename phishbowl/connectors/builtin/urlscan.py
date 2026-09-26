@@ -25,6 +25,7 @@ from __future__ import annotations
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
+from phishbowl.domains import public_host
 from phishbowl.models import IOCType
 
 from ..base import (
@@ -38,7 +39,7 @@ from ..base import (
 from ..errors import ConnectorError
 from ..http import json_object
 from ..registry import register
-from ._fields import count, mapping
+from ._fields import count, mapping, text
 
 _SIGNAL_ID = "enrichment.urlscan.malicious"
 # Evidence about another page on the same host is weaker than about the URL itself.
@@ -46,11 +47,18 @@ _SAME_HOST_MAGNITUDE = 0.5
 
 
 def _host_of(url: str) -> str | None:
+    """The public host a browser would contact for ``url``, or ``None``.
+
+    Read the way the target builder read it (a browser treats ``\\`` as ``/``),
+    so the host searched is the host that was checked, and checked again: only
+    a public DNS name or IP address is ever put into a search query.
+    """
     try:
-        host = urlsplit(url).hostname
+        host = urlsplit(url.replace("\\", "/")).hostname
     except ValueError:
         return None
-    return host.casefold() if host else None
+    public = public_host(host) if host else None
+    return public[1] if public else None
 
 
 def _result_link(value: object) -> str | None:
@@ -163,7 +171,7 @@ class UrlscanConnector(Connector):
 def _scan(entry: dict, url: str) -> _Scan:
     """A search result's overall verdict, and whether it scanned ``url`` itself."""
     overall = mapping(mapping(entry.get("verdicts")).get("overall"))
-    scanned = {mapping(entry.get(section)).get("url") for section in ("task", "page")} - {None}
+    scanned = {text(mapping(entry.get(section)).get("url")) for section in ("task", "page")}
     return _Scan(
         malicious=overall.get("malicious") is True,
         same_url=url in scanned,

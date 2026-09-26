@@ -101,7 +101,7 @@ Domain comparisons use registered domains from the Public Suffix List (so
 | Rule ID | Weight | Fires when |
 |---------|------:|------------|
 | `url.idn_homograph` | 18 | A domain label (decoded from punycode) mixes writing systems outside Unicode TR39's highly restrictive profile, or is non-ASCII and folds to a brand or `org_domains` name once look-alike letters and accents are normalized (`раypal` with Cyrillic letters). |
-| `url.lookalike` | 18 | A domain imitates a brand or `org_domains` entry: the same name after folding lookalike characters (`paypa1`), the name as a hyphenated part (`paypal-secure`), or a near-miss spelling that keeps the first letter (one edit for names up to 8 characters, two for longer ones; names shorter than 6 characters are compared only for the first two patterns). |
+| `url.lookalike` | 18 | A domain imitates a brand or `org_domains` entry: the same name after folding lookalike characters (`paypa1`), the name as a hyphenated part (`paypal-secure`), or a near-miss spelling that keeps the first letter (one edit for names up to 8 characters, two for longer ones). Names shorter than 5 characters (`fb`, `me`, `live`, `bofa`) are too short to compare, and 5-character names are checked only for the first two patterns. |
 | `url.anchor_href_mismatch` | 16 | A link's visible text names a different domain than the one it points to. |
 | `url.punycode` | 12 | A punycode (`xn--`) domain is present that the homograph rule did not already score. |
 | `url.raw_ip_host` | 12 | A URL uses an IP address as its host, in any notation a browser accepts (`http://3232235777/`). |
@@ -161,7 +161,7 @@ own `enrichment.*` IDs; see [`CONNECTORS.md`](CONNECTORS.md).
 | `urgency_keywords` | list | Pressure phrases matched in the subject and body. |
 | `role_keywords` | list | Organizational roles matched as whole words in display names. |
 | `brands` | mapping | Brand keyword to the domains that legitimately belong to it. An empty list removes a bundled brand. |
-| `org_domains` | list | Your own domains: lookalikes of them fire `url.lookalike`, hosts under them are redacted as internal by `--redact`, and they are never sent to enrichment services. |
+| `org_domains` | list | Your own domains: lookalikes of them fire `url.lookalike`, hosts under them are redacted as internal by `--redact`, and they are never sent to enrichment services, as indicators or as URL hosts. |
 
 Matching is case-insensitive throughout.
 

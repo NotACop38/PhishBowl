@@ -60,7 +60,7 @@ def json_object(response: httpx.Response, vendor: str) -> dict[str, Any]:
     """
     try:
         body = response.json()
-    except ValueError:  # JSONDecodeError and UnicodeDecodeError are ValueErrors
+    except (ValueError, RecursionError):  # bad JSON or encoding; absurd nesting
         raise ConnectorError(f"{vendor} returned a non-JSON response") from None
     if not isinstance(body, dict):
         raise ConnectorError(f"{vendor} returned an unexpected JSON document")
@@ -136,9 +136,9 @@ class AllowlistedClient:
         allowlisted host may leave the allowlist, because the vendor's
         documented job is to designate the authoritative host. That hop must be
         https to a public DNS name (never an IP literal or a local name), and
-        the designated host gets exactly one request, without rate-limit
-        retries: a further redirect from it soft-fails, so a registrant-chosen
-        second hop can never be followed.
+        the designated host gets exactly one plain GET — none of the caller's
+        headers, no body, no rate-limit retries: a further redirect from it
+        soft-fails, so a registrant-chosen second hop can never be followed.
         """
         self._guard(url)
         request = self._client.build_request(method, url, **kwargs)
@@ -175,6 +175,10 @@ class AllowlistedClient:
                     raise SSRFGuardError(
                         "refused bootstrap redirect to an IP literal or local host"
                     ) from None
+                # The designated host is not the vendor: it gets a bare GET,
+                # without the caller's headers (which may carry an API key; httpx
+                # strips only Authorization across hosts) or body.
+                next_request = self._client.build_request("GET", next_request.url)
                 off_allowlist = True
             request = next_request
             redirects += 1

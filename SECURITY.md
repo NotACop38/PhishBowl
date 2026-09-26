@@ -93,8 +93,10 @@ Enrichment (`--enrich`) is the only feature that reaches the network.
   HTTPS, receives exactly one request with no retries, and may not redirect again.
 - **Minimal disclosure.** Non-public IP addresses in any notation, local host names,
   hosts under the operator's `org_domains`, domains seen only in recipient headers, and
-  email addresses are never sent. urlscan.io searches by domain unless the operator
-  passes `--urlscan-submit`.
+  email addresses are never sent, as indicators or as the host of a URL; each
+  connector re-derives hosts the same way the filter does. A URL that passes is sent
+  whole to URL-reputation services, path and query included. urlscan.io searches by
+  host name unless the operator passes `--urlscan-submit`.
 - **Secret hygiene.** Keys are read from the environment only, kept out of object
   representations, and scrubbed, longest first, from results, status notes, cached
   entries, connector tracebacks, and the `httpx`/`httpcore` loggers during a run.
