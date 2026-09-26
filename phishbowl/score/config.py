@@ -93,7 +93,10 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
         if isinstance(existing, dict) and value is None:
             # An empty "weights:" key would otherwise zero every rule silently.
             raise ValueError(f"'{key}' is empty; remove the key or give it entries")
-        if isinstance(existing, dict) and isinstance(value, Mapping):
+        if isinstance(existing, dict) and not isinstance(value, Mapping):
+            # "weights: []" (or 0, "") must not silently replace every weight.
+            raise ValueError(f"'{key}' must be a mapping, got {type(value).__name__}")
+        if isinstance(existing, dict):
             out[key] = _deep_merge(existing, value)
         else:
             out[key] = value
@@ -144,7 +147,8 @@ def _string_list(values: Any, key: str) -> list[str]:
 def _weights(raw: dict[str, Any]) -> dict[str, float]:
     from .detectors import OFFLINE_DETECTORS  # deferred: detectors import this module
 
-    values = raw.get("weights") or {}
+    values = raw.get("weights")
+    values = {} if values is None else values
     if not isinstance(values, Mapping):
         raise ValueError(f"'weights' must be a mapping, got {type(values).__name__}")
     known = {spec.id for spec in OFFLINE_DETECTORS}
@@ -165,7 +169,8 @@ def _weights(raw: dict[str, Any]) -> dict[str, float]:
 
 
 def _bands(raw: dict[str, Any]) -> tuple[Band, ...]:
-    entries = raw.get("bands") or []
+    entries = raw.get("bands")
+    entries = [] if entries is None else entries
     if not isinstance(entries, list):
         raise ValueError(f"'bands' must be a list, got {type(entries).__name__}")
     bands: list[Band] = []
@@ -188,7 +193,8 @@ def _bands(raw: dict[str, Any]) -> tuple[Band, ...]:
 
 
 def _brands(raw: dict[str, Any]) -> dict[str, frozenset[str]]:
-    values = raw.get("brands") or {}
+    values = raw.get("brands")
+    values = {} if values is None else values
     if not isinstance(values, Mapping):
         raise ValueError(f"'brands' must be a mapping, got {type(values).__name__}")
     brands: dict[str, frozenset[str]] = {}

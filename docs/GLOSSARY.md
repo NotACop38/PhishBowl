@@ -118,9 +118,10 @@ are normalized. Other punycode domains get the weaker punycode signal.
 
 A domain that imitates a brand or one of your configured org domains without
 using non-ASCII characters. PhishBowl recognizes three patterns: the same name
-after folding ASCII look-alikes (`paypa1.com`, `micros0ft.com`), the name as one
-hyphenated part of a longer one (`paypal-secure.com`, known as combosquatting), and
-a near-miss spelling that keeps the first letter (`paypall.com`), measured as an
+after folding ASCII look-alikes (`paypa1.com`, `micros0ft.com`), the name
+hyphenated with a lure word (`paypal-secure.com`, known as combosquatting; a
+brand's own `media-amazon.com` has no lure word and does not count), and a
+near-miss spelling that keeps the first letter (`paypall.com`), measured as an
 edit distance in which swapping two adjacent letters counts as one edit. Configure
 your own domains in `org_domains` so impersonations of *you* are caught.
 

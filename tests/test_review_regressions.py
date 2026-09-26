@@ -610,3 +610,60 @@ def test_html_and_auth_parsing_stay_fast_on_hostile_input(code):
     import sys
 
     subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
+
+
+# --------------------------------------------------------------------------- #
+# Second review: scoring                                                      #
+# --------------------------------------------------------------------------- #
+
+
+def _url_rules(raw: bytes, **overrides):
+    config = load_config(overrides=overrides) if overrides else None
+    _, result = triage(parse_eml(raw), config=config)
+    return {rule.id for rule in result.fired if rule.id.startswith("url.")}
+
+
+def test_a_punycode_label_that_decodes_to_a_surrogate_still_renders():
+    view, result = triage(email("see https://xn--ab-zd9k.example/login", html=False))
+    assert "url.punycode" in {rule.id for rule in result.fired}
+    _renders(view)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # A recipient's own domain is not screened as the sender's claim.
+        b"From: bob@partner.example\r\nTo: alice@the-office-group.co.uk\r\n\r\nhello\r\n",
+        # Brand-owned auxiliary domains name the brand without a lure word.
+        b"From: ship@amazon.com\r\nContent-Type: text/html\r\n\r\n"
+        b"<img src='https://m.media-amazon.com/i.png'>"
+        b"<a href='https://paypal-community.com/t'>forum</a>\r\n",
+        # Link text naming a file is not a host.
+        b"From: a@b.example\r\nContent-Type: text/html\r\n\r\n"
+        b"<a href='https://github.com/o/r/files'>README.md</a>"
+        b"<a href='https://github.com/o/r/blob/main/setup.py'>setup.py</a>\r\n",
+    ],
+)
+def test_benign_mail_does_not_fire_lookalike_or_anchor_rules(raw):
+    assert _url_rules(raw) & {"url.lookalike", "url.anchor_href_mismatch"} == set()
+
+
+def test_combosquats_with_a_lure_word_still_fire():
+    raw = b"From: a@b.example\r\n\r\nhttps://paypal-secure.net/x https://secure-paypal.com/y\r\n"
+    assert "url.lookalike" in _url_rules(raw)
+
+
+def test_an_org_domain_without_a_public_suffix_compares_its_name():
+    benign = b"From: a@shop-local.co.uk\r\n\r\nhello\r\n"
+    assert "url.lookalike" not in _url_rules(benign, org_domains=["acmecorp.local"])
+    squat = b"From: a@acmecorp-login.co.uk\r\n\r\nhello\r\n"
+    assert "url.lookalike" in _url_rules(squat, org_domains=["acmecorp.local"])
+
+
+@pytest.mark.parametrize(
+    "override",
+    [{"weights": []}, {"weights": 0}, {"weights": False}, {"brands": []}, {"brands": ""}],
+)
+def test_a_non_mapping_where_a_mapping_belongs_is_an_error(override):
+    with pytest.raises(ValueError, match="must be a mapping"):
+        load_config(overrides=override)

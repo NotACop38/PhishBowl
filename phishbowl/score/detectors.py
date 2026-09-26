@@ -58,6 +58,9 @@ _TEXT_HOST_RE = re.compile(
 )
 _WS_RE = re.compile(r"\s+")
 
+# Domain indicators that only name the message's recipients.
+_RECIPIENT_PROVENANCE = frozenset({"header:To", "header:Cc"})
+
 
 def url_host(url: str) -> str | None:
     """Lower-cased hostname of a URL (port and IPv6 brackets stripped)."""
@@ -111,25 +114,27 @@ def _word_in(word: str, text: str) -> bool:
     return re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE) is not None
 
 
-# Public suffixes that are also common file extensions: "invoice.zip" in link
-# text names a file far more often than a host.
-_FILE_EXTENSION_SUFFIXES = frozenset({"zip", "mov"})
+# Public suffixes that are also common file extensions: "invoice.zip" or
+# "README.md" in link text names a file far more often than a host.
+_FILE_EXTENSION_SUFFIXES = frozenset({"zip", "mov", "md", "py", "sh", "rs", "pm", "ps"})
 
 
-def _first_host_in_text(text: str) -> str | None:
+def _first_host_in_text(text: str, href: str = "") -> str | None:
     """The first host name a reader would take from link text, if any.
 
     A candidate needs a real public suffix, so file names ("statement.pdf",
-    "setup.exe") are not hosts; ".zip"/".mov" names count only when written
-    with a scheme or "www.".
+    "setup.exe") are not hosts. Without a scheme or "www.", a name ending in a
+    common file extension that is also a suffix (".zip", ".md", ".py", ...) is
+    a file, and so is text that names a file in the link's own path.
     """
+    path = href.casefold().split("?", 1)[0]
     for match in _TEXT_HOST_RE.finditer(text):
         host = match.group(1).casefold()
         suffix = _PUBLIC_SUFFIX(host).suffix
         if not suffix:
             continue
         explicit = match.group(0).casefold().startswith(("http", "www."))
-        if suffix in _FILE_EXTENSION_SUFFIXES and not explicit:
+        if not explicit and (suffix in _FILE_EXTENSION_SUFFIXES or f"/{host}" in path):
             continue
         return host
     return None
@@ -185,6 +190,8 @@ class ScoringContext:
         domains: set[str] = set()
         for ioc in self.iocs:
             if ioc.type is IOCType.DOMAIN:
+                if set(ioc.provenance) <= _RECIPIENT_PROVENANCE:
+                    continue  # the recipients' own domains are not the sender's claims
                 domains.add(ioc.value.casefold())
             elif ioc.type is IOCType.URL:
                 host = url_host(ioc.value)
@@ -195,6 +202,14 @@ class ScoringContext:
             if addr and addr.domain:
                 domains.add(addr.domain.casefold())
         return domains
+
+    @cached_property
+    def lure_words(self) -> frozenset[str]:
+        """Words that make a hyphenated brand name a lure (see ``_COMBOSQUAT_LURES``)."""
+        words = set(_COMBOSQUAT_LURES)
+        for phrase in (*self.config.credential_keywords, *self.config.role_keywords):
+            words.update(w for w in re.split(r"[\s\-]+", phrase.casefold()) if len(w) > 2)
+        return frozenset(words)
 
     @cached_property
     def lookalike_targets(self) -> set[str]:
@@ -214,7 +229,7 @@ class ScoringContext:
         """
         target_labels = {
             confusable_skeleton(label): label
-            for label in (registrable_label(t) for t in self.lookalike_targets)
+            for label in (_name_label(t) for t in self.lookalike_targets)
             if len(label) >= _LOOKALIKE_MIN_LABEL
         }
         found: dict[str, str] = {}
@@ -420,23 +435,57 @@ def idn_homograph(ctx: ScoringContext) -> list[str]:
 _LOOKALIKE_MIN_LABEL = 5
 
 
-def _lookalike_reason(label: str, target_label: str) -> str | None:
+# Words that turn a brand name into a lure when hyphenated onto it
+# ("paypal-secure", "account-amazon"), beyond the configured credential and
+# role keywords. A brand's own auxiliary domains ("media-amazon",
+# "paypal-community") use none of them, so they do not fire.
+_COMBOSQUAT_LURES = frozenset(
+    {
+        "access", "alert", "alerts", "auth", "billing", "case", "claim", "com",
+        "customer", "help", "id", "invoice", "limited", "login", "logon", "net",
+        "notice", "org", "password", "payment", "portal", "recovery", "refund",
+        "reset", "resolution", "reward", "secure", "security", "service",
+        "services", "signin", "support", "suspended", "unlock", "update",
+        "validate", "verify", "wallet",
+    }
+)  # fmt: skip
+
+
+def _name_label(domain: str) -> str:
+    """The label that names a registrant: left of the public suffix.
+
+    For a domain without a public suffix (``acme.local``, ``corp.internal``)
+    that is the label left of the last one, not the suffix-like last label.
+    """
+    parts = _PUBLIC_SUFFIX(domain)
+    if parts.suffix:
+        return parts.domain
+    labels = domain.strip(".").casefold().split(".")
+    return labels[-2] if len(labels) >= 2 else labels[0]
+
+
+def _lookalike_reason(
+    label: str, target_label: str, lures: frozenset[str] = _COMBOSQUAT_LURES
+) -> str | None:
     """Why ``label`` imitates ``target_label``, or ``None`` if it does not.
 
     Three patterns, checked in order: the same letters after folding ASCII
-    confusables (``paypa1``); the brand as a hyphenated word of a longer name
-    (``paypal-secure``, combosquatting); or a small typo that keeps the first
-    letter — one edit for labels up to 8 characters, two for longer ones.
-    Identical labels are not lookalikes: ``amazon.ca`` beside ``amazon.com`` is a
-    suffix variant, not a typo, and brands legitimately own many of them.
+    confusables (``paypa1``); the brand as one hyphenated word of a longer name
+    next to a lure word from ``lures`` (``paypal-secure``, combosquatting); or a
+    small typo that keeps the first letter — one edit for labels up to 8
+    characters, two for longer ones. Identical labels are not lookalikes:
+    ``amazon.ca`` beside ``amazon.com`` is a suffix variant, not a typo, and
+    brands legitimately own many of them.
     """
     if len(target_label) < _LOOKALIKE_MIN_LABEL or label == target_label:
         return None
     skeleton = confusable_skeleton(target_label)
     if confusable_skeleton(label) == skeleton:
         return "confusable characters"
-    if "-" in label and skeleton in (confusable_skeleton(t) for t in label.split("-")):
-        return f'embeds the name "{target_label}"'
+    words = label.split("-")
+    if len(words) > 1 and skeleton in (confusable_skeleton(w) for w in words):
+        lure = next((w for w in words if w in lures), None)
+        return f'embeds the name "{target_label}" with "{lure}"' if lure else None
     allowed = 1 if len(target_label) <= 8 else 2
     if (
         len(target_label) <= 5
@@ -464,7 +513,7 @@ def lookalike(ctx: ScoringContext) -> list[str]:
         if not label or reg in known:
             continue
         for target in targets:
-            reason = _lookalike_reason(label, registrable_label(target))
+            reason = _lookalike_reason(label, _name_label(target), ctx.lure_words)
             if reason:
                 hits.append(
                     f"{defang_domain(reg)} is a lookalike of {defang_domain(target)} ({reason})"
@@ -481,7 +530,7 @@ def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
         # compare named hosts here so one link can't fire both rules (no double-count).
         if not href_host or is_ip_literal(href_host):
             continue
-        text_host = _first_host_in_text(text)
+        text_host = _first_host_in_text(text, href)
         if not text_host:
             continue
         if registrable_domain(text_host) != registrable_domain(href_host):

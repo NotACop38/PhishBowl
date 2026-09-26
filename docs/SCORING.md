@@ -101,8 +101,8 @@ Domain comparisons use registered domains from the Public Suffix List (so
 | Rule ID | Weight | Fires when |
 |---------|------:|------------|
 | `url.idn_homograph` | 18 | A domain label (decoded from punycode) mixes writing systems outside Unicode TR39's highly restrictive profile, or is non-ASCII and folds to a brand or `org_domains` name once look-alike letters and accents are normalized (`раypal` with Cyrillic letters). |
-| `url.lookalike` | 18 | A domain imitates a brand or `org_domains` entry: the same name after folding lookalike characters (`paypa1`), the name as a hyphenated part (`paypal-secure`), or a near-miss spelling that keeps the first letter (one edit for names up to 8 characters, two for longer ones). Names shorter than 5 characters (`fb`, `me`, `live`, `bofa`) are too short to compare, and 5-character names are checked only for the first two patterns. |
-| `url.anchor_href_mismatch` | 16 | A link's visible text names a different domain than the one it points to. |
+| `url.lookalike` | 18 | A sender-side, link, or other non-recipient domain imitates a brand or `org_domains` entry: the same name after folding lookalike characters (`paypa1`), the name hyphenated with a lure word such as "secure", "login", or "support" (`paypal-secure`, `account-amazon`; the configured credential and role keywords count as lures), or a near-miss spelling that keeps the first letter (one edit for names up to 8 characters, two for longer ones). Names shorter than 5 characters (`fb`, `me`, `live`, `bofa`) are too short to compare, and 5-character names are checked only for the first two patterns. For an org domain without a public suffix (`acme.local`), the name compared is `acme`. |
+| `url.anchor_href_mismatch` | 16 | A link's visible text names a different domain than the one it points to. Text that reads as a file name (`README.md`, `invoice.zip`, or a name in the link's own path) is not taken for a domain unless written with a scheme or `www.`. |
 | `url.punycode` | 12 | A punycode (`xn--`) domain is present that the homograph rule did not already score. |
 | `url.raw_ip_host` | 12 | A URL uses an IP address as its host, in any notation a browser accepts (`http://3232235777/`). |
 | `url.wrapped_divergence` | 10 | A protected link unwraps to a domain unrelated to the sender. |
@@ -211,8 +211,9 @@ silently changing verdicts:
 - a weight that is not a number from 0 to 100 (booleans are rejected);
 - a band whose `max` is not an integer, duplicate or out-of-range limits, a last band
   that does not end at 100, or an empty verdict;
-- a scalar where a list belongs, an empty `weights:` or `brands:` key, or a file that is
-  not valid YAML.
+- a scalar where a list belongs, anything but a mapping for `weights` or `brands`
+  (`weights: []` would otherwise zero every rule), an empty `weights:` or `brands:`
+  key, or a file that is not valid YAML.
 
 ## Tuning advice
 
