@@ -18,10 +18,11 @@ _NAVIGATION_ATTRS = frozenset({"href", "xlink:href", "action", "formaction"})
 # Attributes whose value a renderer fetches automatically (images, frames, ...),
 # or on click without navigating (``ping``).
 _RESOURCE_ATTRS = frozenset({"src", "poster", "background", "data", "ping"})
-# ``<meta http-equiv="refresh" content="0; url=...">`` redirects on open.
-_REFRESH_URL = re.compile(r"^\s*\d*\s*[;,]?\s*url\s*=\s*['\"]?\s*([^'\"\s]+)", re.IGNORECASE)
-# CSS ``url(...)`` references in style attributes and <style> blocks.
-_CSS_URL = re.compile(r"url\(\s*['\"]?\s*([^'\")\s]+)", re.IGNORECASE)
+# CSS ``url(...)`` references in style attributes and <style> blocks. Every
+# character has one way to match (no adjacent optional whitespace runs), so a
+# long whitespace run cannot make it backtrack quadratically.
+_CSS_URL = re.compile(r"url\(\s*(?:['\"]\s*)?([^'\")\s]+)", re.IGNORECASE)
+_HTML_SPACE = " \t\n\f\r"
 # Elements whose text is never displayed. (Scripts never run in mail clients,
 # so <noscript> content *is* displayed and stays visible text.)
 _HIDDEN_ELEMENTS = frozenset({"script", "style", "template"})
@@ -82,9 +83,9 @@ class _Inspector(HTMLParser):
         if tag == "meta":
             fields = {name: (value or "") for name, value in attrs}
             if fields.get("http-equiv", "").strip().casefold() == "refresh":
-                match = _REFRESH_URL.match(fields.get("content", ""))
-                if match:
-                    self.links.append(match.group(1))
+                target = refresh_target(fields.get("content", ""))
+                if target:
+                    self.links.append(target)
         if tag == "a":
             self.handle_endtag("a")
             href = next((value for name, value in attrs if name == "href" and value), None)
@@ -109,6 +110,47 @@ class _Inspector(HTMLParser):
                 self.resources.extend(_CSS_URL.findall(data))
             return
         self.text.append(data)
+
+
+def refresh_target(content: str) -> str | None:
+    """The URL a ``<meta http-equiv="refresh">`` redirects to, or ``None``.
+
+    Follows the HTML standard's declarative-refresh parsing, so it finds what a
+    browser follows — ``0; url=…``, ``0,url=…``, and ``0; https://…`` without
+    ``url=`` — in linear time.
+    """
+    text = content.lstrip(_HTML_SPACE)
+    i = 0
+    while i < len(text) and text[i].isdigit():
+        i += 1
+    if i == 0 and not text[i : i + 1] == ".":
+        return None
+    while i < len(text) and (text[i].isdigit() or text[i] == "."):
+        i += 1
+    if i < len(text):
+        if text[i] not in ";," + _HTML_SPACE:
+            return None
+        while i < len(text) and text[i] in _HTML_SPACE:
+            i += 1
+        if i < len(text) and text[i] in ";,":
+            i += 1
+        while i < len(text) and text[i] in _HTML_SPACE:
+            i += 1
+    if i >= len(text):
+        return None  # a plain reload, no target
+    target = text[i:]
+    if text[i : i + 3].casefold() == "url":
+        j = i + 3
+        while j < len(text) and text[j] in _HTML_SPACE:
+            j += 1
+        if j < len(text) and text[j] == "=":
+            j += 1
+            while j < len(text) and text[j] in _HTML_SPACE:
+                j += 1
+            target = text[j:]
+    if target[:1] in ("'", '"'):
+        target = target[1:].split(target[0], 1)[0]
+    return target.strip() or None
 
 
 def inspect_html(value: str) -> HTMLAnalysis:

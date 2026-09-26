@@ -28,6 +28,9 @@ _SCHEME_RE = re.compile(r"^(https?)(?=://)", re.IGNORECASE)
 # already-neutered ``hxxp``/``hxxps`` spellings are left alone.
 _OTHER_SCHEME_RE = re.compile(r"^(?!hxxps?:)([a-z][a-z0-9+.\-]*):(?!\])", re.IGNORECASE)
 
+# A neutered web scheme, in any case.
+_NEUTERED_SCHEME = re.compile(r"hxxp(s?)://", re.IGNORECASE)
+
 # Separators that are not already bracketed. Matching only bare separators makes
 # every defang function idempotent: defanging defanged text changes nothing.
 _BARE_DOT = re.compile(r"(?<!\[)\.(?!\])")
@@ -69,7 +72,7 @@ def defang_url(value: str) -> str:
     shown — and neutered — as ``javascript[:]``. Idempotent.
     """
     out = _URL_LEADING.sub("", _URL_IGNORED.sub("", value))
-    out = _SCHEME_RE.sub(lambda m: "hxxp" + m.group(1)[4:], out)
+    out = _SCHEME_RE.sub(lambda m: "hxxp" + m.group(1)[4:].lower(), out)
     out = _OTHER_SCHEME_RE.sub(lambda m: m.group(1) + "[:]", out)
     return _bracket_dots(out)
 
@@ -133,9 +136,10 @@ def refang(value: str) -> str:
 
     Covers the brackets and scheme swaps PhishBowl emits, plus the common
     ``[at]`` / ``(.)`` variants seen in the wild. The round trip is lossless for
-    ordinary indicators; one that itself contains those tokens (a literal
-    ``[.]`` or ``hxxp://`` in a path, or a tab browsers would delete) cannot be
-    told apart from its defanged form and comes back normalized.
+    ordinary indicators, except that a web scheme comes back lower-case
+    (schemes are case-insensitive); one that itself contains those tokens (a
+    literal ``[.]`` or ``hxxp://`` in a path, or a tab browsers would delete)
+    cannot be told apart from its defanged form and comes back normalized.
     """
     out = (
         value.replace("[.]", ".")
@@ -147,4 +151,4 @@ def refang(value: str) -> str:
     )
     # Note: ``[:]`` round-trips IPv6 separators and the neutered dangerous-scheme
     # colon alike — both restore to a plain ``:``.
-    return out.replace("hxxps://", "https://").replace("hxxp://", "http://")
+    return _NEUTERED_SCHEME.sub(lambda m: "http" + m.group(1).lower() + "://", out)

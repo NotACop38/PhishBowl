@@ -47,7 +47,18 @@ MAX_IOCS = 1000
 # is a hostile construct worth surfacing; an inline ``data:`` image is not).
 _WEB_SCHEMES = frozenset({"http", "https", "ftp", "ftps", "file"})
 _SCRIPT_SCHEMES = frozenset({"javascript", "vbscript", "data"})
+# Schemes that name no network indicator: inline parts, phone numbers, the page itself.
+_INERT_SCHEMES = frozenset({"cid", "mid", "tel", "sms", "callto", "about", "blob"})
 _SCHEME_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*")
+
+# Browsers delete tabs and newlines anywhere in a URL and ignore leading and
+# trailing C0 controls and spaces: to them "ht\ttps://" is "https://".
+_URL_DELETED = re.compile(r"[\t\n\r]")
+_URL_TRIMMED = "".join(map(chr, range(0x21)))
+
+# A UNC path (\\host\share): Windows reaches the host over SMB, sending the
+# user's credentials, when such a link or image is opened.
+_UNC_RE = re.compile(r"\\\\([^\\/\s?#]+)")
 
 # Email addresses. iocextract's pattern tolerates spaces around the "@" so it
 # can read defanged prose, which glues the preceding word onto real addresses
@@ -198,15 +209,23 @@ def _add_address(collector: _Collector, addr: Address | None, provenance: str) -
 def _add_link(collector: _Collector, link: str, provenance: str, *, navigation: bool) -> None:
     """Record an HTML attribute URL by what it can reach.
 
-    Web URLs (and protocol-relative ``//host`` links) are URL indicators;
-    ``mailto:`` links contribute their addresses; ``javascript:``/``data:``
-    navigation targets are kept as the hostile constructs they are. Fragments,
-    relative paths, ``cid:`` inline-image references and ``tel:`` links name no
-    network indicator and are skipped.
+    The value is read the way a browser reads it (tabs and newlines deleted,
+    surrounding controls and spaces ignored). Web URLs and protocol-relative
+    ``//host`` links are URL indicators; ``mailto:`` links contribute their
+    addresses; ``javascript:``/``data:`` navigation targets are kept as the
+    hostile constructs they are. UNC paths (``\\\\host\\share``) and other
+    application or file-sharing schemes (``search-ms:``, ``ms-word:``,
+    ``smb:``) are kept too, with any host or web link inside them. Fragments,
+    relative paths, ``cid:`` inline-image references and ``tel:`` links name
+    no network indicator and are skipped.
     """
-    value = link.strip()
+    value = _URL_DELETED.sub("", link).strip(_URL_TRIMMED)
     if value.startswith("//"):
         _add_url(collector, value, provenance)
+        return
+    if value.startswith("\\\\"):
+        collector.add(IOCType.URL, value, provenance)
+        _add_unc_hosts(collector, value, provenance)
         return
     scheme, separator, rest = value.partition(":")
     if not separator or not _SCHEME_RE.fullmatch(scheme):
@@ -219,6 +238,20 @@ def _add_link(collector: _Collector, link: str, provenance: str, *, navigation: 
         path, _, query = rest.partition("?")
         fields = [unquote(path)] + [v for values in parse_qs(query).values() for v in values]
         _scan_text(collector, " ".join(fields), provenance)
+    elif scheme not in _INERT_SCHEMES and scheme not in _SCRIPT_SCHEMES:
+        # A protocol handler hands the value to another program; keep it as
+        # evidence, with the host it names and the web links it usually wraps.
+        collector.add(IOCType.URL, value, provenance)
+        _add_host_iocs(collector, value, provenance)
+        inner = unquote(rest)
+        _add_unc_hosts(collector, inner, provenance)
+        _scan_text(collector, inner, provenance)
+
+
+def _add_unc_hosts(collector: _Collector, text: str, provenance: str) -> None:
+    """Add the host of every UNC path (``\\\\host\\share``) in ``text``."""
+    for host in _UNC_RE.findall(text):
+        _add_host_iocs(collector, f"//{host}/", provenance)
 
 
 def _scan_text(collector: _Collector, text: str, provenance: str) -> None:
@@ -255,25 +288,12 @@ def _scan_text(collector: _Collector, text: str, provenance: str) -> None:
         ]
     )
     for pattern, group, kind, normalize in passes:
+        # The time budget covers the regex alone: matches are collected (and
+        # de-duplicated) first, so per-match work cannot use up the deadline.
+        found_values: dict[str, None] = {}
         try:
             for match in pattern.finditer(text, timeout=0.15):
-                found = match.group(group)
-                try:
-                    value = normalize(found).strip()
-                except ValueError:
-                    # Refanging parses the URL; keep evidence it cannot parse as written.
-                    value = found.strip()
-                if kind == IOCType.URL:
-                    _add_url(collector, value, provenance)
-                    continue
-                value = value.casefold()
-                if kind == IOCType.IPV6 and not _is_ipv6(value):
-                    continue  # times ("10:30:00") and MAC addresses look alike
-                collector.add(kind, value, provenance)
-                if kind == IOCType.EMAIL:
-                    domain = _domain_of_email(value)
-                    if domain:
-                        collector.add(IOCType.DOMAIN, domain, provenance)
+                found_values[match.group(group)] = None
         except TimeoutError:
             collector.note(
                 "extraction_timeout",
@@ -282,6 +302,23 @@ def _scan_text(collector: _Collector, text: str, provenance: str) -> None:
                     "evidence may be missing"
                 ),
             )
+        for found in found_values:
+            try:
+                value = normalize(found).strip()
+            except ValueError:
+                # Refanging parses the URL; keep evidence it cannot parse as written.
+                value = found.strip()
+            if kind == IOCType.URL:
+                _add_url(collector, value, provenance)
+                continue
+            value = value.casefold()
+            if kind == IOCType.IPV6 and not _is_ipv6(value):
+                continue  # times ("10:30:00") and MAC addresses look alike
+            collector.add(kind, value, provenance)
+            if kind == IOCType.EMAIL:
+                domain = _domain_of_email(value)
+                if domain:
+                    collector.add(IOCType.DOMAIN, domain, provenance)
 
 
 def _add_url(collector: _Collector, raw_url: str, provenance: str) -> None:
@@ -309,13 +346,17 @@ def _add_url(collector: _Collector, raw_url: str, provenance: str) -> None:
             collector.add(IOCType.DOMAIN, unwrapped.target_domain, provenance)
 
     # The destination host is itself an indicator. For a reversibly-unwrapped
-    # link this surfaces the *real* target domain, not the gateway's; an IP
-    # literal host is an IP indicator.
-    ip = _ip_of_url(effective)
+    # link this surfaces the *real* target domain, not the gateway's.
+    _add_host_iocs(collector, effective, provenance)
+
+
+def _add_host_iocs(collector: _Collector, url: str, provenance: str) -> None:
+    """Add a URL's host as a domain indicator, or as an IP one for an IP literal."""
+    ip = _ip_of_url(url)
     if ip is not None:
         collector.add(IOCType.IPV6 if ":" in ip else IOCType.IPV4, ip, provenance)
         return
-    host = _host_of_url(effective)
+    host = _host_of_url(url)
     if host:
         collector.add(IOCType.DOMAIN, host, provenance)
 

@@ -14,8 +14,11 @@ Two rules keep a hostile sender from writing their own verdict:
   ``Authentication-Results`` is the one the analyst's own infrastructure wrote;
   headers further down arrived with the message and may be forged. Only headers
   carrying the topmost header's ``authserv-id`` are used, and headers from other
-  ids are reported as an anomaly for the analyst to review. The same holds for
-  ``Received-SPF``: only the topmost one is read.
+  ids are reported as an anomaly for the analyst to review. Each method's
+  result comes from the topmost of those headers that reports it, so a lower
+  copy claiming the same id (easy to forge) can never override it; a header
+  with no ``authserv-id`` at all (Exchange Online writes these) is trusted on
+  its own. Only the topmost ``Received-SPF`` is read.
 
 These are still header *claims*: PhishBowl does not re-verify signatures or
 SPF records. Best-effort and total: an unparseable header is skipped, never fatal.
@@ -127,14 +130,22 @@ def strip_comments(text: str) -> str:
 
 
 def authserv_id(value: str) -> str:
-    """The ``authserv-id`` (first token of the first clause), lower-cased."""
+    """The ``authserv-id`` (first token of the first clause), lower-cased.
+
+    Empty when the header has none: an id is a token, and a first clause that
+    contains ``=`` is already a result (``spf=fail ...``), as Exchange Online
+    writes them.
+    """
     first = strip_comments(split_clauses(value)[0]).strip()
-    return first.split(None, 1)[0].casefold() if first else ""
+    if not first or "=" in first:
+        return ""
+    return first.split(None, 1)[0].casefold()
 
 
 def _results(value: str):
     """Yield ``(method, state, detail)`` for each result clause in an A-R value."""
-    for clause in split_clauses(value)[1:]:
+    clauses = split_clauses(value)
+    for clause in clauses if not authserv_id(value) else clauses[1:]:
         match = _METHOD_RESULT.match(strip_comments(clause))
         if not match:
             continue
@@ -160,7 +171,7 @@ def _dkim_choice(results: list[tuple[AuthResultState, str | None]], from_domain:
     if from_domain:
         target = from_domain.casefold().rstrip(".")
         for state, detail in results:
-            for match in re.finditer(r"header\.[di]=\S*?@?([^\s;@]+)", detail or "", re.I):
+            for match in re.finditer(r"header\.[di]=(?:[^\s;@]*@)?([^\s;@]+)", detail or "", re.I):
                 domain = match.group(1).casefold().rstrip(".")
                 if domain == target or target.endswith("." + domain):
                     return state, detail
@@ -179,20 +190,40 @@ def parse_auth(headers: Headers, *, from_domain: str | None = None) -> tuple[Aut
     collected: dict[str, list[tuple[AuthResultState, str | None]]] = {}
     if values:
         trusted = authserv_id(values[0])
+        # A header without an id cannot be matched to anything: trust it alone.
+        candidates = values if trusted else values[:1]
         ignored: set[str] = set()
-        for value in values:
+        repeated: set[str] = set()
+        for value in candidates:
             server = authserv_id(value)
             if server != trusted:
                 ignored.add(server or "(none)")
                 continue
+            found: dict[str, list[tuple[AuthResultState, str | None]]] = {}
             for method, state, detail in _results(value):
-                collected.setdefault(method, []).append((state, detail))
+                found.setdefault(method, []).append((state, detail))
+            for method, results in found.items():
+                # The topmost header that reports a method decides it.
+                if method in collected:
+                    repeated.add(method)
+                else:
+                    collected[method] = results
+        ignored.update("(none)" for value in values[len(candidates) :])
         if ignored:
             anomalies.append(
                 Anomaly.notice(
                     "auth_untrusted_results",
                     "Authentication-Results from other servers were not used "
-                    f"(only the topmost, {trusted or '(none)'}): {', '.join(sorted(ignored))}",
+                    f"(only the topmost, {trusted or 'without an id'}): "
+                    f"{', '.join(sorted(ignored))}",
+                )
+            )
+        if repeated:
+            anomalies.append(
+                Anomaly.notice(
+                    "auth_repeated_results",
+                    f"a lower Authentication-Results header from {trusted} repeated "
+                    f"{', '.join(sorted(repeated))}; the topmost result was used",
                 )
             )
 
@@ -224,7 +255,9 @@ def _parse_received_spf(values: list[str]) -> AuthResult | None:
         if state is None:
             continue
         # Keep the explanatory parenthetical, if present, as detail.
-        paren = re.search(r"\(([^)]*)\)", stripped)
+        # "[^()]" (not "[^)]"): an unbalanced run of "(" cannot trigger a
+        # rescan from each one, which is quadratic.
+        paren = re.search(r"\(([^()]*)\)", stripped)
         detail = paren.group(1).strip() if paren else None
         return AuthResult(result=state, detail=detail)
     return None

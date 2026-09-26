@@ -503,3 +503,110 @@ def test_parse_helpers_stay_fast_on_hostile_input(code):
     import sys
 
     subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
+
+
+# --------------------------------------------------------------------------- #
+# Second review: authentication, HTML, extraction, defanging                  #
+# --------------------------------------------------------------------------- #
+
+
+def test_a_lower_authentication_results_copy_cannot_forge_dkim():
+    parsed = parse_eml(
+        b"Authentication-Results: mx.corp.example; dkim=fail (bad signature) "
+        b"header.d=evil.example; spf=fail smtp.mailfrom=evil.example; "
+        b"dmarc=fail header.from=bank.example\r\n"
+        b"Authentication-Results: mx.corp.example; dkim=pass header.d=bank.example\r\n"
+        b"From: alerts@bank.example\r\nSubject: s\r\n\r\nhi\r\n"
+    )
+    assert parsed.auth.dkim.result.value == "fail"
+    assert any(a.code == "auth_repeated_results" for a in parsed.anomalies)
+
+
+def test_an_exchange_style_header_without_an_id_is_trusted_alone():
+    parsed = parse_eml(
+        b"Authentication-Results: spf=fail (sender IP is 203.0.113.9) "
+        b"smtp.mailfrom=evil.example; dkim=none (message not signed) header.d=none; "
+        b"dmarc=fail action=none header.from=bank.example;\r\n"
+        b"Authentication-Results: spf=fail; dkim=pass header.d=bank.example\r\n"
+        b"From: alerts@bank.example\r\nSubject: s\r\n\r\nhi\r\n"
+    )
+    assert (parsed.auth.spf.result.value, parsed.auth.dkim.result.value) == ("fail", "none")
+    assert parsed.auth.dmarc.result.value == "fail"
+
+
+def test_dkim_alignment_reads_the_domain_of_header_i():
+    parsed = parse_eml(
+        b"Authentication-Results: mx.corp.example; dkim=pass header.i=news@esp.example; "
+        b"dkim=fail header.i=alerts@bank.example\r\n"
+        b"From: alerts@bank.example\r\n\r\nhi\r\n"
+    )
+    assert parsed.auth.dkim.result.value == "fail"
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "ht&#9;tps://evil.example/login",
+        "https&#10;://evil.example/login",
+        "\x01https://evil.example/login",
+    ],
+)
+def test_links_are_read_as_browsers_read_them(href):
+    view, _ = triage(email(f'<a href="{href}">x</a>'))
+    values = {i.value_raw for g in view.ioc_groups for i in g.items}
+    assert "https://evil.example/login" in values
+
+
+@pytest.mark.parametrize(
+    "markup",
+    [
+        '<a href="search-ms:query=x&amp;crumb=location:\\\\evil.example\\share">x</a>',
+        '<a href="ms-word:ofe|u|https://evil.example/x.docx">x</a>',
+        '<a href="smb://evil.example/share">x</a>',
+        '<img src="\\\\evil.example\\share\\x.png">',
+        '<meta http-equiv="refresh" content="0; https://evil.example/login">',
+        '<meta http-equiv="refresh" content="0,https://evil.example/login">',
+    ],
+)
+def test_links_to_other_protocols_and_bare_refreshes_are_evidence(markup):
+    view, _ = triage(email(markup))
+    domains = {i.value_raw for g in view.ioc_groups if g.type == "domain" for i in g.items}
+    assert "evil.example" in domains
+
+
+def test_a_url_after_many_matches_still_fits_the_time_budget():
+    body = "See https://benign.example/newsletter/item\n" * 5000
+    parsed = email(body + "https://evil.example/login\n", html=False)
+    assert "https://evil.example/login" in {i.value for i in extract_iocs(parsed)}
+
+
+@pytest.mark.parametrize(
+    "url", ["HTTPS://evil.example/login", "Http://evil.example/login", "hXXps://evil.example"]
+)
+def test_defanging_is_case_insensitive_about_web_schemes(url):
+    from phishbowl.extract import defang_url, refang
+
+    shown = defang_url(url)
+    assert shown.startswith("hxxp") or shown.startswith("hXXp")
+    assert refang(shown).casefold().startswith("http")
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # Meta refresh content full of spaces.
+        "from phishbowl.html_analysis import inspect_html\n"
+        "inspect_html('<meta http-equiv=\"refresh\" content=\"' + ' ' * 200_000 + 'x\">')",
+        # CSS url() followed by a long whitespace run.
+        "from phishbowl.html_analysis import inspect_html\n"
+        "inspect_html('<div style=\"background:url(' + ('\\n' + ' ' * 999) * 200 + ')\">')",
+        # Received-SPF with an unbalanced run of parentheses.
+        "from phishbowl.parse.auth import _parse_received_spf\n"
+        "_parse_received_spf(['pass ' + '(' * 200_000])",
+    ],
+)
+def test_html_and_auth_parsing_stay_fast_on_hostile_input(code):
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
