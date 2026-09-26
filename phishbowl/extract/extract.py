@@ -20,10 +20,17 @@ from __future__ import annotations
 
 import ipaddress
 import re
+import warnings
 from urllib.parse import parse_qs, unquote, urlsplit
 
-import iocextract
 import regex
+
+with warnings.catch_warnings():
+    # iocextract 1.16 has invalid escape sequences in plain strings, which
+    # Python 3.12+ reports as SyntaxWarning when it first compiles the module.
+    # They are harmless (the strings mean what they say) and not ours to fix.
+    warnings.simplefilter("ignore", SyntaxWarning)
+    import iocextract
 
 from phishbowl.html_analysis import MAX_TEXT_CHARS, inspect_html
 from phishbowl.models import IOC, Address, Anomaly, IOCs, IOCType, ParsedEmail
