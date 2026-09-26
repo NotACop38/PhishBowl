@@ -492,11 +492,29 @@ def _flags(
     return flags
 
 
+class _VerbatimGenerator(BytesGenerator):
+    """A generator that writes headers exactly as they were parsed.
+
+    The stdlib re-folds every header on output, and its folder re-measures the
+    whole line after each word: quadratic on a long hostile header. Writing the
+    raw value back (original folding included) is linear and more faithful.
+    """
+
+    def _write_headers(self, msg: Message) -> None:
+        for name, value in msg.raw_items():
+            if isinstance(value, str):
+                line = f"{name}: {value}{self._NL}"
+                self._fp.write(line.encode("utf-8", "surrogateescape"))
+            else:  # a Header object set programmatically; never from the parser
+                self._fp.write(self.policy.fold_binary(name, value))
+        self.write(self._NL)
+
+
 def message_part_bytes(part: Message) -> bytes:
     """The enclosed email of a ``message/*`` part, as bytes.
 
-    The stdlib parses an attached message into a sub-message, discarding its
-    original header folding, so it is re-serialized: no header re-wrapping, no
+    The stdlib parses an attached message into a sub-message, so it is
+    re-serialized: headers exactly as parsed (original folding kept), no
     ``From`` mangling, CRLF line endings — the most wire-faithful form it can
     reproduce. A part that (against RFC 2046) is base64 or quoted-printable
     encoded stays a string payload; it is transfer-decoded instead. Never raises.
@@ -507,7 +525,7 @@ def message_part_bytes(part: Message) -> bytes:
             payload = payload[0]
         if isinstance(payload, Message):
             buf = io.BytesIO()
-            BytesGenerator(buf, mangle_from_=False, maxheaderlen=0).flatten(payload, linesep="\r\n")
+            _VerbatimGenerator(buf, mangle_from_=False).flatten(payload, linesep="\r\n")
             data = buf.getvalue()
         elif isinstance(payload, str):
             data = payload.encode("utf-8", errors="replace")

@@ -139,13 +139,20 @@ def script_of(char: str) -> str | None:
 
 
 def decode_label(label: str) -> str:
-    """A ``xn--`` label decoded to Unicode (unchanged when not valid punycode)."""
-    if not label.startswith("xn--"):
+    """A ``xn--`` label decoded to Unicode (unchanged when not valid punycode).
+
+    A label over DNS's 63-character limit is not decoded (Python's punycode
+    decoder is quadratic), and neither is one that decodes to a lone surrogate,
+    which no real domain contains and no renderer can output.
+    """
+    if not label.startswith("xn--") or len(label) > 63:
         return label
     try:
-        return codecs.decode(label[4:].encode("ascii"), "punycode")
+        decoded = codecs.decode(label[4:].encode("ascii"), "punycode")
+        decoded.encode("utf-8")  # rejects lone surrogates
     except (UnicodeError, ValueError):
         return label
+    return decoded
 
 
 def is_suspicious_mix(label: str) -> bool:

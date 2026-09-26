@@ -216,6 +216,18 @@ def _string_stream(msg, stream_id: str) -> str | None:
     return getter(stream_id) if getter is not None else None
 
 
+def _lenient_string_stream(msg, stream_id: str) -> str | None:
+    """A MAPI string stream decoded with replacement characters; never raises."""
+    for suffix, codec in (("001F", "utf-16-le"), ("001E", "cp1252")):
+        try:
+            raw = _get_stream(msg, stream_id + suffix)
+        except Exception:
+            continue
+        if raw is not None:
+            return bytes(raw).decode(codec, errors="replace")
+    return None
+
+
 def _mapi_addresses(
     msg, current: Addresses, fill_sender: bool, fill_to: bool, fill_cc: bool
 ) -> Addresses:
@@ -299,8 +311,16 @@ def _build_body(msg) -> Body:
     exactly as on the .eml path. ``has_html`` reflects whether a *real* HTML part
     was present (matching the .eml parser's semantics).
     """
-    text = _string_stream(msg, "__substg1.0_1000")
-    html = _real_html(msg)
+    # Separate guards: an undecodable plain-text stream must not cost the
+    # HTML body (or the reverse), and is itself recovered leniently.
+    try:
+        text = _string_stream(msg, "__substg1.0_1000")
+    except Exception:
+        text = _lenient_string_stream(msg, "__substg1.0_1000")
+    try:
+        html = _real_html(msg)
+    except Exception:
+        html = None
     return Body(text=text, html_raw=html, has_html=html is not None)
 
 
@@ -375,6 +395,18 @@ def _codepage_charset(cpid: int) -> str:
     return f"cp{cpid}"
 
 
+def _attribute(obj, name: str):
+    """An extract-msg attribute, or ``None`` when reading it fails.
+
+    extract-msg decodes MAPI strings strictly, so one malformed string (an
+    unpaired surrogate in a filename) raises from a plain attribute read.
+    """
+    try:
+        return getattr(obj, name, None)
+    except Exception:
+        return None
+
+
 def _build_attachments(msg, parsed: ParsedEmail) -> list[Attachment]:
     """Inspect MAPI attachments through the shared, format-agnostic inspector.
 
@@ -384,8 +416,14 @@ def _build_attachments(msg, parsed: ParsedEmail) -> list[Attachment]:
     """
     attachments: list[Attachment] = []
     for att in msg.attachments or []:
-        filename = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None)
-        declared_type = getattr(att, "mimetype", None)
+        filename = (
+            _attribute(att, "longFilename")
+            or _attribute(att, "shortFilename")
+            # A malformed name is recovered leniently: an ".exe" must stay visible.
+            or _lenient_string_stream(att, "__substg1.0_3707")
+            or _lenient_string_stream(att, "__substg1.0_3704")
+        )
+        declared_type = _attribute(att, "mimetype")
         try:
             data = att.data
         except Exception as exc:

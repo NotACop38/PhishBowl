@@ -53,6 +53,11 @@ def ascii_host(host: str) -> str:
     host = _normalize(host)
     if host.isascii():
         return host
+    # A DNS name is at most 253 characters in labels of at most 63. Longer
+    # input is not a host, and Python's punycode encoder is quadratic in label
+    # length, so it is never handed attacker-sized strings.
+    if len(host) > 253 or any(len(label) > 63 for label in host.split(".")):
+        return host
     try:
         return host.encode("idna").decode("ascii")
     except UnicodeError:

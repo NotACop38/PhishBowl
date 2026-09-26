@@ -362,3 +362,144 @@ assert _first_host_in_text('visit https://example.org/login') == 'example.org'
 def test_anchor_host_followed_by_punctuation_still_detects_mismatch(label):
     _, result = triage(email(f'<a href="https://credential.example/login">{label}</a>'))
     assert any(rule.id == "url.anchor_href_mismatch" for rule in result.fired)
+
+
+# --------------------------------------------------------------------------- #
+# Second review: parse layer                                                  #
+# --------------------------------------------------------------------------- #
+
+
+def _renders(view) -> None:
+    """Every renderer accepts the view (the crash class these tests guard)."""
+    render_json(view)
+    render_html(view).encode("utf-8")
+    render_cli(view, Console(file=io.StringIO(), width=120))
+
+
+def test_a_nul_in_a_charset_label_loses_nothing():
+    raw = (
+        b"From: a@sender.example\r\nSubject: =?utf-8\x00?q?Locked?=\r\n"
+        b"Authentication-Results: mx.example.org; spf=fail smtp.mailfrom=sender.example\r\n"
+        b"Content-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain; charset*=utf-8%00''x\r\n\r\n"
+        b"Pay at https://evil.example/pay\r\n"
+        b"--b\r\nContent-Type: application/octet-stream\r\n"
+        b"Content-Disposition: attachment; filename*=utf-8%00''invoice.pdf.exe\r\n\r\n"
+        b"MZ\r\n--b--\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert parsed.subject == "Locked"
+    assert parsed.auth.spf.result.value == "fail"
+    assert "https://evil.example/pay" in {i.value for i in extract_iocs(parsed)}
+    assert [a.filename for a in parsed.attachments] == ["invoice.pdf.exe"]
+
+
+def test_adjacent_encoded_words_may_split_a_character():
+    parsed = parse_eml(
+        b"From: a@sender.example\r\n"
+        b"Subject: =?utf-8?q?Rechnung_f=C3?= =?utf-8?q?=BCr_Kunde?=\r\n\r\nhi\r\n"
+    )
+    assert parsed.subject == "Rechnung für Kunde"
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # The first header line of a part is a continuation, quoting raw bytes.
+        b"From: a@b.example\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\n \xc3\x28 note\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b--\r\n",
+        # A misplaced "From " envelope line among the headers.
+        b"From: a@b.example\r\nFrom \xc3\x28 note\r\nSubject: s\r\n\r\nhi\r\n",
+    ],
+)
+def test_mime_defects_quoting_raw_bytes_still_render(raw):
+    view, _ = triage(parse_eml(raw))
+    assert any(a.code == "mime_defect" for a in view.anomalies)
+    _renders(view)
+
+
+def test_models_never_hold_lone_surrogates():
+    from phishbowl.models import Anomaly
+
+    assert Anomaly(message="x\udcc3y").message == "x�y"
+
+
+def test_mixed_rfc2231_parameters_keep_the_message():
+    raw = (
+        b"From: a@sender.example\r\nSubject: hello\r\n"
+        b"Content-Type: multipart/mixed; boundary*0=b; boundary*=x\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain\r\n\r\nhttps://evil.example/x\r\n--b--\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert parsed.addresses.from_ is not None and parsed.subject == "hello"
+    assert "https://evil.example/x" in {i.value for i in extract_iocs(parsed)}
+    assert not triage(parsed)[1].analysis_complete  # the structure is ambiguous
+
+    part_level = (
+        b"From: a@sender.example\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain\r\n"
+        b"Content-Disposition: inline; filename*0=a; filename*=b\r\n\r\n"
+        b"https://evil.example/x\r\n"
+        b"--b\r\nContent-Type: application/octet-stream\r\n"
+        b"Content-Disposition: attachment; filename*0=c; filename*=d\r\n\r\nMZ\r\n--b--\r\n"
+    )
+    parsed = parse_eml(part_level)
+    assert parsed.body.text and "evil.example" in parsed.body.text
+    assert len(parsed.attachments) == 1
+
+
+def test_nested_comments_in_one_header_cost_no_other_address():
+    raw = (
+        b"From: boss@corp.example\r\nReply-To: " + b"(" * 600 + b"\r\n"
+        b"To: v@victim.example\r\nSubject: s\r\n\r\nhi\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert parsed.addresses.from_.addr_spec == "boss@corp.example"
+    assert [a.addr_spec for a in parsed.addresses.to] == ["v@victim.example"]
+
+
+def test_malformed_msg_strings_cost_no_other_evidence(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parent / "fixtures"))
+    import build_synthetic_msg as msgbuild
+
+    monkeypatch.setattr(msgbuild, "_unistr", lambda text: text.encode("utf-16-le", "surrogatepass"))
+    raw = msgbuild.build_message(
+        subject="s",
+        body_text="plain \ud800 text",
+        html=b"<a href='https://evil.example/login'>x</a>",
+        attachments=[
+            ("invoice.pdf", "application/pdf", b"%PDF-1.4"),
+            ("pay\ud800load.pdf.exe", "application/octet-stream", b"MZ\x90\x00"),
+        ],
+    )
+    parsed = parse_msg(raw)
+    assert [a.filename for a in parsed.attachments] == ["invoice.pdf", "pay�load.pdf.exe"]
+    assert parsed.body.text == "plain � text"
+    assert "https://evil.example/login" in {i.value for i in extract_iocs(parsed)}
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        # RFC 2047 encoded-word scan with "*" runs.
+        "from phishbowl.parse.charset import decode_mime_words\n"
+        "decode_mime_words('=?' + 'a*' * 100_000)",
+        # Re-serializing an attached message whose header is three folded,
+        # within-budget lines of many short words.
+        "from phishbowl.parse import parse_eml\n"
+        "pad = b'\\r\\n '.join([b' '.join([b'a'] * 20_000)] * 3)\n"
+        "inner = b'From: x@y.example\\r\\nX-Pad: ' + pad + b'\\r\\n\\r\\nb'\n"
+        "parse_eml(b'From: a@b.example\\r\\nContent-Type: multipart/mixed; boundary=b\\r\\n\\r\\n"
+        "--b\\r\\nContent-Type: message/rfc822\\r\\n\\r\\n' + inner + b'\\r\\n--b--\\r\\n')",
+        # IDNA-encoding a hostile, oversized Unicode domain.
+        "from phishbowl.domains import ascii_host\n"
+        "ascii_host(''.join(chr(0x4E00 + i) for i in range(30_000)) + '.example')",
+    ],
+)
+def test_parse_helpers_stay_fast_on_hostile_input(code):
+    import subprocess
+    import sys
+
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=10)

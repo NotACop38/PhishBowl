@@ -57,10 +57,12 @@ _REFUSED_CODECS = frozenset(
     {"punycode", "idna", "unicode-escape", "raw-unicode-escape", "undefined"}
 )
 
-# An RFC 2047 encoded-word. The encoded text cannot contain "?" or whitespace,
-# so this pattern is linear (the stdlib's lazy ``.*?`` rescans the rest of the
-# line for every unterminated "=?", which is quadratic on hostile headers).
-_ENCODED_WORD = re.compile(r"=\?([^?\s]+?)(?:\*[^?\s]*)?\?([bBqQ])\?([^?\s]*)\?=")
+# An RFC 2047 encoded-word, with an optional RFC 2231 language tag after "*".
+# No part can contain "?" or whitespace, and the charset cannot contain "*", so
+# every character is consumed by exactly one part and the pattern is linear
+# (the stdlib's lazy ``.*?`` rescans the rest of the line for every
+# unterminated "=?", which is quadratic on hostile headers).
+_ENCODED_WORD = re.compile(r"=\?([^?\s*]+)(?:\*[^?\s]*)?\?([bBqQ])\?([^?\s]*)\?=")
 
 _SURROGATES = re.compile(r"[\ud800-\udfff]")
 
@@ -73,7 +75,7 @@ def _codec(charset: str | None) -> str | None:
     label = _CHARSET_ALIASES.get(label, label)
     try:
         name = codecs.lookup(label).name
-    except LookupError:
+    except (LookupError, ValueError, TypeError):  # unknown, or e.g. an embedded NUL
         return None
     return None if name in _REFUSED_CODECS else name
 
@@ -92,16 +94,14 @@ def _decode_bytes(raw: bytes, charset: str | None) -> str:
     return raw.decode(_FALLBACK_CHARSET, errors="replace")
 
 
-def _decode_word(charset: str, encoding: str, text: str) -> str | None:
-    """Decode one encoded-word's payload, or ``None`` if it is malformed."""
+def _word_bytes(encoding: str, text: str) -> bytes | None:
+    """The bytes one encoded-word carries, or ``None`` if it is malformed."""
     try:
         if encoding in "bB":
-            raw = base64.b64decode(text + "=" * (-len(text) % 4))
-        else:
-            raw = binascii.a2b_qp(text.encode("ascii"), header=True)
+            return base64.b64decode(text + "=" * (-len(text) % 4))
+        return binascii.a2b_qp(text.encode("ascii"), header=True)
     except (ValueError, binascii.Error, UnicodeError):
         return None
-    return _decode_bytes(raw, charset)
 
 
 def header_text(value: str | Header | None) -> str | None:
@@ -131,27 +131,44 @@ def decode_mime_words(value: str | Header | None) -> str | None:
 
     Handles runs of encoded and literal text (``Re: =?utf-8?q?...?=``),
     per-word charsets, and raw 8-bit text beside encoded-words. Whitespace
-    between two adjacent encoded-words is dropped (RFC 2047 §6.2). A malformed
-    encoded-word is kept verbatim. Never raises; linear in the input length.
+    between two adjacent encoded-words is dropped (RFC 2047 §6.2), and the bytes
+    of adjacent words in the same charset are decoded together, so a character
+    split across two words (common, though RFC 2047 forbids it) survives. A
+    malformed encoded-word is kept verbatim. Never raises; linear in the input.
     """
     text = header_text(value)
     if text is None:
         return None
     out: list[str] = []
+    run: bytearray = bytearray()  # bytes of the current run of adjacent words
+    run_charset: str | None = None
+
+    def flush() -> None:
+        nonlocal run_charset
+        if run_charset is not None:
+            out.append(_decode_bytes(bytes(run), run_charset))
+            run.clear()
+            run_charset = None
+
     position = 0
-    previous_word = False
     for match in _ENCODED_WORD.finditer(text):
         gap = text[position : match.start()]
-        decoded = _decode_word(*match.groups())
-        if decoded is None:
+        charset, encoding, payload = match.groups()
+        raw = _word_bytes(encoding, payload)
+        adjacent = run_charset is not None and not gap.strip()
+        if raw is None:
+            flush()
             out.append(gap + match.group(0))
-            previous_word = False
+        elif adjacent and charset.casefold() == run_charset:
+            run.extend(raw)
         else:
-            if not (previous_word and not gap.strip()):
+            flush()
+            if not adjacent:
                 out.append(gap)
-            out.append(decoded)
-            previous_word = True
+            run.extend(raw)
+            run_charset = charset.casefold()
         position = match.end()
+    flush()
     out.append(text[position:])
     return "".join(out)
 
@@ -166,9 +183,12 @@ def decode_payload(part: Message) -> str | None:
     """
     try:
         raw = part.get_payload(decode=True)
-        charset = part.get_content_charset()
     except Exception:
         return None
     if raw is None:
         return None
+    try:
+        charset = part.get_content_charset()
+    except Exception:
+        charset = None  # an unreadable charset parameter must not cost the body
     return _decode_bytes(raw, charset or _FALLBACK_CHARSET)

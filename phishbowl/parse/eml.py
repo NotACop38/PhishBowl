@@ -113,12 +113,14 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
     whole = True
     try:
         msg = bounded_message(data)
-    except MIMEBudgetError as exc:
-        # Over budget: keep the header evidence (sender, authentication,
-        # routing) rather than discarding the whole message.
+    except Exception as exc:
+        # Over budget, or a structure the parser cannot build: keep the header
+        # evidence (sender, authentication, routing) rather than discarding
+        # the whole message.
         whole = False
+        code = "mime_budget" if isinstance(exc, MIMEBudgetError) else "parse_error"
         parsed.anomalies.append(
-            Anomaly(code="mime_budget", message=f"{exc}; only the headers were analyzed")
+            Anomaly(code=code, message=f"{exc}; only the headers were analyzed")
         )
         try:
             msg = headers_only(data)
@@ -127,11 +129,6 @@ def parse_eml(data: bytes, filename: str | None = None) -> ParsedEmail:
                 Anomaly(code="parse_error", message=f"could not parse headers: {inner}")
             )
             return parsed
-    except Exception as exc:
-        parsed.anomalies.append(
-            Anomaly(code="parse_error", message=f"could not parse message: {exc}")
-        )
-        return parsed
 
     populate_headers(parsed, msg)
     if whole:
@@ -188,10 +185,13 @@ def _build_headers(msg: Message) -> Headers:
     """Every header in order, unfolded; encoded-words decoded in unstructured ones only."""
     items: list[Header] = []
     for name, value in msg.items():
-        if name.casefold() in _UNSTRUCTURED_HEADERS:
-            text = decode_mime_words(value)
-        else:
-            text = header_text(value)
+        try:
+            if name.casefold() in _UNSTRUCTURED_HEADERS:
+                text = decode_mime_words(value)
+            else:
+                text = header_text(value)
+        except Exception:  # never lose the header; keep it undecoded instead
+            text = header_text(str(value))
         items.append(Header(name=name, value=_unfold(text or "")))
     return Headers(items=items)
 
@@ -208,9 +208,16 @@ def _build_addresses(msg: Message, parsed: ParsedEmail) -> Addresses:
     def values(name: str) -> list[str]:
         return [header_text(v) or "" for v in msg.get_all(name, [])]
 
+    # Each header is guarded on its own: one unreadable header never costs
+    # the others (least of all From).
     singles: dict[str, Address | None] = {}
     for name in ("From", "Reply-To", "Return-Path", "Sender"):
-        address, lenient = parse_single_address(values(name))
+        address, lenient = _guard(
+            parsed,
+            "address_error",
+            lambda name=name: parse_single_address(values(name)),
+            (None, False),
+        )
         singles[name] = address
         if lenient:
             shown = address.addr_spec if address and address.addr_spec else "no address"
@@ -225,8 +232,8 @@ def _build_addresses(msg: Message, parsed: ParsedEmail) -> Addresses:
         reply_to=singles["Reply-To"],
         return_path=singles["Return-Path"],
         sender=singles["Sender"],
-        to=parse_address_list(values("To")),
-        cc=parse_address_list(values("Cc")),
+        to=_guard(parsed, "address_error", lambda: parse_address_list(values("To")), []),
+        cc=_guard(parsed, "address_error", lambda: parse_address_list(values("Cc")), []),
     )
 
 
@@ -319,7 +326,8 @@ def _note_structural_anomalies(msg: Message, parsed: ParsedEmail) -> None:
                 )
             )
         for defect in getattr(part, "defects", []) or []:
-            message = f"{type(defect).__name__}: {defect}"
+            # Some defects quote the offending raw line, surrogate escapes and all.
+            message = header_text(f"{type(defect).__name__}: {defect}") or ""
             if isinstance(defect, _STRUCTURAL_DEFECTS):
                 parsed.anomalies.append(
                     Anomaly(

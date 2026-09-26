@@ -27,8 +27,21 @@ from .charset import decode_mime_words
 _ANGLE_ADDR = re.compile(r"^(?P<display>.*)<(?P<addr>[^<>]*)>\s*$", re.DOTALL)
 
 
+def _strict_pairs(raw: str) -> list[tuple[str, str]]:
+    """``getaddresses`` for one value; nothing (rather than an exception) if it fails.
+
+    The stdlib parser recurses into nested comments, so a hostile header of a
+    few hundred parentheses raises ``RecursionError``; such a value simply
+    yields no address.
+    """
+    try:
+        return getaddresses([raw])
+    except Exception:
+        return []
+
+
 def _lenient_pairs(raw: str) -> list[tuple[str, str]]:
-    """``getaddresses`` without strict RFC 5322 checking.
+    """``getaddresses`` without strict RFC 5322 checking (never raises).
 
     Python releases since the CVE-2023-27043 fix parse strictly by default and
     take ``strict=False`` for the old behaviour; earlier releases are lenient
@@ -37,7 +50,9 @@ def _lenient_pairs(raw: str) -> list[tuple[str, str]]:
     try:
         return getaddresses([raw], strict=False)
     except TypeError:
-        return getaddresses([raw])
+        return _strict_pairs(raw)
+    except Exception:
+        return []
 
 
 def _domain_of(addr_spec: str | None) -> str | None:
@@ -76,7 +91,7 @@ def parse_address_list(raw_values: list[str]) -> list[Address]:
     """
     addresses: list[Address] = []
     for raw in raw_values:
-        pairs = getaddresses([raw])
+        pairs = _strict_pairs(raw)
         if not any(addr for _display, addr in pairs):
             pairs = _lenient_pairs(raw)
         for display, addr_spec in pairs:
@@ -98,7 +113,7 @@ def parse_single_address(raw_values: list[str]) -> tuple[Address | None, bool]:
     if not raw_values:
         return None, False
     raw = raw_values[0]
-    strict = [pair for pair in getaddresses([raw]) if pair[1]]
+    strict = [pair for pair in _strict_pairs(raw) if pair[1]]
     angle = _ANGLE_ADDR.match(raw.strip())
     if angle and "@" in angle.group("addr"):
         address = _to_address(angle.group("display"), angle.group("addr"))

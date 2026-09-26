@@ -53,9 +53,23 @@ def _collapse(value: object) -> str:
 class SafeMessage(Message):
     """A :class:`~email.message.Message` whose parameter accessors never raise.
 
-    Only the RFC 2231 charset handling differs from the stdlib; everything else
-    is inherited unchanged.
+    The stdlib raises ``TypeError`` for some malformed RFC 2231 parameters (a
+    ``name*`` mixed with ``name*0`` continuations) and mishandles charsets; here
+    an unreadable parameter reads as absent, and RFC 2231 values are decoded
+    leniently. Everything else is inherited unchanged.
     """
+
+    def get_params(self, failobj=None, header="content-type", unquote=True):
+        try:
+            return super().get_params(failobj, header, unquote)
+        except Exception:
+            return failobj
+
+    def get_param(self, param, failobj=None, header="content-type", unquote=True):
+        try:
+            return super().get_param(param, failobj, header, unquote)
+        except Exception:
+            return failobj
 
     def get_filename(self, failobj=None):
         missing = object()
