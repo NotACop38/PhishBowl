@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from phishbowl.models import (
-    IOC,
     Address,
     Addresses,
     Anomaly,
@@ -24,8 +23,6 @@ from phishbowl.models import (
     EmailFormat,
     Header,
     Headers,
-    IOCs,
-    IOCType,
     ParsedEmail,
     ReceivedHop,
     Routing,
@@ -98,23 +95,7 @@ def _full_parsed_email() -> ParsedEmail:
                 flags=[AttachmentFlag.ARCHIVE],
             )
         ],
-        iocs=IOCs(
-            items=[
-                IOC(
-                    type=IOCType.URL,
-                    value="https://www.example.com/community/digest",
-                    defanged="hxxps://www[.]example[.]com/community/digest",
-                    provenance=["body:html", "body:text"],
-                ),
-                IOC(
-                    type=IOCType.IPV4,
-                    value="192.0.2.10",
-                    defanged="192[.]0[.]2[.]10",
-                    provenance=["header:Received"],
-                ),
-            ]
-        ),
-        anomalies=[Anomaly(code="none", message="no structural anomalies")],
+        anomalies=[Anomaly.notice("none", "no structural anomalies")],
     )
 
 

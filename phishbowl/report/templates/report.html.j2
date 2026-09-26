@@ -15,6 +15,7 @@
 <html lang="en" class="sev-{{ r.severity }}">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>PhishBowl — {{ r.source.filename or "report" }}</title>
@@ -31,7 +32,7 @@
     --accent: #5ed3c9;
   }
   /* Severity accent — drives the verdict banner and score. */
-  .sev-benign  { --sev: #4cae8a; --sev-soft: rgba(76,174,138,.14); }
+  .sev-minimal { --sev: #6f9fb4; --sev-soft: rgba(111,159,180,.13); }
   .sev-low     { --sev: #86b54a; --sev-soft: rgba(134,181,74,.14); }
   .sev-elevated{ --sev: #d8a52a; --sev-soft: rgba(216,165,42,.15); }
   .sev-high    { --sev: #e08a3c; --sev-soft: rgba(224,138,60,.16); }
@@ -258,8 +259,8 @@
     .badges .badge { border-color: #999; }
     table { break-inside: auto; }
     tr { break-inside: avoid; page-break-inside: avoid; }
-    details.headers { open: true; }
-    details.headers[open] summary { display: none; }
+    details.headers::details-content { content-visibility: visible; }
+    details.headers summary { display: none; }
     .preview { max-height: none; overflow: visible; }
     footer.foot { break-before: avoid; }
   }
@@ -277,7 +278,7 @@
     font-size: 12.5px; }
   .hdr-row:last-child { border-bottom: none; }
   .hdr-name { font-family: var(--font-mono); color: var(--muted); font-weight: 600; }
-  .hdr-val { font-family: var(--font-mono); color: var(--ink); word-break: break-word; }
+  .hdr-val { font-family: var(--font-mono); color: var(--text); word-break: break-word; }
   .sending-ip { font-family: var(--font-mono); font-size: 13px; margin: 0 0 14px; }
   .sending-ip b { color: var(--accent); }
 </style>
@@ -317,13 +318,23 @@
       <div class="meter"><span class="pin" style="left: {{ r.score }}%"></span></div>
       <div class="meter-scale"><span>0 · few signals</span><span>50</span><span>100 · many signals</span></div>
       <div class="vsub">
+        {% set offline_rules = r.fired_rules | length - r.enrichment_rules %}
         Offline score <code>{{ r.offline_score }}</code> from
-        <code>{{ r.fired_rules | length }}</code> triggered rule{{ "" if r.fired_rules|length == 1 else "s" }}
-        over <code>{{ r.ioc_total }}</code> extracted indicator{{ "" if r.ioc_total == 1 else "s" }}.
+        <code>{{ offline_rules }}</code> triggered rule{{ "" if offline_rules == 1 else "s" }}
+        over <code>{{ r.ioc_total }}</code> extracted indicator{{ "" if r.ioc_total == 1 else "s" }}{% if r.enrichment_rules %};
+        enrichment added <code>{{ r.enrichment_rules }}</code> more{% endif %}.
         Every point traces to a named reason below.
       </div>
     </div>
   </section>
+
+  {% if not r.analysis_complete %}
+  <div class="notice">
+    <span class="tag">Incomplete</span>
+    <span>Some of this message's evidence was not analyzed, so the score is a lower bound:
+      {% for a in r.anomalies if a.coverage_gap %}{{ a.message }}{% if not loop.last %}; {% endif %}{% endfor %}.</span>
+  </div>
+  {% endif %}
 
   {% if r.redaction.enabled %}
   <div class="notice">
@@ -488,9 +499,9 @@
           <div class="hop">
             <div class="idx">HOP {{ hop.index }}</div>
             <div class="ln">
-              {% if hop.from %}from <b>{{ hop.from }}</b>{% endif %}
+              {% if hop.from_ %}from <b>{{ hop.from_ }}</b>{% endif %}
               {% if hop.by %} by <b>{{ hop.by }}</b>{% endif %}
-              {% if hop.with %} with {{ hop.with }}{% endif %}
+              {% if hop.with_ %} with {{ hop.with_ }}{% endif %}
               {% if hop.timestamp %} · {{ hop.timestamp }}{% endif %}
             </div>
             <div class="raw">{{ hop.raw }}</div>
@@ -562,11 +573,12 @@
     {# ---------- Anomalies ---------- #}
     {% if r.anomalies %}
     <div class="card span">
-      <div class="card-h"><h2>Parsing anomalies</h2><span class="count">{{ r.anomalies | length }}</span></div>
+      <div class="card-h"><h2>Analysis notes</h2><span class="count">{{ r.anomalies | length }}</span></div>
       <div class="card-b">
         <ul class="bare">
           {% for a in r.anomalies %}
-          <li>{% if a.code %}<span class="prov">{{ a.code }}</span> — {% endif %}{{ a.message }}</li>
+          <li>{% if a.coverage_gap %}<span class="chip warn">not analyzed</span>{% else %}<span class="chip">notice</span>{% endif %}
+            {% if a.code %}<span class="prov">{{ a.code }}</span> — {% endif %}{{ a.message }}</li>
           {% endfor %}
         </ul>
       </div>

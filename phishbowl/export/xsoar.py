@@ -6,7 +6,7 @@ XSOAR 6.x **playbook** YAML artifact, the format an analyst uploads under
 *Playbooks → Upload*. See ``docs/SOAR_EXPORT.md`` for the field-by-field mapping
 and import steps.
 
-**Draft / export only — never acts (CLAUDE.md, PRD §4).** Every task in the
+**Draft / export only — never acts (AGENTS.md, PRD §4).** Every task in the
 emitted playbook is a *manual* task (``task.iscommand: false``, ``task.brand: ""``).
 A manual task in XSOAR is a checklist item an analyst completes by hand — it binds
 no integration command — so importing and even *running* this playbook triggers no
@@ -43,6 +43,18 @@ _FROM_VERSION = "6.5.0"
 # Layout hint XSOAR stores per task (a JSON string). Cosmetic only — the editor
 # re-lays-out on import — but included so the uploaded playbook renders cleanly.
 _VIEW_TEMPLATE = '{{"position":{{"x":450,"y":{y}}}}}'
+
+# Raw values are joined into comma-separated playbook inputs. XSOAR resolves
+# ``${...}`` in input values as context/DT expressions (which can run inline
+# JavaScript), and list-taking commands split on commas. An attacker-chosen
+# URL containing either would become an expression or several bogus values,
+# so such values are withheld from the inputs; the task notes still list them
+# defanged.
+_UNSAFE_INPUT_TOKENS = ("${", ",")
+
+
+def _safe_input_value(value: str) -> bool:
+    return not any(token in value for token in _UNSAFE_INPUT_TOKENS)
 
 
 def _task(
@@ -90,22 +102,37 @@ def _task(
     return task
 
 
+def _input_buckets(core: TriageCore) -> tuple[dict[str, list[str]], int]:
+    """Raw indicator values safe to embed in playbook inputs, and how many were withheld."""
+    safe: dict[str, list[str]] = {}
+    withheld = 0
+    for bucket, values in core.raw_buckets().items():
+        safe[bucket] = [value for value in values if _safe_input_value(value)]
+        withheld += len(values) - len(safe[bucket])
+    return safe, withheld
+
+
 def _inputs(core: TriageCore) -> list[dict[str, Any]]:
     """Playbook inputs: the verdict and the RAW indicators, for tooling/pivots.
 
     Raw values are what a SOAR acts on, and these inputs are inert until an analyst
     wires them into a (manual) step — nothing here auto-runs. Redacted indicators
-    (bystander PII) are already dropped from the raw channel, so they never appear.
+    (bystander PII) are already dropped from the raw channel, so they never appear,
+    and values XSOAR would parse as expressions or split apart are withheld.
     """
     inputs: list[dict[str, Any]] = [
-        _input("PhishbowlVerdict", core.verdict, "Phishbowl verdict band for the message."),
+        _input(
+            "PhishbowlVerdict",
+            core.verdict if _safe_input_value(core.verdict) else "see playbook description",
+            "Phishbowl verdict band for the message.",
+        ),
         _input(
             "PhishbowlScore",
             f"{core.score}/{core.max_score}",
             "Phishbowl risk score (0-100) and its maximum.",
         ),
     ]
-    raw = core.raw_buckets()
+    raw, _ = _input_buckets(core)
     for bucket in BUCKETS:
         values = raw[bucket]
         if not values:
@@ -134,6 +161,7 @@ def _input(key: str, value: str, description: str) -> dict[str, Any]:
 
 def _description(core: TriageCore) -> str:
     """The playbook description: disclaimer first, then the verdict at a glance."""
+    _, withheld = _input_buckets(core)
     return (
         f"{DRAFT_DISCLAIMER}\n\n"
         f"Phishbowl triage summary\n"
@@ -143,7 +171,14 @@ def _description(core: TriageCore) -> str:
         f"Authentication: {core.auth_summary() or 'n/a'}.\n"
         f"Indicators: {core.raw_indicator_count()} extracted "
         f"(listed defanged in the tasks below; raw values are in the playbook inputs).\n"
-        f"Rules fired: {len(core.reasons)}.\n"
+        + (
+            f"{withheld} raw value(s) containing ',' or '${{' were withheld from the "
+            "inputs (XSOAR would split them or evaluate them as expressions); they are "
+            "listed defanged in the tasks.\n"
+            if withheld
+            else ""
+        )
+        + f"Rules fired: {len(core.reasons)}.\n"
         + (
             "PII redaction was active: bystander recipients/internal topology are withheld.\n"
             if core.redaction_enabled

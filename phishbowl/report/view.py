@@ -27,32 +27,33 @@ from typing import TYPE_CHECKING
 
 from pydantic import Field
 
+from phishbowl import __version__
 from phishbowl.extract import defang, defang_text, defang_url
 from phishbowl.html_analysis import inspect_html
 from phishbowl.models import IOCs, IOCType, ParsedEmail, PhishbowlModel
 from phishbowl.score import ScoreResult, ScoringConfig, load_config
 
-from .redact import RedactionPolicy, Redactor
+from .redact import RECIPIENT_HEADERS, REDACTED_FIELD, REDACTED_RECIPIENT, RedactionPolicy, Redactor
 
 if TYPE_CHECKING:
     from phishbowl.connectors import EnrichmentReport
 
-__version__ = "phishbowl/0.1.0"
 
 # C0/C1 controls (incl. ESC, BEL, the terminal-hijack range) and DEL. Email text
 # is hostile input (PRD §13); we strip these from every field before it reaches a
 # terminal, an HTML escape pass, or a JSON string.
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
-# How the 0-100 score maps to a severity slug used for colour/iconography. Kept
-# independent of the configurable verdict *text* so the visual language is stable
-# even when an operator renames or re-bands their verdicts.
-_SEVERITY_BANDS = (
-    (20, "benign"),
-    (40, "low"),
-    (65, "elevated"),
-    (85, "high"),
-    (101, "critical"),
+# The lowest score of each severity slug, used for colour/iconography and by
+# ``--fail-on``. Kept independent of the configurable verdict *text* so the
+# visual language is stable even when an operator renames or re-bands verdicts.
+# The lowest level is "minimal", not "benign": few signals is not proof of safety.
+SEVERITY_FLOORS: tuple[tuple[int, str], ...] = (
+    (0, "minimal"),
+    (20, "low"),
+    (40, "elevated"),
+    (65, "high"),
+    (85, "critical"),
 )
 
 
@@ -68,11 +69,18 @@ def _safe_text(text: str | None) -> str | None:
     return defang_text(_clean(text))
 
 
+def _host_display(token: str | None) -> str | None:
+    """Defang a Received ``from``/``by`` token: a host name, IP, or stray address."""
+    return defang(token, IOCType.EMAIL) if token else token
+
+
 def severity_for(score: int) -> str:
-    for ceiling, slug in _SEVERITY_BANDS:
-        if score < ceiling:
-            return slug
-    return "critical"
+    """The severity slug for a 0-100 score (see :data:`SEVERITY_FLOORS`)."""
+    slug = SEVERITY_FLOORS[0][1]
+    for floor, name in SEVERITY_FLOORS:
+        if score >= floor:
+            slug = name
+    return slug
 
 
 class AddressView(PhishbowlModel):
@@ -151,6 +159,8 @@ class AttachmentView(PhishbowlModel):
 class AnomalyView(PhishbowlModel):
     code: str | None = None
     message: str
+    # True when this anomaly means some evidence was not analyzed.
+    coverage_gap: bool = True
 
 
 class SourceView(PhishbowlModel):
@@ -199,7 +209,7 @@ class EnrichmentView(PhishbowlModel):
 class ReportView(PhishbowlModel):
     """Everything a renderer needs, already defanged, redacted, and labelled."""
 
-    tool: str = __version__
+    tool: str = f"phishbowl/{__version__}"
     source: SourceView
 
     score: int
@@ -247,6 +257,11 @@ class ReportView(PhishbowlModel):
     redaction: RedactionView
     enrichment: EnrichmentView = Field(default_factory=EnrichmentView)
 
+    @property
+    def enrichment_rules(self) -> int:
+        """How many fired rules came from enrichment (the rest are offline)."""
+        return sum(1 for rule in self.fired_rules if rule.source == "enrichment")
+
 
 # IOC type → display order and human label.
 _IOC_GROUPS: tuple[tuple[str, str], ...] = (
@@ -281,7 +296,7 @@ def _address_view(
         return None
     if redactor.hides_field(header):
         redactor.triggered.add("operator fields")
-        return AddressView(addr_spec_display="[redacted:field]", redacted=True)
+        return AddressView(addr_spec_display=REDACTED_FIELD, redacted=True)
     if recipient:
         redacted = redactor.recipient_address(addr)
         if redacted is not addr:
@@ -293,8 +308,9 @@ def _address_view(
                 redacted=True,
             )
     raw = addr.addr_spec
-    if redactor.active and (redactor.field(header, raw) != raw or redactor.text(raw) != raw):
-        return AddressView(addr_spec_display="[redacted:field]", redacted=True)
+    if redactor.active and raw and redactor.text(raw) != raw:
+        # An internal or otherwise protected address: withheld whole.
+        return AddressView(addr_spec_display=REDACTED_FIELD, redacted=True)
     return AddressView(
         # Display names are attacker-chosen free text and can themselves carry a
         # URL/email/IP — defang like any other free text. Bare domains follow the
@@ -310,11 +326,14 @@ def _address_view(
 
 
 def _ioc_view(ioc, redactor: Redactor) -> IOCView:
-    placeholder = redactor.classify_ioc(ioc.type.value, ioc.value)
-    if placeholder is not None:
+    shown = redactor.classify_ioc(ioc.type.value, ioc.value)
+    if shown is None and ioc.wrapped and redactor.text(ioc.wrapped) != ioc.wrapped:
+        shown = REDACTED_FIELD  # the wrapper encodes a protected value
+    if shown is not None:
+        # A redacted indicator keeps its metadata but leaves the machine channel.
         return IOCView(
             type=ioc.type.value,
-            value_display=placeholder,
+            value_display=_clean(defang(shown, ioc.type)) or "",
             value_raw=None,
             provenance=list(ioc.provenance),
             wrapper=ioc.wrapper,
@@ -322,8 +341,6 @@ def _ioc_view(ioc, redactor: Redactor) -> IOCView:
             unresolved=ioc.unresolved,
             redacted=True,
         )
-    if ioc.wrapped and redactor.text(ioc.wrapped) != ioc.wrapped:
-        return IOCView(type=ioc.type.value, value_display="[redacted:field]", redacted=True)
     wrapped_display = _clean(defang(ioc.wrapped, ioc.type)) if ioc.wrapped else None
     return IOCView(
         type=ioc.type.value,
@@ -449,30 +466,31 @@ def build_report(
     config = config or load_config()
     redactor = Redactor(policy, parsed, config)
 
+    hidden_auth = redactor.hides_field("Authentication-Results")
+    hidden_spf = hidden_auth or redactor.hides_field("Received-SPF")
     auth = [
         # Auth details quote attacker-influenced header text (domains, client
         # IPs) — defanged like subject/evidence, so copy-paste stays safe.
         AuthLineView(
             mechanism=name,
-            result=(
-                "redacted"
-                if redactor.hides_field("Authentication-Results")
-                or (name == "SPF" and redactor.hides_field("Received-SPF"))
-                else line.result.value
-            ),
-            detail=(
-                None
-                if redactor.hides_field("Authentication-Results")
-                or (name == "SPF" and redactor.hides_field("Received-SPF"))
-                else _safe_text(redactor.text(line.detail))
-            ),
+            result="redacted" if hidden else line.result.value,
+            detail=None if hidden else _safe_text(redactor.text(line.detail)),
         )
-        for name, line in (
-            ("SPF", parsed.auth.spf),
-            ("DKIM", parsed.auth.dkim),
-            ("DMARC", parsed.auth.dmarc),
+        for name, line, hidden in (
+            ("SPF", parsed.auth.spf, hidden_spf),
+            ("DKIM", parsed.auth.dkim, hidden_auth),
+            ("DMARC", parsed.auth.dmarc, hidden_auth),
         )
     ]
+
+    def evidence(rule) -> list[str]:
+        # A hidden authentication header hides what the auth rules quote from it.
+        if rule.id.startswith("auth.") and (
+            hidden_auth or (rule.id.startswith("auth.spf") and hidden_spf)
+        ):
+            redactor.triggered.add("operator fields")
+            return [REDACTED_FIELD]
+        return [_safe_text(redactor.text(e)) or "" for e in rule.evidence]
 
     fired = [
         FiredRuleView(
@@ -480,7 +498,7 @@ def build_report(
             description=_safe_text(redactor.text(f.description)) or "",
             weight=f.weight,
             source=f.source.value,
-            evidence=[_safe_text(redactor.text(e)) or "" for e in f.evidence],
+            evidence=evidence(f),
         )
         for f in sorted(result.fired, key=lambda f: (-f.weight, f.id))
     ]
@@ -493,14 +511,19 @@ def build_report(
         if items:
             groups.append(IOCGroupView(type=ioc_type, label=label, items=items))
 
+    hidden_routing = redactor.hides_field("Received")
+    if hidden_routing:
+        redactor.triggered.add("operator fields")
     routing = [
         # Hop text comes straight from (forgeable) Received headers: redact
         # first — the redactor must see the un-defanged hosts/IPs to match
         # internal topology — then defang what survives for safe display.
-        HopView(
+        HopView(index=idx, raw=REDACTED_FIELD)
+        if hidden_routing
+        else HopView(
             index=idx,
-            **{"from": defang_text(redactor.text(_clean(hop.from_)))},
-            by=defang_text(redactor.text(_clean(hop.by))),
+            **{"from": _host_display(redactor.text(_clean(hop.from_)))},
+            by=_host_display(redactor.text(_clean(hop.by))),
             **{"with": _safe_text(redactor.text(hop.with_))},
             timestamp=hop.timestamp.isoformat() if hop.timestamp else None,
             raw=defang_text(redactor.text(_clean(hop.raw))) or "",
@@ -514,7 +537,7 @@ def build_report(
     sending_ip_raw: str | None = None
     from phishbowl.connectors.targets import sending_ips
 
-    ips = sending_ips(parsed)
+    ips = [] if hidden_routing else sending_ips(parsed)
     if ips:
         candidate = ips[0]
         placeholder = redactor.classify_ioc(candidate.type, candidate.value)
@@ -527,16 +550,14 @@ def build_report(
 
     # Full header set for analyst pivot — ordered, duplicates preserved, values
     # control-stripped and indicator-defanged. Recipient / internal tokens are
-    # scrubbed with the same hop-text redactor so Received ``for <user@org>``
-    # lines cannot leak bystander PII through the new headers panel.
-    from .redact import REDACTED_RECIPIENT
-
+    # scrubbed with the same redactor so Received ``for <user@org>`` lines and
+    # delivery headers cannot leak bystander PII through the headers panel.
     headers: list[HeaderView] = []
     for header in parsed.headers.items:
         name = _clean(header.name) or ""
         value = header.value or ""
         folded = name.casefold()
-        if redactor.active and redactor.policy.recipients and folded in {"to", "cc", "bcc"}:
+        if redactor.active and redactor.policy.recipients and folded in RECIPIENT_HEADERS:
             headers.append(HeaderView(name=name, value=REDACTED_RECIPIENT))
             redactor.triggered.add("recipients")
             continue
@@ -550,8 +571,10 @@ def build_report(
     attachments = [
         AttachmentView(
             filename=_safe_text(redactor.text(att.filename)),
-            declared_type=att.declared_type,
-            detected_type=att.detected_type,
+            # Declared types are attacker text too (a .msg passes MAPI's raw
+            # string through): control-strip them like every other field.
+            declared_type=_clean(att.declared_type),
+            detected_type=_clean(att.detected_type),
             type_mismatch="type_mismatch" in [f.value for f in att.flags],
             size=att.size,
             size_human=_human_size(att.size),
@@ -590,8 +613,16 @@ def build_report(
             parsed.addresses.return_path, redactor, recipient=False, header="Return-Path"
         ),
         sender=_address_view(parsed.addresses.sender, redactor, recipient=False, header="Sender"),
-        to=[v for a in parsed.addresses.to if (v := _address_view(a, redactor, recipient=True))],
-        cc=[v for a in parsed.addresses.cc if (v := _address_view(a, redactor, recipient=True))],
+        to=[
+            v
+            for a in parsed.addresses.to
+            if (v := _address_view(a, redactor, recipient=True, header="To"))
+        ],
+        cc=[
+            v
+            for a in parsed.addresses.cc
+            if (v := _address_view(a, redactor, recipient=True, header="Cc"))
+        ],
         return_path_mismatch=parsed.addresses.return_path_mismatch,
         reply_to_mismatch=parsed.addresses.reply_to_mismatch,
         sender_mismatch=parsed.addresses.sender_mismatch,
@@ -608,7 +639,11 @@ def build_report(
         body_preview=body_preview,
         body_note=body_note,
         anomalies=[
-            AnomalyView(code=a.code, message=_safe_text(redactor.text(a.message)) or "")
+            AnomalyView(
+                code=a.code,
+                message=_safe_text(redactor.text(a.message)) or "",
+                coverage_gap=a.coverage_gap,
+            )
             for a in parsed.anomalies
         ],
         redaction=RedactionView(

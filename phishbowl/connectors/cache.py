@@ -135,10 +135,13 @@ class EnrichmentCache:
         tmp = None
         try:
             # The cache holds the analyzed email's indicators (URLs, domains,
-            # sending IPs) — keep it private to the operator on shared hosts:
-            # 0700 on the cache tree we own, 0600 on each entry.
-            path.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self._dir, 0o700)
+            # sending IPs) — keep it private to the operator on shared hosts. A
+            # cache root we create is 0700; an existing one (which the operator
+            # may have pointed at a shared directory) is left as configured. The
+            # per-connector directories are ours alone: always 0700, and every
+            # entry is written 0600 (mkstemp's mode).
+            self._dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.parent.mkdir(mode=0o700, exist_ok=True)
             os.chmod(path.parent, 0o700)
             fd, tmp_name = tempfile.mkstemp(prefix=".cache-", dir=path.parent)
             tmp = Path(tmp_name)

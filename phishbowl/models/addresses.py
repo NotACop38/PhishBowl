@@ -4,8 +4,10 @@ Every address is split into ``{display_name, addr_spec, domain}`` (PRD §6.1).
 Crucially, ``From`` / ``Return-Path`` / ``Reply-To`` must be **trivially
 comparable**: a domain mismatch between them is a core offline scoring signal
 (PRD §8). The comparison helpers here are deliberately conservative — they
-fire only when both domains are known and differ — so the scorer never raises
-a mismatch on missing data.
+fire only when both domains are known and belong to different registered
+domains — so the scorer never raises a mismatch on missing data, and an
+organization's own subdomains (``bounce.example.com`` beside ``example.com``)
+never count as a mismatch.
 """
 
 from __future__ import annotations
@@ -38,10 +40,12 @@ class Address(PhishbowlModel):
 
 
 def _domains_differ(a: Address | None, b: Address | None) -> bool:
-    """True only when both addresses have a domain and the two differ."""
+    """True only when both addresses have a domain under different registered domains."""
     if a is None or b is None or not a.domain or not b.domain:
         return False
-    return a.domain.casefold() != b.domain.casefold()
+    from phishbowl.domains import registrable_domain  # a leaf helper; no cycle
+
+    return registrable_domain(a.domain) != registrable_domain(b.domain)
 
 
 class Addresses(PhishbowlModel):
@@ -60,15 +64,15 @@ class Addresses(PhishbowlModel):
 
     @property
     def return_path_mismatch(self) -> bool:
-        """Return-Path domain present and ≠ From domain (PRD §8)."""
+        """Return-Path's registered domain present and ≠ From's (PRD §8)."""
         return _domains_differ(self.from_, self.return_path)
 
     @property
     def reply_to_mismatch(self) -> bool:
-        """Reply-To domain present and ≠ From domain (PRD §8)."""
+        """Reply-To's registered domain present and ≠ From's (PRD §8)."""
         return _domains_differ(self.from_, self.reply_to)
 
     @property
     def sender_mismatch(self) -> bool:
-        """Envelope Sender domain present and ≠ From domain (PRD §8)."""
+        """Sender's registered domain present and ≠ From's (PRD §8)."""
         return _domains_differ(self.from_, self.sender)

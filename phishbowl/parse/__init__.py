@@ -20,6 +20,7 @@ from pathlib import Path
 
 from phishbowl.models import ParsedEmail
 
+from .attachments import OLE_MAGIC
 from .embedded import EmbeddedEmail, list_embedded_emails
 from .eml import parse_eml
 from .eml import parse_file as parse_eml_file
@@ -43,10 +44,6 @@ _MSG_SUFFIXES = {".msg"}
 # The input formats Phishbowl accepts, for callers (e.g. the upload UI) that need
 # to validate a filename's type *before* handing bytes to a parser.
 SUPPORTED_SUFFIXES = frozenset(_EML_SUFFIXES | _MSG_SUFFIXES)
-
-# Every .msg is an OLE2 compound document and opens with this fixed signature;
-# no legitimate RFC 822 message can start with these bytes.
-_OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 
 def _unsupported(suffix: str) -> ValueError:
@@ -101,4 +98,4 @@ def sniff_suffix(data: bytes) -> str:
     ``.msg``; anything else is treated as RFC 822 text, whose parser already
     degrades a malformed message into a noted partial result (PRD §11).
     """
-    return ".msg" if data.startswith(_OLE_MAGIC) else ".eml"
+    return ".msg" if data.startswith(OLE_MAGIC) else ".eml"

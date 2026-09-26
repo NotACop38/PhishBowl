@@ -14,15 +14,14 @@ the result to :func:`~phishbowl.parse.parse_bytes`.
 
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass
-from email.generator import BytesGenerator
 from email.message import Message
 from pathlib import Path
 
-from .attachments import iter_parts
+from .attachments import OLE_MAGIC, iter_parts, message_part_bytes
 from .charset import decode_mime_words
 from .mime import bounded_message
+from .msg import embedded_emails as msg_embedded_emails
 
 
 @dataclass(frozen=True)
@@ -35,20 +34,21 @@ class EmbeddedEmail:
     declared_type: str | None = None
 
 
-def list_embedded_emails(data: bytes, *, filename: str | None = None) -> list[EmbeddedEmail]:
-    """Return attached emails found in raw ``.eml`` (or message-like) bytes.
+def list_embedded_emails(data: bytes) -> list[EmbeddedEmail]:
+    """Return the emails attached to raw ``.eml`` or ``.msg`` bytes.
 
-    Finds ``message/rfc822`` / ``message/news`` parts and leaf attachments whose
-    filename ends in ``.eml``. ``.msg`` containers are not walked here (OLE
-    embedding is lossier and uncommon for the "user forwarded this" path); pass
-    a standalone ``.msg`` straight to :func:`~phishbowl.parse.parse_bytes`.
-
-    Parts are returned in document order, 0-indexed. Each ``data`` blob is a
-    wire-faithful serialization suitable for :func:`~phishbowl.parse.parse_bytes`.
+    For RFC 822 input: ``message/rfc822`` / ``message/news`` parts and leaf
+    attachments whose filename ends in ``.eml``. For an Outlook ``.msg``:
+    embedded Outlook items (re-serialized as ``.msg``) and attached ``.eml``
+    files. Results are in document order, 0-indexed, and each ``data`` blob is
+    suitable for :func:`~phishbowl.parse.parse_bytes` (its filename's suffix
+    selects the parser).
     """
-    # OLE2 / .msg — not an RFC 822 tree; no message/rfc822 walk applies.
-    if data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
-        return []
+    if data.startswith(OLE_MAGIC):
+        return [
+            EmbeddedEmail(index=index, filename=name, data=blob)
+            for index, (name, blob) in enumerate(msg_embedded_emails(data))
+        ]
 
     try:
         msg = bounded_message(data)
@@ -57,7 +57,10 @@ def list_embedded_emails(data: bytes, *, filename: str | None = None) -> list[Em
 
     found: list[EmbeddedEmail] = []
     for part in iter_parts(msg):
-        embedded = _maybe_embedded(part)
+        try:
+            embedded = _maybe_embedded(part)
+        except Exception:  # one unreadable part never hides the others
+            continue
         if embedded is None:
             continue
         name, payload, declared = embedded
@@ -69,24 +72,25 @@ def list_embedded_emails(data: bytes, *, filename: str | None = None) -> list[Em
                 declared_type=declared,
             )
         )
-    # Hint unused on purpose — kept so callers can pass the outer filename for
-    # future format-specific heuristics without an API break.
-    _ = filename
     return found
+
+
+# Parts whose payload is a whole email. message/delivery-status and friends are
+# message/* too, but hold report fields, not a message to triage.
+_EMAIL_TYPES = frozenset({"message/rfc822", "message/global", "message/news"})
 
 
 def _maybe_embedded(part: Message) -> tuple[str | None, bytes, str | None] | None:
     """Return ``(filename, bytes, declared_type)`` if ``part`` is an attached email."""
-    maintype = part.get_content_maintype()
     declared = part.get_content_type()
     filename = decode_mime_words(part.get_filename())
     suffix = Path(filename).suffix.casefold() if filename else ""
 
-    if maintype == "message":
-        payload = _serialize_message_part(part)
+    if declared in _EMAIL_TYPES:
+        payload = message_part_bytes(part)
         if not payload.strip():
             return None
-        return filename or "attached.eml", payload, declared
+        return filename, payload, declared
 
     # A leaf ``.eml`` file attachment (not message/rfc822) — common when a user
     # saves-and-forwards rather than attaching the message object itself.
@@ -99,26 +103,3 @@ def _maybe_embedded(part: Message) -> tuple[str | None, bytes, str | None] | Non
             return filename, raw, declared
 
     return None
-
-
-def _serialize_message_part(part: Message) -> bytes:
-    """Wire-faithful bytes of an enclosed message (same approach as attachments)."""
-    try:
-        payload = part.get_payload()
-        if isinstance(payload, list) and payload:
-            buf = io.BytesIO()
-            BytesGenerator(buf, mangle_from_=False, maxheaderlen=0).flatten(
-                payload[0], linesep="\r\n"
-            )
-            return buf.getvalue()
-        if isinstance(payload, Message):
-            buf = io.BytesIO()
-            BytesGenerator(buf, mangle_from_=False, maxheaderlen=0).flatten(payload, linesep="\r\n")
-            return buf.getvalue()
-        if isinstance(payload, str):
-            return payload.encode("utf-8", errors="replace")
-        if isinstance(payload, bytes):
-            return payload
-    except Exception:
-        return b""
-    return b""

@@ -12,13 +12,13 @@ from fastapi.testclient import TestClient
 from rich.console import Console
 
 from phishbowl.connectors.targets import build_targets
+from phishbowl.domains import registrable_domain
 from phishbowl.export import render_sentinel, render_xsoar
 from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse_eml, parse_msg
 from phishbowl.pipeline import triage
 from phishbowl.report import RedactionPolicy, render_cli, render_html, render_json
 from phishbowl.score import load_config
-from phishbowl.score.detectors import registrable_domain
 
 
 def email(body, *, subject="Review", html=True):
@@ -64,7 +64,7 @@ def test_mime_factory_refuses_before_allocating_all_parts(monkeypatch):
     view, result = triage(parse_eml(raw))
     assert made <= 8
     assert not result.analysis_complete
-    assert "Incomplete" in view.verdict
+    assert view.verdict.endswith("(incomplete analysis)")
 
 
 def test_secondary_body_parts_are_analyzed():
@@ -80,11 +80,11 @@ def test_failed_and_truncated_analysis_never_claims_safety():
     for parsed in (parse_msg(b"not OLE"), email("<" * 300_000)):
         view, result = triage(parsed)
         assert not result.analysis_complete
-        assert view.verdict.startswith("Incomplete")
-        assert view.anomalies
+        assert view.verdict.endswith("(incomplete analysis)")
+        assert any(a.coverage_gap for a in view.anomalies)
         output = io.StringIO()
         render_cli(view, Console(file=output))
-        assert "Analysis limitation" in output.getvalue()
+        assert "Not analyzed" in output.getvalue()
 
 
 def test_redaction_applies_to_every_renderer_and_derived_copy():
@@ -288,7 +288,9 @@ def test_defanged_internal_values_are_redacted_in_evidence():
         "fc00[:][:]1",
         "hxxps://host.corp[.]example/",
     ):
-        assert redactor.text(value).startswith("[redacted:")
+        redacted = redactor.text(value)
+        assert "[redacted:internal-" in redacted
+        assert "corp" not in redacted and "10" not in redacted and "fc00" not in redacted
 
 
 def test_multipart_container_defects_make_analysis_incomplete():
@@ -317,7 +319,7 @@ def test_public_ipv6_url_keeps_url_reputation_target():
 
 
 @pytest.mark.parametrize("content_type", ["text/calendar", "text/rtf"])
-def test_unsupported_inline_text_body_is_visible_and_incomplete(content_type):
+def test_other_inline_text_body_is_scanned_and_listed(content_type):
     parsed = parse_eml(
         (
             f"From: sender@example.com\r\nContent-Type: {content_type}\r\n\r\n"
@@ -325,8 +327,12 @@ def test_unsupported_inline_text_body_is_visible_and_incomplete(content_type):
         ).encode()
     )
     view, result = triage(parsed)
-    assert not result.analysis_complete
-    assert any(a.code == "unsupported_body_type" for a in view.anomalies)
+    # The part is scanned as text, so its link is evidence and nothing is skipped.
+    assert result.analysis_complete
+    assert any(a.code == "other_body_type" and not a.coverage_gap for a in view.anomalies)
+    assert "https://credential.example/login" in {
+        i.value_raw for group in view.ioc_groups for i in group.items
+    }
     assert len(parsed.attachments) == 1
     assert parsed.attachments[0].sha256
 

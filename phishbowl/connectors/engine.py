@@ -51,7 +51,7 @@ from .errors import ConnectorError
 from .http import AllowlistedClient
 from .ratelimit import RateLimiter
 from .registry import discover
-from .secrets import active_key_values, env_var_for, scrub_secrets
+from .secrets import key_values, scrub_secrets
 from .targets import build_targets
 
 log = logging.getLogger(__name__)
@@ -154,11 +154,15 @@ async def run_enrichment_async(
     settings: EnrichmentSettings,
 ) -> EnrichmentReport:
     """Enrich ``targets`` across all selected connectors, concurrently and safely."""
-    connectors = _select_connectors(settings)
+    available = discover()
+    connectors = _select_connectors(available, settings)
     cache = EnrichmentCache(settings.cache_dir, enabled=settings.cache_enabled, now=settings.now)
-    # Everything key-shaped we know about — env vars *and* programmatic
-    # overrides — so the defensive scrub covers the library-use path too.
-    secrets = active_key_values() | frozenset(v for v in settings.api_keys.values() if v)
+    # Everything key-shaped we know about — every connector's env var (selected
+    # or not) *and* programmatic overrides — so the defensive scrub covers the
+    # library-use path too.
+    secrets = key_values(cls.api_key_env for cls in available.values()) | frozenset(
+        v for v in settings.api_keys.values() if v
+    )
     semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
     with _scrubbed_http_logs(secrets):
@@ -173,9 +177,10 @@ async def run_enrichment_async(
     return EnrichmentReport(enabled=True, statuses=statuses)
 
 
-def _select_connectors(settings: EnrichmentSettings) -> list[type[Connector]]:
+def _select_connectors(
+    classes: dict[str, type[Connector]], settings: EnrichmentSettings
+) -> list[type[Connector]]:
     """Resolve which connector classes to run, honoring select/disable filters."""
-    classes = discover()
     selected: list[type[Connector]] = []
     for name, cls in sorted(classes.items()):
         if settings.select is not None and name not in settings.select:
@@ -197,12 +202,12 @@ async def _run_one_connector(
     """Run a single connector over its indicators, degrading gracefully throughout."""
     name = connector.name
 
-    api_key = settings.api_key_for(name) if connector.requires_api_key else None
+    api_key = settings.api_key_for(connector) if connector.requires_api_key else None
     if connector.requires_api_key and not api_key:
-        var = env_var_for(name) or "its API key"
-        return _status(connector, ConnectorOutcome.SKIPPED, f"skipped — no API key (set {var})")
+        hint = f"set {connector.api_key_env}" if connector.api_key_env else "none configured"
+        return _status(connector, ConnectorOutcome.SKIPPED, f"skipped — no API key ({hint})")
 
-    indicators = [t for t in targets if t.type in connector.supported_ioc_types]
+    indicators = _prepared(connector, targets)
     indicators = indicators[: min(connector.max_indicators, settings.max_indicators)]
     if not indicators:
         return _status(connector, ConnectorOutcome.SKIPPED, "skipped — no matching indicators")
@@ -248,6 +253,21 @@ async def _run_one_connector(
         await client.aclose()
 
     return _summarize(connector, indicators, results, cache_hits, failures)
+
+
+def _prepared(connector: Connector, targets: list[Indicator]) -> list[Indicator]:
+    """The connector's supported indicators, prepared and de-duplicated in order."""
+    seen: set[tuple[str, str]] = set()
+    prepared: list[Indicator] = []
+    for target in targets:
+        if target.type not in connector.supported_ioc_types:
+            continue
+        indicator = connector.prepare(target)
+        if indicator is None or (indicator.type, indicator.value) in seen:
+            continue
+        seen.add((indicator.type, indicator.value))
+        prepared.append(indicator)
+    return prepared
 
 
 async def _enrich_one(

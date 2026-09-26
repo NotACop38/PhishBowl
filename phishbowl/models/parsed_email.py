@@ -19,20 +19,33 @@ from .attachments import Attachment
 from .auth import Auth
 from .body import Body
 from .headers import Headers
-from .iocs import IOCs
 from .routing import Routing
 from .source import Source
 
 
 class Anomaly(PhishbowlModel):
-    """A structural oddity noted during parsing (PRD §6.1).
+    """A structural oddity or analysis limit noted while processing a message.
 
     Captured rather than raised: a malformed email degrades gracefully into a
     noted partial result, it never crashes the run (PRD §11).
+
+    ``coverage_gap`` separates the two kinds of anomaly. A coverage gap means
+    some of the message's evidence was not analyzed — a budget was exhausted, a
+    section failed to parse, or the MIME structure is ambiguous enough that a
+    mail client could display content the parser did not see — so the
+    assessment is incomplete. Anything else is an informational notice (a
+    recoverable encoding defect, evidence the input format cannot carry). The
+    default is ``True`` so an unclassified anomaly fails closed.
     """
 
     code: str | None = None
     message: str
+    coverage_gap: bool = True
+
+    @classmethod
+    def notice(cls, code: str, message: str) -> Anomaly:
+        """An informational anomaly that does not make the analysis incomplete."""
+        return cls(code=code, message=message, coverage_gap=False)
 
 
 class ParsedEmail(PhishbowlModel):
@@ -47,5 +60,9 @@ class ParsedEmail(PhishbowlModel):
     date: datetime | None = None
     body: Body = Field(default_factory=Body)
     attachments: list[Attachment] = Field(default_factory=list)
-    iocs: IOCs = Field(default_factory=IOCs)
     anomalies: list[Anomaly] = Field(default_factory=list)
+
+    @property
+    def analysis_complete(self) -> bool:
+        """True unless an anomaly records evidence that was not analyzed."""
+        return not any(a.coverage_gap for a in self.anomalies)

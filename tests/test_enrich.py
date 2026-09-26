@@ -27,6 +27,7 @@ obviously-fake markers — never a real sample (CLAUDE.md).
 from __future__ import annotations
 
 import io
+import json
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -52,7 +53,7 @@ from phishbowl.connectors.base import ConnectorOutcome, EnrichmentSignal
 from phishbowl.connectors.cache import EnrichmentCache
 from phishbowl.connectors.errors import SSRFGuardError
 from phishbowl.connectors.http import AllowlistedClient
-from phishbowl.connectors.secrets import ENV_KEYS, scrub_secrets
+from phishbowl.connectors.secrets import scrub_secrets
 from phishbowl.connectors.targets import sending_ips
 from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse, parse_eml
@@ -60,6 +61,9 @@ from phishbowl.report import build_report, render_cli, render_html, render_json
 from phishbowl.score import RuleSource, load_config, score_email
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# Every bundled connector's API-key environment variable, keyed by connector.
+ENV_KEYS = {name: cls.api_key_env for name, cls in discover().items() if cls.api_key_env}
 MALICIOUS = FIXTURES / "crafted_malicious.eml"
 BENIGN = FIXTURES / "benign_newsletter.eml"
 
@@ -1303,3 +1307,105 @@ def test_urlscan_active_submission_does_not_reuse_or_replace_passive_cache(tmp_p
     assert calls == ["GET", "POST"]
     assert passive.status_for("urlscan").cache_hits == 1
     assert passive.results[0].references == ()
+
+
+# --------------------------------------------------------------------------- #
+# Quality-review regressions                                                  #
+# --------------------------------------------------------------------------- #
+
+
+class _KeyedThirdPartyConnector(Connector):
+    name = "acmerep"
+    supported_ioc_types = frozenset({"domain"})
+    requires_api_key = True
+    api_key_env = "ACMEREP_API_KEY"
+    allowed_hosts = frozenset({"api.acme-rep.example"})
+    base_url = "https://api.acme-rep.example/v1"
+
+    async def enrich(self, indicator: Indicator, ctx) -> EnrichmentResult:
+        response = await ctx.http.get(
+            f"{self.base_url}/domain/{indicator.value}",
+            headers={"Authorization": f"Bearer {ctx.api_key}"},
+        )
+        return EnrichmentResult(
+            self.name, indicator.type, indicator.value, raw={"echo": response.text}
+        )
+
+
+def test_third_party_connector_reads_its_declared_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_ep = types.SimpleNamespace(name="acmerep", load=lambda: _KeyedThirdPartyConnector)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    monkeypatch.setenv("ACMEREP_API_KEY", _SENTINEL + "-acme")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, text=f"echo {request.headers['Authorization']}")
+
+    settings = make_settings(handler, select=frozenset({"acmerep"}), api_keys={})
+    report = run_enrichment([Indicator("domain", "evil.example", "evil[.]example")], settings)
+
+    status = report.status_for("acmerep")
+    assert status.outcome is ConnectorOutcome.USED
+    assert seen == [f"Bearer {_SENTINEL}-acme"]
+    # The declared variable's value is scrubbed like a bundled connector's key.
+    assert _SENTINEL not in json.dumps(status.results[0].raw)
+
+
+def test_keyed_connector_without_an_env_var_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NoEnv(_KeyedThirdPartyConnector):
+        name = "noenv"
+        api_key_env = ""
+
+    fake_ep = types.SimpleNamespace(name="noenv", load=lambda: _NoEnv)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    settings = make_settings(lambda r: httpx.Response(500), select=frozenset({"noenv"}))
+    status = run_enrichment([Indicator("domain", "a.example", "a[.]example")], settings)
+    assert status.status_for("noenv").note == "skipped — no API key (none configured)"
+
+
+def test_rdap_queries_each_registered_domain_once() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return rdap_response("2026-05-30T00:00:00Z")(request)
+
+    settings = make_settings(handler, select=frozenset({"rdap"}))
+    report = run_enrichment(
+        [
+            Indicator("domain", "login.evil.co.uk", "login[.]evil[.]co[.]uk"),
+            Indicator("domain", "mail.evil.co.uk", "mail[.]evil[.]co[.]uk"),
+        ],
+        settings,
+    )
+
+    assert requested == ["/domain/evil.co.uk"]
+    [result] = report.status_for("rdap").results
+    assert result.indicator == "evil.co.uk"
+    assert "evil[.]co[.]uk registered" in result.signals[0].evidence
+
+
+def test_rdap_date_without_offset_is_read_as_utc() -> None:
+    status = run_one(
+        "rdap",
+        Indicator("domain", "new.example", "new[.]example"),
+        rdap_response("2026-05-30T00:00:00"),
+    )
+    assert status.outcome is ConnectorOutcome.USED
+    assert status.results[0].signals[0].id == "enrichment.rdap.young_domain"
+
+
+def test_existing_cache_root_permissions_are_left_alone(tmp_path: Path) -> None:
+    import stat
+
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    EnrichmentCache(shared, enabled=True, now=_fixed_now).put(
+        EnrichmentResult("rdap", "domain", "d.example", verdict=EnrichmentVerdict.BENIGN)
+    )
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+    assert stat.S_IMODE((shared / "rdap").stat().st_mode) == 0o700

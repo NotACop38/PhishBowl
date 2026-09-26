@@ -370,3 +370,31 @@ def test_cli_emits_both_soar_drafts(tmp_path: Path) -> None:
     # The safety invariants survive the full CLI path.
     assert template["resources"][0]["properties"]["state"] == "Disabled"
     assert all(t["task"]["iscommand"] is False for t in playbook["tasks"].values())
+
+
+# --------------------------------------------------------------------------- #
+# XSOAR inputs never carry context expressions or comma-split values          #
+# --------------------------------------------------------------------------- #
+
+
+def test_xsoar_inputs_withhold_expression_and_comma_values() -> None:
+    from phishbowl.parse import parse_eml
+    from phishbowl.pipeline import triage
+
+    parsed = parse_eml(
+        b"From: sender@example.com\r\nContent-Type: text/html\r\n\r\n"
+        b'<a href="https://evil.example/${.=alert(1)}">a</a>'
+        b'<a href="https://evil.example/x?a=1,2">b</a>'
+        b'<a href="https://safe.example/ok">c</a>'
+    )
+    view, _ = triage(parsed)
+    playbook = build_xsoar_playbook(view)
+
+    inputs = {item["key"]: item["value"]["simple"] for item in playbook["inputs"]}
+    assert inputs["PhishbowlUrls"] == "https://safe.example/ok"
+    assert all("${" not in value for value in inputs.values())
+    assert "2 raw value(s) containing ',' or '${' were withheld" in playbook["description"]
+    # The withheld values stay visible, defanged, in the analyst notes.
+    notes = yaml.safe_dump(playbook["tasks"])
+    assert "hxxps://evil[.]example/${[.]=alert(1)}" in notes
+    assert validate_export(playbook, XSOAR_SCHEMA_NAME) == []

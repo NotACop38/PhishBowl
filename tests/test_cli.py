@@ -10,8 +10,10 @@ than a traceback.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from phishbowl.cli import app
@@ -67,8 +69,9 @@ def test_analyze_dash_sniffs_msg_from_stdin() -> None:
     # No suffix to dispatch on — the OLE2 magic alone must route to the .msg parser.
     result = runner.invoke(app, ["analyze", "-"], input=MSG_FIXTURE.read_bytes())
 
-    assert result.exit_code == 2  # Outlook fixture lacks authentication evidence
-    assert "Incomplete" in result.stdout
+    # Missing Outlook authentication results are a notice, not a coverage gap.
+    assert result.exit_code == 0
+    assert "Note: no SPF/DKIM/DMARC results" in result.stdout
     assert "VERDICT" in result.stdout
     assert "stdin.msg" in result.stdout
 
@@ -128,3 +131,87 @@ def test_output_cannot_overwrite_scoring_config(tmp_path: Path) -> None:
     )
     assert result.exit_code == 2
     assert config.read_text() == "weights: {}\n"
+
+
+# --- exit status contract: 0 complete · 1 threshold · 2 usage · 3 incomplete ---
+
+
+def _incomplete_email(tmp_path: Path) -> Path:
+    # A multipart whose close boundary is missing: the structure is ambiguous,
+    # so a mail client could show content the parser did not separate.
+    path = tmp_path / "ambiguous.eml"
+    path.write_bytes(
+        b"From: sender@example.com\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n"
+        b"--x\r\nContent-Type: text/plain\r\n\r\nhello\r\n"
+    )
+    return path
+
+
+def test_incomplete_analysis_exits_3_after_writing_reports(tmp_path: Path) -> None:
+    report = tmp_path / "report.html"
+    result = runner.invoke(
+        app, ["analyze", str(_incomplete_email(tmp_path)), "--html", str(report)]
+    )
+
+    assert result.exit_code == 3
+    assert "analysis incomplete" in result.output
+    assert "Not analyzed" in result.output
+    assert report.exists()
+    assert "(incomplete analysis)" in report.read_text(encoding="utf-8")
+
+
+def test_fail_on_threshold_takes_precedence_over_incomplete(tmp_path: Path) -> None:
+    result = runner.invoke(
+        app, ["analyze", "-q", "--fail-on", "0", str(_incomplete_email(tmp_path))]
+    )
+    assert result.exit_code == 1
+
+
+@pytest.mark.parametrize(
+    ("fixture", "level", "expected"),
+    [
+        ("crafted_malicious.eml", "critical", 1),  # scores 100
+        ("crafted_malicious.eml", "CRITICAL", 1),
+        ("crafted_malicious.eml", "85", 1),
+        ("benign_newsletter.eml", "low", 0),  # scores 0
+        ("benign_newsletter.eml", "1", 0),
+        ("benign_newsletter.eml", "0", 1),
+    ],
+)
+def test_fail_on_accepts_severity_names_and_scores(fixture: str, level: str, expected: int) -> None:
+    result = runner.invoke(app, ["analyze", "-q", "--fail-on", level, str(FIXTURES / fixture)])
+    assert result.exit_code == expected
+
+
+@pytest.mark.parametrize("level", ["malicious", "101", "-1", "high-ish"])
+def test_fail_on_rejects_unknown_levels_as_usage_errors(level: str) -> None:
+    result = runner.invoke(app, ["analyze", "--fail-on", level, str(FIXTURE)])
+    assert result.exit_code == 2
+    assert "--fail-on" in result.output
+
+
+def test_inner_triages_an_outlook_item_attached_to_a_msg(tmp_path: Path) -> None:
+    import sys
+
+    sys.path.insert(0, str(FIXTURES))
+    import build_synthetic_msg as msgbuild
+
+    inner = msgbuild.embedded_message_storage(
+        subject="Reported phish", body_text="claim at https://prize.example/claim"
+    )
+    outer = tmp_path / "forward.msg"
+    outer.write_bytes(
+        msgbuild.build_message(
+            subject="FW: suspicious",
+            body_text="see attached",
+            sender=("Reporter", "reporter@example.org"),
+            embedded=[("Reported phish.msg", inner)],
+        )
+    )
+
+    result = runner.invoke(app, ["analyze", "--inner", "--json", "-", str(outer)])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["subject"] == "Reported phish"
+    assert payload["source"]["filename"] == "Reported phish.msg"

@@ -48,8 +48,8 @@ class IOCType(StrEnum):
 class AttachmentFlag(StrEnum):
     """Structural red flags on an attachment (PRD §6.1 / §8).
 
-    Set by metadata/magic-byte inspection only — Phishbowl never executes an
-    attachment or extracts an archive (CLAUDE.md defensive invariants).
+    Set by metadata/magic-byte inspection only — PhishBowl never executes an
+    attachment or extracts an archive (AGENTS.md defensive invariants).
     """
 
     ARCHIVE = "archive"
@@ -58,3 +58,6 @@ class AttachmentFlag(StrEnum):
     TYPE_MISMATCH = "type_mismatch"
     DOUBLE_EXTENSION = "double_extension"
     PASSWORD_PROTECTED = "password_protected"  # nosec B105 - attachment flag name, not a credential
+    # HTML-family document a browser renders (.html/.htm/.svg/.mht/...): a common
+    # credential-phishing and HTML-smuggling delivery vector.
+    HTML = "html"

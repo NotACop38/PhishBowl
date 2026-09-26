@@ -296,14 +296,14 @@ async def _analyze_upload(
 def _analyze_bytes(data: bytes, filename: str, inner: bool, redact: bool) -> HTMLResponse:
     try:
         if inner:
-            embedded = list_embedded_emails(data, filename=filename)
+            embedded = list_embedded_emails(data)
             if not embedded:
                 raise HTTPException(
                     status_code=400,
                     detail=(
                         "No attached email found. Uncheck “Analyze attached email” "
                         "to triage this message as-is, or upload a forward that "
-                        "includes a message/rfc822 / .eml attachment."
+                        "includes a message/rfc822, .eml, or Outlook item attachment."
                     ),
                 )
             target = embedded[0]

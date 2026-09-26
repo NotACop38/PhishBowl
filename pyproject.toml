@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "phishbowl"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Self-hostable, defensive-only phishing triage: parse an email, extract and defang IOCs, risk-score it, and produce an analyst-ready report."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -33,7 +33,9 @@ dependencies = [
     "jinja2>=3.1",
     "rich>=13.7",
     "tldextract>=5.3,<6",
-  "iocextract>=1.16",
+    "iocextract>=1.16",
+    # Timeout-capable regex engine for the IOC passes (also an iocextract dependency).
+    "regex>=2023.10.3",
     "extract-msg>=0.48",
     "pyyaml>=6",
     # iocextract imports `requests` unconditionally at module load but does not
@@ -86,6 +88,9 @@ phishbowl = "phishbowl.cli:app"
 [project.urls]
 Homepage = "https://github.com/notacop38/phishbowl"
 Repository = "https://github.com/notacop38/phishbowl"
+
+[tool.hatch.version]
+path = "phishbowl/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["phishbowl"]

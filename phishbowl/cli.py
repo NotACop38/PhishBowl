@@ -1,4 +1,4 @@
-"""Phishbowl command-line interface.
+"""PhishBowl command-line interface.
 
 Wires up the Typer surface and the ``analyze`` / ``serve`` commands. ``analyze``
 runs the full offline pipeline — parse → extract → defang → score → report —
@@ -6,8 +6,13 @@ and prints a rich terminal summary, optionally writing HTML / JSON / SOAR drafts
 ``--enrich`` layers allowlisted OSINT on top; ``--inner`` re-triages an attached
 email inside a forward wrapper (the common SOC hand-off).
 
-Phishbowl is defensive-only: it never sends, detonates, fetches the email's
-URLs, or auto-remediates (CLAUDE.md invariants). Even with ``--enrich``, the only
+Exit status of ``analyze``: ``0`` analysis complete (and below any ``--fail-on``
+threshold); ``1`` the score reached the ``--fail-on`` threshold; ``2`` invalid
+usage or unreadable input; ``3`` some of the message's evidence could not be
+analyzed. Requested outputs are written before a ``1`` or ``3`` exit.
+
+PhishBowl is defensive-only: it never sends, detonates, fetches the email's
+URLs, or auto-remediates (AGENTS.md invariants). Even with ``--enrich``, the only
 network egress is to allowlisted vendor APIs — never the analyzed email's URLs.
 """
 
@@ -27,7 +32,14 @@ from phishbowl.export import render_sentinel, render_xsoar
 from phishbowl.parse import list_embedded_emails, parse, parse_bytes, sniff_suffix
 from phishbowl.parse.limits import read_stream_within_limit, read_within_limit
 from phishbowl.pipeline import triage
-from phishbowl.report import RedactionPolicy, render_cli, render_html, render_json, severity_for
+from phishbowl.report import (
+    SEVERITY_FLOORS,
+    RedactionPolicy,
+    render_cli,
+    render_html,
+    render_json,
+    severity_for,
+)
 from phishbowl.score import load_config
 
 app = typer.Typer(
@@ -35,16 +47,30 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 
-# ``--fail-on`` thresholds keyed by severity slug (same bands as the report).
-_FAIL_ON_THRESHOLDS = {
-    "low": 20,
-    "suspicious": 40,
-    "elevated": 40,
-    "likely": 65,
-    "high": 65,
-    "malicious": 85,
-    "critical": 85,
-}
+# Exit statuses of ``analyze`` (documented in the module docstring and README).
+EXIT_THRESHOLD = 1
+EXIT_INCOMPLETE = 3
+
+# ``--fail-on`` accepts a severity name (the report's ``severity`` field) or a
+# number; severity names map to the lowest score of that severity.
+_FAIL_ON_SEVERITIES = {slug: floor for floor, slug in SEVERITY_FLOORS if floor > 0}
+
+
+def _fail_on_threshold(value: str) -> int:
+    """Parse ``--fail-on`` into a 0-100 score threshold."""
+    key = value.strip().casefold()
+    if key in _FAIL_ON_SEVERITIES:
+        return _FAIL_ON_SEVERITIES[key]
+    try:
+        threshold = int(key)
+    except ValueError:
+        threshold = -1
+    if not 0 <= threshold <= 100:
+        raise typer.BadParameter(
+            f"expected a score from 0 to 100 or one of: {', '.join(_FAIL_ON_SEVERITIES)}",
+            param_hint="'--fail-on'",
+        )
+    return threshold
 
 
 def _version_callback(value: bool) -> None:
@@ -65,10 +91,10 @@ def main(
         ),
     ] = False,
 ) -> None:
-    """Phishbowl — a self-hostable, defensive-only phishing triage tool.
+    """PhishBowl — self-hostable, defensive-only phishing triage.
 
-    Offline-first phishing triage: parse a suspicious .eml/.msg, extract and
-    defang IOCs, risk-score it, and produce an analyst-ready report.
+    Parse a suspicious .eml/.msg offline, extract and defang its indicators,
+    score it with transparent rules, and write an analyst-ready report.
     """
     _ = version
 
@@ -99,11 +125,11 @@ def _resolve_parsed(
     if not inner:
         return parse_bytes(data, filename=filename)
 
-    embedded = list_embedded_emails(data, filename=filename)
+    embedded = list_embedded_emails(data)
     if not embedded:
         raise ValueError(
             "no attached email found to analyze with --inner "
-            "(expected a message/rfc822 or .eml attachment)"
+            "(expected a message/rfc822, .eml, or Outlook item attachment)"
         )
     if inner_index < 0 or inner_index >= len(embedded):
         raise ValueError(
@@ -246,9 +272,10 @@ def analyze(
         str | None,
         typer.Option(
             "--fail-on",
+            metavar="LEVEL",
             help=(
-                "Exit 1 when the severity is at least this level "
-                "(low|suspicious|likely|malicious). Useful for SOAR/CI glue."
+                "Exit 1 when the score reaches this level: a severity "
+                "(low|elevated|high|critical) or a score from 0 to 100."
             ),
         ),
     ] = None,
@@ -256,20 +283,15 @@ def analyze(
     """Triage a suspicious email and produce a report (HTML / JSON / CLI).
 
     Runs the offline pipeline end-to-end with zero API keys and prints a rich
-    summary; pass ``--html``/``--json`` to also write those outputs, and
-    ``--xsoar``/``--sentinel`` to emit SOAR playbook drafts. Add ``--enrich`` to
-    layer in OSINT enrichment (key-gated, reading secrets from the environment
-    only). Use ``--inner`` when the input is a forward wrapper with the phish
-    attached. Phishbowl is defensive-only: it never sends, detonates, fetches the
-    email's URLs, or auto-remediates.
+    summary; pass --html/--json to also write those outputs, and
+    --xsoar/--sentinel to emit SOAR playbook drafts. Add --enrich to layer in
+    OSINT enrichment (key-gated, reading secrets from the environment only). Use
+    --inner when the input is a forward wrapper with the phish attached.
+
+    Exit status: 0 complete analysis, 1 --fail-on threshold reached, 2 usage or
+    input error, 3 incomplete analysis (some evidence was not analyzed).
     """
-    if fail_on is not None:
-        key = fail_on.strip().casefold()
-        if key not in _FAIL_ON_THRESHOLDS:
-            raise typer.BadParameter(
-                f"unknown --fail-on level '{fail_on}'; "
-                f"expected one of: {', '.join(sorted(set(_FAIL_ON_THRESHOLDS)))}"
-            )
+    threshold = _fail_on_threshold(fail_on) if fail_on is not None else None
 
     outputs = [p for p in (html, xsoar, sentinel) if p is not None]
     if json_out is not None and json_out != "-":
@@ -321,7 +343,7 @@ def analyze(
     json_to_stdout = json_out == "-"
     show_cli = not quiet and not json_to_stdout
     if show_cli:
-        render_cli(view, Console())
+        render_cli(view, Console(highlight=False))
 
     if html is not None:
         html.write_text(render_html(view), encoding="utf-8")
@@ -351,18 +373,25 @@ def analyze(
                 "(ships disabled — review and enable manually; Phishbowl never acts)"
             )
 
+    # A score at or above the threshold is conclusive even when the analysis is
+    # incomplete (the score can only be a lower bound); below it, an incomplete
+    # analysis cannot vouch for the message.
+    if threshold is not None and result.score >= threshold:
+        if not quiet:
+            typer.echo(
+                f"phishbowl: score {result.score} (severity {severity_for(result.score)}) "
+                f"reached the --fail-on threshold {threshold}",
+                err=True,
+            )
+        raise typer.Exit(EXIT_THRESHOLD)
     if not result.analysis_complete:
-        raise typer.Exit(2)
-
-    if fail_on is not None:
-        if result.score >= _FAIL_ON_THRESHOLDS[key]:
-            if show_cli:
-                typer.echo(
-                    f"phishbowl: failing (score {result.score}, "
-                    f"severity={severity_for(result.score)}) — threshold '{key}'",
-                    err=True,
-                )
-            raise typer.Exit(1)
+        if not quiet:
+            typer.echo(
+                "phishbowl: analysis incomplete — some evidence was not analyzed; "
+                "see the listed limitations",
+                err=True,
+            )
+        raise typer.Exit(EXIT_INCOMPLETE)
 
 
 @app.command()
@@ -376,14 +405,13 @@ def serve(
         typer.Option("--port", "-p", help="Port to listen on."),
     ] = 8000,
 ) -> None:
-    """Run the optional FastAPI upload UI (PRD §15 stretch).
+    """Run the optional local upload UI (requires the 'web' extra).
 
-    Serves a minimal browser front door that runs the **same** offline pipeline
-    as ``analyze`` and renders the identical self-contained, zero-egress report —
-    no logic fork. Uploads are hardened (size + type limits, analyzed in memory,
-    never written to disk/executed/fetched). Binds to localhost by default; this
-    is a self-hosted analyst tool, not a public service. Requires the ``web``
-    extra: ``pip install 'phishbowl[web]'``.
+    Serves a browser front door that runs the same offline pipeline as
+    'analyze' and returns the identical self-contained report. Uploads are
+    size- and type-checked and analyzed in memory. Binds to localhost by
+    default: a single-user analyst tool, not a public service. Install with:
+    pip install 'phishbowl[web]'.
     """
     try:
         import uvicorn

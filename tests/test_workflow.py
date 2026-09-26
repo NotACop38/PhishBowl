@@ -100,7 +100,7 @@ def test_json_stdout_and_quiet() -> None:
 def test_fail_on_exits_nonzero_for_malicious() -> None:
     result = runner.invoke(
         app,
-        ["analyze", "-q", "--fail-on", "suspicious", str(FIXTURES / "crafted_malicious.eml")],
+        ["analyze", "-q", "--fail-on", "elevated", str(FIXTURES / "crafted_malicious.eml")],
     )
     assert result.exit_code == 1
 
@@ -108,7 +108,7 @@ def test_fail_on_exits_nonzero_for_malicious() -> None:
 def test_fail_on_passes_for_benign() -> None:
     result = runner.invoke(
         app,
-        ["analyze", "-q", "--fail-on", "suspicious", str(FIXTURES / "benign_newsletter.eml")],
+        ["analyze", "-q", "--fail-on", "elevated", str(FIXTURES / "benign_newsletter.eml")],
     )
     assert result.exit_code == 0
 

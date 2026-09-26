@@ -1,10 +1,12 @@
 """Protective-link unwrapping — pure string transform, **never a fetch** (PRD §6.2).
 
 Mail gateways rewrite links through "URL protection" wrappers. To triage the
-real destination an analyst needs the wrapped link decoded — but Phishbowl must
-**never open the link** to do it (CLAUDE.md: never fetch the email's URLs).
+real destination an analyst needs the wrapped link decoded — but PhishBowl must
+**never open the link** to do it (AGENTS.md: never fetch the email's URLs).
 Every unwrapper here is therefore a deterministic string/codec transform over
-the rewritten URL; nothing in this module touches the network.
+the rewritten URL; nothing in this module touches the network. All decoders are
+linear-time string operations, and a wrapper longer than 16 KiB is reported as
+unresolved rather than decoded.
 
 Reversible offline:
 
@@ -12,11 +14,15 @@ Reversible offline:
   is percent-encoded in the ``url`` query parameter.
 - **Proofpoint URL Defense v1/v2/v3** — three documented encodings (percent /
   ``-_`` substitution / base64 run-length tokens).
+- **Barracuda Link Protection** (``linkprotect.cudasvc.com/url?a=…``) — the
+  target is percent-encoded in the ``a`` parameter.
+- **Cisco Secure Email** (``secure-web.cisco.com/<token>/<target>``) — the
+  target is the percent-encoded last path segment.
 
 Detect-but-cannot-reverse offline (kept wrapped, flagged "wrapped, unresolved"):
 
-- **Mimecast** (``protect*.mimecast.com/s/…``), **Barracuda**
-  (``linkprotect.cudasvc.com``), **Cisco** (``secure-web.cisco.com``).
+- **Mimecast** (``protect*.mimecast.com/s/…``) — the target lives on Mimecast's
+  servers; the ``domain`` parameter, when present, still names the target host.
 
 Both forms are always retained by the caller (PRD §6.2): the unwrapped target in
 ``value`` and the original wrapper string in ``wrapped``.
@@ -33,16 +39,19 @@ from urllib.parse import parse_qs, unquote, urlsplit
 # Reversible wrappers
 SAFELINKS = "safelinks"
 PROOFPOINT = "proofpoint"
-# Non-reversible-offline wrappers (kept wrapped, flagged unresolved)
-MIMECAST = "mimecast"
 BARRACUDA = "barracuda"
 CISCO = "cisco"
+# Non-reversible-offline wrappers (kept wrapped, flagged unresolved)
+MIMECAST = "mimecast"
 
-NON_REVERSIBLE = frozenset({MIMECAST, BARRACUDA, CISCO})
+NON_REVERSIBLE = frozenset({MIMECAST})
 
 # Don't chase wrappers forever — a rewritten link may nest, but a handful of
 # layers is plenty and bounds adversarial input (PRD §13).
 _MAX_DEPTH = 5
+
+# Longest wrapped URL we decode. Real rewritten links are far shorter.
+_MAX_WRAPPED_LENGTH = 16 * 1024
 
 
 @dataclass(frozen=True)
@@ -52,13 +61,15 @@ class UnwrapResult:
     ``value`` is the best-known target (the unwrapped URL when reversible, else
     the wrapped URL unchanged); ``wrapped`` is always the original on-wire
     wrapper string; ``wrapper`` names it; ``unresolved`` marks a wrapper we could
-    detect but not reverse offline.
+    detect but not reverse offline. ``target_domain`` is the destination host a
+    non-reversible wrapper still discloses (Mimecast's ``domain`` parameter).
     """
 
     value: str
     wrapped: str
     wrapper: str
     unresolved: bool
+    target_domain: str | None = None
 
 
 def _host(url: str) -> str:
@@ -68,7 +79,11 @@ def _host(url: str) -> str:
         return ""
     if "@" in netloc:
         netloc = netloc.rsplit("@", 1)[1]
-    return netloc.split(":", 1)[0].casefold()
+    return netloc.split(":", 1)[0].casefold().rstrip(".")
+
+
+def _under(host: str, domain: str) -> bool:
+    return host == domain or host.endswith("." + domain)
 
 
 def detect_wrapper(url: str) -> str | None:
@@ -82,22 +97,36 @@ def detect_wrapper(url: str) -> str | None:
         path = urlsplit(url).path
     except ValueError:
         return None
-    if host == "safelinks.protection.outlook.com" or host.endswith(
-        ".safelinks.protection.outlook.com"
-    ):
+    if _under(host, "safelinks.protection.outlook.com"):
         return SAFELINKS
-    if any(
-        host == domain or host.endswith("." + domain)
-        for domain in ("urldefense.proofpoint.com", "urldefense.com")
-    ):
+    if _under(host, "urldefense.proofpoint.com") or _under(host, "urldefense.com"):
         return PROOFPOINT
-    if host.endswith(".mimecast.com") or host == "mimecast.com":
-        if path.startswith("/s/"):
-            return MIMECAST
-    if host == "linkprotect.cudasvc.com" or host.endswith(".cudasvc.com"):
+    if _under(host, "mimecast.com") and path.startswith("/s/"):
+        return MIMECAST
+    if _under(host, "cudasvc.com"):
         return BARRACUDA
-    if host == "secure-web.cisco.com" or host.endswith(".secure-web.cisco.com"):
+    if _under(host, "secure-web.cisco.com"):
         return CISCO
+    return None
+
+
+def _query_value(url: str, name: str) -> str | None:
+    """The raw (still-encoded) value of query parameter ``name``, or ``None``."""
+    try:
+        query = urlsplit(url).query
+    except ValueError:
+        return None
+    prefix = name + "="
+    for field in query.split("&"):
+        if field.startswith(prefix):
+            return field[len(prefix) :]
+    return None
+
+
+def _web_url(value: str | None) -> str | None:
+    """``value`` if it is an http(s) URL, else ``None``."""
+    if value and value.casefold().startswith(("http://", "https://")):
+        return value
     return None
 
 
@@ -116,10 +145,8 @@ def unwrap_safelinks(url: str) -> str | None:
 
 # --- Proofpoint URL Defense ------------------------------------------------
 
-_PP_V1 = re.compile(r"u=(.+?)&k=")
-_PP_V2 = re.compile(r"u=(.+?)&[dc]=")
-_PP_V3 = re.compile(r"v3/__(.+?)__;(.*?)!")
 _PP_V3_TOKEN = re.compile(r"\*(\*.)?")
+_PP_V3_SINGLE_SLASH = re.compile(r"^([a-z0-9+.-]+:/)([^/].*)", re.IGNORECASE | re.DOTALL)
 
 # Run-length map: a "**x" token expands to (b64-index(x) + 2) replaced chars; a
 # bare "*" is a single replaced char. Alphabet is URL-safe base64.
@@ -137,26 +164,35 @@ def _pp_version(url: str) -> str | None:
 
 
 def _decode_pp_v1(url: str) -> str | None:
-    m = _PP_V1.search(url)
-    if not m:
-        return None
-    return html.unescape(unquote(m.group(1)))
+    value = _query_value(url, "u")
+    return html.unescape(unquote(value)) if value else None
 
 
 def _decode_pp_v2(url: str) -> str | None:
-    m = _PP_V2.search(url)
-    if not m:
+    value = _query_value(url, "u")
+    if not value:
         return None
-    no_run = m.group(1).replace("-", "%").replace("_", "/")
-    return html.unescape(unquote(no_run))
+    return html.unescape(unquote(value.replace("-", "%").replace("_", "/")))
 
 
 def _decode_pp_v3(url: str) -> str | None:
-    m = _PP_V3.search(url)
-    if not m:
+    start = url.find("/v3/__")
+    if start < 0:
         return None
-    encoded_url = unquote(m.group(1))
-    trailer = m.group(2)
+    start += len("/v3/__")
+    end = url.find("__;", start)
+    if end < 0:
+        return None
+    bang = url.find("!", end + 3)
+    if bang < 0:
+        return None
+    target = url[start:end]
+    trailer = url[end + 3 : bang]
+    # Proofpoint collapses "https://" to "https:/" in some rewrites.
+    single = _PP_V3_SINGLE_SLASH.match(target)
+    if single:
+        target = single.group(1) + "/" + single.group(2)
+    encoded_url = unquote(target)
     try:
         padded = trailer + "=" * (-len(trailer) % 4)
         dec_bytes = urlsafe_b64decode(padded).decode("utf-8") if trailer else ""
@@ -169,13 +205,11 @@ def _decode_pp_v3(url: str) -> str | None:
     for tok in _PP_V3_TOKEN.finditer(encoded_url):
         out.append(encoded_url[pos : tok.start()])
         token = tok.group(0)
-        if token == "*":  # nosec B105 - Proofpoint v3 run-token, not a credential
-            out.append(dec_bytes[marker : marker + 1])
-            marker += 1
-        else:  # "**x" run token: x gives the run length
-            run = _PP_RUN.get(token[-1], 0)
-            out.append(dec_bytes[marker : marker + run])
-            marker += run
+        run = 1 if token == "*" else _PP_RUN.get(token[-1], 0)  # nosec B105 - run-token
+        if marker + run > len(dec_bytes):
+            return None  # the tokens ask for more characters than the trailer holds
+        out.append(dec_bytes[marker : marker + run])
+        marker += run
         pos = tok.end()
     out.append(encoded_url[pos:])
     return "".join(out)
@@ -193,9 +227,38 @@ def unwrap_proofpoint(url: str) -> str | None:
     return None
 
 
+# --- Barracuda and Cisco ---------------------------------------------------
+
+
+def unwrap_barracuda(url: str) -> str | None:
+    """Decode the ``a`` parameter of a Barracuda Link Protection link."""
+    value = _query_value(url, "a")
+    return _web_url(unquote(value)) if value else None
+
+
+def unwrap_cisco(url: str) -> str | None:
+    """Decode the percent-encoded target that ends a Cisco Secure Email link."""
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return None
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) < 2:
+        return None
+    return _web_url(unquote(segments[-1]))
+
+
+def _mimecast_domain(url: str) -> str | None:
+    value = _query_value(url, "domain")
+    domain = unquote(value).strip().casefold().rstrip(".") if value else ""
+    return domain if domain and "." in domain and "/" not in domain else None
+
+
 _DECODERS = {
     SAFELINKS: unwrap_safelinks,
     PROOFPOINT: unwrap_proofpoint,
+    BARRACUDA: unwrap_barracuda,
+    CISCO: unwrap_cisco,
 }
 
 
@@ -218,10 +281,14 @@ def unwrap_url(url: str) -> UnwrapResult | None:
         wrapper = detect_wrapper(current)
         if wrapper is None:
             break
-        if wrapper in NON_REVERSIBLE:
+        if wrapper in NON_REVERSIBLE or len(current) > _MAX_WRAPPED_LENGTH:
             # Detected but not reversible offline: keep the wrapped form, flag it.
             return UnwrapResult(
-                value=current, wrapped=original, wrapper=outer or wrapper, unresolved=True
+                value=current,
+                wrapped=original,
+                wrapper=outer or wrapper,
+                unresolved=True,
+                target_domain=_mimecast_domain(current) if wrapper == MIMECAST else None,
             )
         decoded = _DECODERS[wrapper](current)
         if not decoded or decoded == current:
@@ -236,4 +303,6 @@ def unwrap_url(url: str) -> UnwrapResult | None:
 
     if outer is None:
         return None
-    return UnwrapResult(value=current, wrapped=original, wrapper=outer, unresolved=False)
+    # Still wrapped after the depth budget: the final target was never reached.
+    unresolved = detect_wrapper(current) is not None
+    return UnwrapResult(value=current, wrapped=original, wrapper=outer, unresolved=unresolved)

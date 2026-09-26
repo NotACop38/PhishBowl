@@ -49,9 +49,10 @@ def _host_of(url: str) -> str | None:
 @register
 class UrlscanConnector(Connector):
     name = "urlscan"
-    version = "1.0.0"
+    version = "1.0.1"
     supported_ioc_types = frozenset({IOCType.URL.value})
     requires_api_key = True
+    api_key_env = "URLSCAN_API_KEY"
     allowed_hosts = frozenset({"urlscan.io"})
     base_url = "https://urlscan.io/api/v1"
     cache_ttl = 6 * 3600
@@ -71,7 +72,7 @@ class UrlscanConnector(Connector):
         response = await ctx.http.get(
             f"{self.base_url}/search/",
             headers={"API-Key": ctx.api_key or ""},
-            params={"q": f"page.domain:{host}", "size": "10"},
+            params={"q": f'page.domain:"{host}"', "size": "10"},
         )
         if response.status_code != 200:
             raise ConnectorError(f"urlscan search returned HTTP {response.status_code}")
@@ -137,7 +138,8 @@ def _worst_verdict(results: list) -> dict | None:
     for entry in results:
         if not isinstance(entry, dict):
             continue
-        overall = entry.get("verdicts", {}).get("overall")
+        verdicts = entry.get("verdicts")
+        overall = verdicts.get("overall") if isinstance(verdicts, dict) else None
         if not isinstance(overall, dict):
             continue
         if worst is None or int(overall.get("score", 0) or 0) > int(worst.get("score", 0) or 0):

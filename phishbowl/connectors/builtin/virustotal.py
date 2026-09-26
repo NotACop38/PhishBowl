@@ -13,6 +13,7 @@ repeat runs and the demo from burning the ~4 req/min public quota.
 from __future__ import annotations
 
 import base64
+from urllib.parse import quote
 
 from phishbowl.models import IOCType
 
@@ -38,9 +39,10 @@ def _vt_url_id(url: str) -> str:
 @register
 class VirusTotalConnector(Connector):
     name = "virustotal"
-    version = "1.0.0"
+    version = "1.0.1"
     supported_ioc_types = frozenset({IOCType.URL.value, IOCType.DOMAIN.value, IOCType.HASH.value})
     requires_api_key = True
+    api_key_env = "VIRUSTOTAL_API_KEY"
     allowed_hosts = frozenset({"www.virustotal.com"})
     base_url = "https://www.virustotal.com/api/v3"
     cache_ttl = 6 * 3600
@@ -90,10 +92,13 @@ class VirusTotalConnector(Connector):
 
     def _route(self, indicator: Indicator) -> tuple[str, str, str]:
         """API endpoint + GUI (kind, id) for an indicator type."""
+        # Indicator values come from a hostile email: quote them so a stray
+        # "/", "?" or "#" can only ever be part of one path segment.
+        segment = quote(indicator.value, safe="")
         if indicator.type == IOCType.DOMAIN.value:
-            return f"domains/{indicator.value}", "domain", indicator.value
+            return f"domains/{segment}", "domain", segment
         if indicator.type == IOCType.HASH.value:
-            return f"files/{indicator.value}", "file", indicator.value
+            return f"files/{segment}", "file", segment
         if indicator.type == IOCType.URL.value:
             url_id = _vt_url_id(indicator.value)
             return f"urls/{url_id}", "url", url_id

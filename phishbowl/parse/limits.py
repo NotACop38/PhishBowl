@@ -2,20 +2,20 @@
 
 The analyzed email is hostile input end to end: a `.eml`/`.msg` can be
 maliciously oversized or pathologically structured (a deeply nested or
-fan-out multipart "MIME bomb"). These caps bound input reads; additional MIME
-construction, text and IOC budgets
-live at their processing boundaries. A budget violation produces an incomplete
-assessment. This is not a process sandbox or a guarantee against every dependency
-failure. Legitimate messages may also exceed the limits.
-
-Two complementary guards:
+fan-out multipart "MIME bomb"). These caps bound what is read and parsed:
 
 * :data:`MAX_INPUT_BYTES` — the largest file/byte string we will parse at all.
-  Enforced *before* reading the whole file into memory (via ``stat``), so a
-  multi-gigabyte input is rejected without ever being slurped.
-* :data:`MAX_PARTS` — the most MIME parts we will walk in one message, so a
-  multipart tree engineered to explode into millions of parts is truncated
-  rather than chased unbounded.
+  Enforced *before* reading the whole file into memory (via ``stat`` and a
+  bounded chunked read), so a multi-gigabyte input is rejected without ever
+  being slurped.
+* :data:`MAX_PARTS` — the most MIME nodes one message may contain. A tree over
+  the budget is refused as it is built (:mod:`phishbowl.parse.mime`), and only
+  its header block is analyzed, with a coverage-gap anomaly.
+
+Further budgets (line length and count, text and indicator limits, regex time
+limits) live at their processing boundaries. They are application budgets,
+not a process sandbox, and a legitimate message can exceed them; when one does,
+the assessment is marked incomplete rather than presented as whole.
 """
 
 from __future__ import annotations
@@ -28,9 +28,8 @@ from typing import BinaryIO
 # inputs that would blow up memory.
 MAX_INPUT_BYTES = 50 * 1024 * 1024
 
-# Most MIME parts we will walk in one message. A multipart tree far larger than
-# this is structural abuse, not legitimate mail; the walker stops here rather
-# than chase an unbounded part explosion.
+# Most MIME nodes (containers included) one message may contain. A tree far
+# larger than this is structural abuse, not legitimate mail.
 MAX_PARTS = 2000
 
 # Chunk size for the bounded file read below.

@@ -34,6 +34,7 @@ class AbuseIPDBConnector(Connector):
     version = "1.0.0"
     supported_ioc_types = frozenset({IOCType.IPV4.value, IOCType.IPV6.value})
     requires_api_key = True
+    api_key_env = "ABUSEIPDB_API_KEY"
     allowed_hosts = frozenset({"api.abuseipdb.com"})
     base_url = "https://api.abuseipdb.com/api/v2"
     cache_ttl = 6 * 3600

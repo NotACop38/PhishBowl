@@ -21,11 +21,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from .view import ReportView
+from .view import _CONTROL_CHARS, ReportView
 
 # Severity slug → Rich colour for the verdict banner and score.
 _SEVERITY_STYLE = {
-    "benign": "green",
+    "minimal": "cyan",
     "low": "green3",
     "elevated": "yellow",
     "high": "dark_orange",
@@ -54,9 +54,18 @@ _MAX_REASONS = 8
 _MAX_IOCS_PER_TYPE = 12
 
 
+def _plain(value: str) -> str:
+    """Strip terminal control characters from a string about to be printed.
+
+    The view has already done this; repeating it here is a backstop, so a field
+    added to the view without cleaning still cannot drive the analyst's terminal.
+    """
+    return _CONTROL_CHARS.sub("", value)
+
+
 def _t(value: str | None, style: str = "") -> Text:
     """A markup-free Text cell (email-derived strings never become Rich markup)."""
-    return Text(value or "—", style=style)
+    return Text(_plain(value) if value else "—", style=style)
 
 
 def render_cli(view: ReportView, console: Console | None = None) -> None:
@@ -67,7 +76,10 @@ def render_cli(view: ReportView, console: Console | None = None) -> None:
     _verdict_banner(view, console, style)
     console.print(Text(view.assessment_note, style="dim"))
     for anomaly in view.anomalies:
-        console.print(Text(f"Analysis limitation: {anomaly.message}", style="yellow"))
+        if anomaly.coverage_gap:
+            console.print(Text(_plain(f"Not analyzed: {anomaly.message}"), style="yellow"))
+        else:
+            console.print(Text(_plain(f"Note: {anomaly.message}"), style="dim"))
     if view.redaction.enabled:
         cats = f" ({', '.join(view.redaction.categories)})" if view.redaction.categories else ""
         console.print(
@@ -105,13 +117,14 @@ def _verdict_banner(view: ReportView, console: Console, style: str) -> None:
     body = Text()
     body.append(f"{view.score}", style=f"bold {style}")
     body.append(f" / {view.max_score}  ", style="dim")
-    body.append(view.verdict, style=f"bold {style}")
+    body.append(_plain(view.verdict), style=f"bold {style}")
     if view.subject:
         body.append("\nSubject: ", style="dim")
-        body.append(view.subject)  # plain append: never parsed as Rich markup
+        body.append(_plain(view.subject))  # plain append: never parsed as Rich markup
+    from_enrichment = f" ({view.enrichment_rules} from enrichment)" if view.enrichment_rules else ""
     body.append(
-        f"\n{len(view.fired_rules)} rule(s) fired · {view.ioc_total} indicator(s) · "
-        f"offline score {view.offline_score}",
+        f"\n{len(view.fired_rules)} rule(s) fired{from_enrichment} · "
+        f"{view.ioc_total} indicator(s) · offline score {view.offline_score}",
         style="dim",
     )
     title = Text("PHISHBOWL VERDICT", style=f"bold {style}")
@@ -217,16 +230,16 @@ def _routing(view: ReportView, console: Console) -> None:
     console.print(line)
     if view.sending_ip_display:
         sip = Text("  Sending IP: ", style="dim")
-        sip.append(view.sending_ip_display, style="cyan bold")
+        sip.append(_plain(view.sending_ip_display), style="cyan bold")
         console.print(sip)
     for hop in view.routing:
         seg = Text(f"  {hop.index}. ", style="dim")
         if hop.from_:
             seg.append("from ")
-            seg.append(hop.from_, style="cyan")
+            seg.append(_plain(hop.from_), style="cyan")
         if hop.by:
             seg.append(" by ")
-            seg.append(hop.by, style="cyan")
+            seg.append(_plain(hop.by), style="cyan")
         console.print(seg)
     console.print()
 

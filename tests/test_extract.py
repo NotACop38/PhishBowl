@@ -21,6 +21,7 @@ from phishbowl.extract import (
     defang_email,
     defang_ipv4,
     defang_ipv6,
+    defang_text,
     defang_url,
     detect_wrapper,
     extract_iocs,
@@ -104,22 +105,69 @@ def test_plain_url_is_not_treated_as_wrapped() -> None:
 # --- Non-reversible wrappers: kept wrapped, flagged "wrapped, unresolved" ---
 
 
-@pytest.mark.parametrize(
-    ("url", "wrapper"),
-    [
-        ("https://protect.mimecast.com/s/aB12CdEf34?domain=phish.example", "mimecast"),
-        ("https://linkprotect.cudasvc.com/url?a=https%3a%2f%2fevil.example&c=E,1,x", "barracuda"),
-        ("https://secure-web.cisco.com/1abcDEF/https%3A%2F%2Fevil.example%2F", "cisco"),
-    ],
-)
-def test_non_reversible_wrappers_marked_unresolved(url: str, wrapper: str) -> None:
+def test_mimecast_is_kept_wrapped_but_discloses_its_target_domain() -> None:
+    url = "https://protect-us.mimecast.com/s/aB12CdEf34?domain=phish.example"
     result = unwrap_url(url)
     assert result is not None
-    assert result.wrapper == wrapper
-    assert result.unresolved is True
+    assert (result.wrapper, result.unresolved) == ("mimecast", True)
     # The wrapped form is retained unchanged as the value (nothing was decoded).
-    assert result.value == url
-    assert result.wrapped == url
+    assert result.value == result.wrapped == url
+    assert result.target_domain == "phish.example"
+
+
+@pytest.mark.parametrize(
+    ("url", "wrapper", "target"),
+    [
+        (
+            "https://linkprotect.cudasvc.com/url?a=https%3a%2f%2fevil.example%2flogin&c=E,1,x",
+            "barracuda",
+            "https://evil.example/login",
+        ),
+        (
+            "https://secure-web.cisco.com/1abcDEF/https%3A%2F%2Fevil.example%2Flogin",
+            "cisco",
+            "https://evil.example/login",
+        ),
+        (
+            "https://urldefense.com/v3/__https:/evil.example/login__;!!AbCdEf!GhIjKl$",
+            "proofpoint",
+            "https://evil.example/login",  # the collapsed "https:/" is restored
+        ),
+        (
+            "https://nam12.safelinks.protection.outlook.com./?url=https%3A%2F%2Fevil.example%2F",
+            "safelinks",
+            "https://evil.example/",  # a trailing-dot wrapper host is still a wrapper
+        ),
+    ],
+)
+def test_reversible_wrappers_unwrap_offline(url: str, wrapper: str, target: str) -> None:
+    result = unwrap_url(url)
+    assert result is not None
+    assert (result.wrapper, result.unresolved, result.value) == (wrapper, False, target)
+
+
+def test_proofpoint_v3_tokens_beyond_the_trailer_are_unresolved() -> None:
+    result = unwrap_url("https://urldefense.com/v3/__https://evil.example/a*b*c__;!!x!y$")
+    assert result is not None and result.unresolved
+
+
+def test_wrappers_nested_past_the_depth_budget_are_unresolved() -> None:
+    from urllib.parse import quote
+
+    url = "https://evil.example/"
+    for _ in range(7):
+        url = "https://x.safelinks.protection.outlook.com/?url=" + quote(url, safe="")
+    result = unwrap_url(url)
+    assert result is not None and result.unresolved
+
+
+def test_hostile_proofpoint_links_decode_in_linear_time() -> None:
+    import time
+
+    started = time.perf_counter()
+    unwrap_url("https://urldefense.com/v3/__" + "v3/__" * 40_000)
+    unwrap_url("https://urldefense.proofpoint.com/v2/url?" + "u=" * 40_000)
+    assert time.perf_counter() - started < 1.0
 
 
 # --- Defang (all human-facing output) --------------------------------------
@@ -305,3 +353,167 @@ def test_backslash_authority_cannot_masquerade_as_wrapper(host):
         + "&url=https%3A%2F%2Fexample.org%2F"
     )
     assert unwrap_url(url) is None
+
+
+# --- HTML link targets are classified by what they can reach -------------------
+
+
+def _html_iocs(markup: str) -> dict[str, set[str]]:
+    from phishbowl.parse import parse_eml
+
+    parsed = parse_eml(
+        b"From: a@example.com\r\nContent-Type: text/html\r\n\r\n" + markup.encode("utf-8")
+    )
+    found: dict[str, set[str]] = {}
+    for ioc in extract_iocs(parsed):
+        found.setdefault(ioc.type.value, set()).add(ioc.value)
+    return found
+
+
+def test_non_network_link_targets_are_not_url_indicators() -> None:
+    found = _html_iocs(
+        '<a href="#top">top</a><a href="/relative/path">r</a><a href="tel:+15555550100">t</a>'
+        '<img src="cid:image001.png@01D2B9"><img src="data:image/png;base64,iVBORw0KGgo=">'
+        '<a href="https://ok.example.com/x">ok</a>'
+    )
+    assert found["url"] == {"https://ok.example.com/x"}
+
+
+def test_mailto_links_contribute_their_addresses() -> None:
+    found = _html_iocs('<a href="mailto:boss%40example.net?cc=cfo@example.net">mail</a>')
+    assert {"boss@example.net", "cfo@example.net"} <= found["email"]
+    assert "url" not in found
+
+
+def test_script_and_inline_document_navigation_is_surfaced() -> None:
+    found = _html_iocs(
+        '<a href="javascript:alert(1)">js</a><a href="data:text/html;base64,PGgxPg==">doc</a>'
+    )
+    assert found["url"] == {"javascript:alert(1)", "data:text/html;base64,PGgxPg=="}
+
+
+def test_resource_urls_srcset_and_meta_refresh_are_extracted() -> None:
+    found = _html_iocs(
+        '<meta http-equiv="Refresh" content="0; url=https://redirect.example/go">'
+        '<img srcset="https://cdn.example/a.png 1x, https://cdn.example/b.png 2x">'
+        '<img src="//pixel.example/t.gif">'
+    )
+    assert {
+        "https://redirect.example/go",
+        "https://cdn.example/a.png",
+        "https://cdn.example/b.png",
+        "//pixel.example/t.gif",
+    } <= found["url"]
+    assert "pixel.example" in found["domain"]
+
+
+# --- Extraction regressions (quality review) -----------------------------------
+
+
+def _eml_iocs(raw: bytes) -> dict[str, set[str]]:
+    from phishbowl.parse import parse_eml
+
+    found: dict[str, set[str]] = {}
+    for ioc in extract_iocs(parse_eml(raw)):
+        found.setdefault(ioc.type.value, set()).add(ioc.value)
+    return found
+
+
+def test_unparseable_url_text_is_kept_not_fatal() -> None:
+    raw = "From: a@example.com\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n"
+    raw += "see http://a.example .＠b now\r\n"
+    found = _eml_iocs(raw.encode("utf-8"))  # iocextract's refang raises ValueError here
+    assert "email" in found
+
+
+def test_times_and_mac_addresses_are_not_ipv6_indicators() -> None:
+    found = _eml_iocs(
+        b"From: a@example.com\r\n\r\nat 10:30:00 from 00:1a:2b:3c:4d:5e via 2001:db8::1\r\n"
+    )
+    assert found["ipv6"] == {"2001:db8::1"}
+
+
+def test_the_indicator_cap_never_evicts_hashes_or_links() -> None:
+    import base64
+
+    padding = " ".join(f"10.{i // 250}.{i % 250}.1" for i in range(1200))
+    raw = (
+        b"From: a@example.com\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain\r\n\r\n" + padding.encode() + b"\r\n"
+        b'--b\r\nContent-Type: text/html\r\n\r\n<a href="https://login.evil.example/">x</a>\r\n'
+        b"--b\r\nContent-Type: application/octet-stream; name=a.bin\r\n"
+        b"Content-Transfer-Encoding: base64\r\n\r\n" + base64.encodebytes(b"payload") + b"--b--\r\n"
+    )
+    found = _eml_iocs(raw)
+    assert "https://login.evil.example/" in found["url"]
+    assert found["hash"]
+
+
+def test_ip_literal_link_hosts_are_ip_indicators() -> None:
+    found = _eml_iocs(
+        b'From: a@example.com\r\nContent-Type: text/html\r\n\r\n<a href="http://198.51.100.7/login">x</a>'
+    )
+    assert "198.51.100.7" in found["ipv4"]
+
+
+def test_mimecast_links_contribute_their_target_domain() -> None:
+    found = _eml_iocs(
+        b"From: a@example.com\r\nContent-Type: text/html\r\n\r\n"
+        b'<a href="https://protect-us.mimecast.com/s/aB12?domain=phish.example">x</a>'
+    )
+    assert "phish.example" in found["domain"]
+
+
+def test_hidden_markup_and_styles_are_scanned_but_not_shown() -> None:
+    from phishbowl.html_analysis import inspect_html
+
+    html = (
+        "<style>.x{background:url('https://track.example/p.gif')}</style>"
+        '<script>var c2 = "https://c2.example/beacon";</script>'
+        '<p style="background:url(https://bg.example/i.png)">Visible</p>'
+        '<svg><a xlink:href="https://svg.example/go">s</a></svg>'
+        '<a href="https://ok.example/" ping="https://ping.example/p">Click</a>'
+    )
+    analysis = inspect_html(html)
+    assert "c2.example" not in analysis.text and "Visible" in analysis.text
+    found = _eml_iocs(b"From: a@example.com\r\nContent-Type: text/html\r\n\r\n" + html.encode())
+    assert {
+        "https://track.example/p.gif",
+        "https://c2.example/beacon",
+        "https://bg.example/i.png",
+        "https://svg.example/go",
+        "https://ping.example/p",
+    } <= found["url"]
+
+
+def test_inline_html_part_with_a_file_name_is_read_as_body() -> None:
+    found = _eml_iocs(
+        b"From: a@example.com\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b'--b\r\nContent-Type: text/html; name="message.html"\r\n\r\n'
+        b'<a href="https://inline.example/x">x</a>\r\n--b--\r\n'
+    )
+    assert "https://inline.example/x" in found["url"]
+
+
+@pytest.mark.parametrize(
+    ("text", "defanged"),
+    [
+        ("see_www.evil.example/login", "see_www[.]evil[.]example/login"),
+        ("id_192.0.2.1 x", "id_192[.]0[.]2[.]1 x"),
+        ("version 1.2.3.4.5", "version 1.2.3.4.5"),
+        ("Invoice_https://evil.example/pay", "Invoice_hxxps://evil[.]example/pay"),
+    ],
+)
+def test_glued_indicators_in_text_are_defanged(text: str, defanged: str) -> None:
+    assert defang_text(text) == defanged
+
+
+@pytest.mark.parametrize("url", ["java\tscript:alert(1)", "\x01javascript:alert(1)"])
+def test_scheme_is_read_the_way_browsers_read_it(url: str) -> None:
+    assert defang_url(url) == "javascript[:]alert(1)"
+
+
+def test_defanging_is_idempotent() -> None:
+    for value in ("hxxp://203[.]0[.]113[.]9/login", "user[at]evil[.]example", "2001[:]db8[:][:]1"):
+        assert defang_text(value) == value
+    assert defang_ipv6("2001[:]db8::1") == "2001[:]db8[:][:]1"

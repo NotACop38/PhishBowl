@@ -47,6 +47,7 @@ class ShodanConnector(Connector):
     version = "1.0.0"
     supported_ioc_types = frozenset({IOCType.IPV4.value, IOCType.IPV6.value})
     requires_api_key = True
+    api_key_env = "SHODAN_API_KEY"
     allowed_hosts = frozenset({"api.shodan.io"})
     base_url = "https://api.shodan.io"
     cache_ttl = 12 * 3600

@@ -175,7 +175,14 @@ _FORBIDDEN_TAGS = (
     "<track",
     "<frame",
     "<applet",
-    "<meta http-equiv",
+)
+
+# The report's one http-equiv directive: a Content-Security-Policy that blocks
+# every fetch and script, so even a hypothetical escaping bug could not load a
+# remote resource or run code when the file is opened.
+_REPORT_CSP = (
+    '<meta http-equiv="content-security-policy" content="default-src \'none\'; '
+    "style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'\">"
 )
 
 # Remote-load vectors in *attribute* position. A real attribute uses literal
@@ -216,6 +223,12 @@ def test_report_has_no_remote_or_executable_markup(fixture: Path) -> None:
     # No live, remotely-loading or script-executing tag survived into the report.
     for tag in _FORBIDDEN_TAGS:
         assert tag not in low, f"{fixture.name}: forbidden markup {tag!r} in report"
+
+    # The only http-equiv directive is the deny-all CSP, declared before any
+    # content (a meta refresh or a second policy would be a regression).
+    assert low.count("<meta http-equiv") == 1
+    assert _REPORT_CSP in low
+    assert low.index(_REPORT_CSP) < low.index("<style>")
 
     # No attribute pulls a remote (or javascript:) resource.
     for token in _FORBIDDEN_ATTR_TOKENS:
@@ -396,7 +409,7 @@ def test_deeply_nested_multipart_is_walked_under_a_bound() -> None:
     import email as _email
 
     from phishbowl.parse import parse_eml
-    from phishbowl.parse.attachments import iter_parts, parts_exceed_budget
+    from phishbowl.parse.attachments import iter_parts
 
     blob = _fan_out_multipart(200)
     parsed = parse_eml(blob, filename="nested.eml")
@@ -408,20 +421,22 @@ def test_deeply_nested_multipart_is_walked_under_a_bound() -> None:
     msg = _email.message_from_bytes(blob)
     capped = list(iter_parts(msg, max_parts=5))
     assert 0 < len(capped) <= 5
-    # And the truncation is detectable, so the parser can note it.
-    assert parts_exceed_budget(msg, max_parts=5) is True
-    assert parts_exceed_budget(msg, max_parts=500) is False
 
 
-def test_truncated_mime_tree_is_noted_as_an_anomaly(monkeypatch: pytest.MonkeyPatch) -> None:
-    # When the structural cap drops parts, the parser must record it — an attacker
-    # padding thousands of harmless leaves ahead of a real attachment must not be
-    # able to make parsing silently truncate with no trace (PRD §11).
-    from phishbowl.parse import attachments, parse_eml
+def test_over_budget_mime_keeps_header_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An attacker padding thousands of parts must not make the message vanish:
+    # the header evidence (sender, subject, auth, routing) is still analyzed,
+    # and the lost body/attachments are recorded as a coverage gap (PRD §11).
+    from phishbowl.parse import limits, parse_eml
 
-    monkeypatch.setattr(attachments, "MAX_PARTS", 5)
+    monkeypatch.setattr(limits, "MAX_PARTS", 5)
     parsed = parse_eml(_fan_out_multipart(50), filename="bomb.eml")
-    assert any(a.code == "mime_truncated" for a in parsed.anomalies)
+    budget = [a for a in parsed.anomalies if a.code == "mime_budget"]
+    assert budget and budget[0].coverage_gap
+    assert parsed.subject == "nested"
+    assert parsed.addresses.from_ is not None
+    assert parsed.body.text is None and parsed.attachments == []
+    assert not parsed.analysis_complete
     # A small, in-bounds message is NOT flagged.
     ok = parse_eml(_fan_out_multipart(2), filename="ok.eml")
-    assert not any(a.code == "mime_truncated" for a in ok.anomalies)
+    assert not any(a.code == "mime_budget" for a in ok.anomalies)
