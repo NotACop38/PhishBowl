@@ -5,6 +5,7 @@ import base64
 import io
 import json
 import tempfile
+from urllib.parse import quote
 
 import httpx
 import pytest
@@ -667,3 +668,232 @@ def test_an_org_domain_without_a_public_suffix_compares_its_name():
 def test_a_non_mapping_where_a_mapping_belongs_is_an_error(override):
     with pytest.raises(ValueError, match="must be a mapping"):
         load_config(overrides=override)
+
+
+# --------------------------------------------------------------------------- #
+# Second review: redaction                                                    #
+# --------------------------------------------------------------------------- #
+
+
+def _outputs(view) -> list[str]:
+    """The report in every format an analyst can share."""
+    terminal = io.StringIO()
+    render_cli(view, Console(file=terminal, width=160))
+    return [
+        render_json(view),
+        render_html(view),
+        render_xsoar(view),
+        render_sentinel(view),
+        terminal.getvalue(),
+    ]
+
+
+def _leaks(view, *secrets: str) -> set[str]:
+    return {secret for secret in secrets for output in _outputs(view) if secret in output}
+
+
+def test_sender_written_recipients_cannot_hide_the_senders_indicators():
+    raw = (
+        b"From: jane.ceo@acme-c0rp.com\r\nTo: finance@acme-corp.com\r\n"
+        b"Cc: bob.cfo@acme-c0rp.com, a@com, b@net\r\nSubject: Wire\r\n\r\n"
+        b"Pay via https://acme-c0rp.com/wire or https://pay.net/x today.\r\n"
+    )
+    view, _ = triage(parse_eml(raw), policy=RedactionPolicy.standard())
+    assert view.from_.addr_spec_raw == "jane.ceo@acme-c0rp.com"
+    raw_values = {i.value_raw for g in view.ioc_groups for i in g.items}
+    assert {"https://acme-c0rp.com/wire", "acme-c0rp.com", "https://pay.net/x"} <= raw_values
+    assert "https://acme-c0rp.com/wire" in render_xsoar(view)
+    # The recipients themselves, and a domain named only by them, are withheld.
+    assert not _leaks(view, "bob.cfo", "bob[.]cfo", "finance[at]", "a[at]com", "acme-corp")
+
+
+def test_a_wrapper_that_encodes_the_recipient_keeps_the_link_it_wraps():
+    wrapped = (
+        "https://nam02.safelinks.protection.outlook.com/?url="
+        + quote("https://evil.example/login", safe="")
+        + "&data=05%7C02%7Cvictim%40victim-org.example%7Cabc&reserved=0"
+    )
+    raw = (
+        b"From: attacker@evil.example\r\nTo: victim@victim-org.example\r\n"
+        b"Content-Type: text/html\r\n\r\n<a href='" + wrapped.encode() + b"'>Sign in</a>\r\n"
+    )
+    view, _ = triage(parse_eml(raw), policy=RedactionPolicy.standard())
+    [link] = [i for g in view.ioc_groups for i in g.items if i.type == "url"]
+    assert link.value_raw == "https://evil.example/login" and not link.redacted
+    assert link.wrapper == "safelinks" and link.wrapped_display is None
+    assert "https://evil.example/login" in render_xsoar(view)
+    assert not _leaks(view, "victim%40", "victim@", "victim[at]")
+
+
+def test_redaction_time_does_not_grow_with_the_recipient_count():
+    import subprocess
+    import sys
+
+    code = """
+from phishbowl.models import Address
+from phishbowl.parse import parse_eml
+from phishbowl.report import RedactionPolicy
+from phishbowl.report.redact import Redactor
+from phishbowl.score import load_config
+
+parsed = parse_eml(b"From: a@sender.example\\r\\n\\r\\nx")
+parsed.addresses.to = [
+    Address(display_name=f"Person {i}", addr_spec=f"u{i}@r{i}.example", domain=f"r{i}.example")
+    for i in range(20_000)
+]
+redactor = Redactor(RedactionPolicy.standard(), parsed, load_config())
+text = "Dear Person 7, write to u9@r9.example about https://evil.example/login. " * 3_000
+redacted = redactor.text(text)
+assert "Person 7" not in redacted and "u9@" not in redacted and "evil.example" in redacted
+"""
+    subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
+
+
+def test_defanging_in_attacker_text_is_not_a_redaction():
+    raw = (
+        b'From: <"pay(.)ments"@evil.example>\r\nTo: victim@victim-org.example\r\n'
+        b"Content-Type: text/html\r\n\r\n"
+        b"<a href='https://evil.example/u[at]x'>a</a><a href='https://evil.example/a[.]b/c'>b</a>"
+        b"<a href='https://evil.example/q?(.)'>c</a>"
+        b"<a href='https://evil.example/?next=hxxp://x'>d</a>\r\n"
+    )
+    view, _ = triage(parse_eml(raw), policy=RedactionPolicy.standard())
+    links = [i for g in view.ioc_groups for i in g.items if i.type == "url"]
+    assert len(links) == 4
+    assert all(i.value_raw and not i.redacted for i in links)
+    assert "hxxps://evil[.]example/u[at]x" in {i.value_display for i in links}
+    assert view.from_.addr_spec_raw == '"pay(.)ments"@evil.example' and not view.from_.redacted
+
+
+def test_text_with_nothing_to_protect_is_returned_as_given():
+    from phishbowl.report.redact import Redactor
+
+    redactor = Redactor(RedactionPolicy.standard(), email("hi"), load_config())
+    value = "see hxxps://evil[.]example/u[at]x?(.) and user[AT]evil[.]example"
+    assert redactor.text(value) is value
+    assert redactor.text("mail alice[AT]example[.]org") == "mail [redacted:recipient]"
+
+
+def test_delivery_headers_name_recipients():
+    raw = (
+        b"X-Apparently-To: victim.person@yahoo.com; Tue, 03 Jun 2026 02:05:09 +0000\r\n"
+        b"X-Forwarded-For: fwd.person@gmail.com relay.person@victim-org.example\r\n"
+        b"X-Delivered-To: dlv.person@victim-org.example\r\n"
+        b"From: attacker@evil.example\r\nTo: undisclosed-recipients:;\r\nSubject: Hi\r\n\r\n"
+        b"Dear victim.person@yahoo.com, fwd.person@gmail.com: https://evil.example/login\r\n"
+    )
+    view, _ = triage(parse_eml(raw), policy=RedactionPolicy.standard())
+    assert not _leaks(view, "victim.person", "victim[.]person", "fwd", "dlv", "victim-org")
+    hidden = {h.name for h in view.headers if h.value == "[redacted:recipient]"}
+    assert {"X-Apparently-To", "X-Forwarded-For", "X-Delivered-To"} <= hidden
+    assert "evil[.]example" in render_json(view)
+
+
+def test_internal_addresses_are_redacted_in_every_notation():
+    raw = (
+        b"Received: from [IPv6:fd12:3456:789a::25] (unknown [IPv6:fd12:3456:789a::25])\r\n"
+        b" by mx.victim.example; Tue, 03 Jun 2026 02:05:09 +0000\r\n"
+        b"From: attacker@evil.example\r\nTo: v@victim.example\r\nContent-Type: text/html\r\n\r\n"
+        b"<a href='http://167772165/'>a</a><a href='http://10.5/'>b</a>"
+        b"<a href='http://0xa000005/'>c</a>\r\n"
+    )
+    parsed = parse_eml(raw)
+    # A browser reads each of these hosts as 10.0.0.5, so the indicator does too.
+    iocs = {(i.type.value, i.value) for i in extract_iocs(parsed)}
+    assert ("ipv4", "10.0.0.5") in iocs and ("domain", "0xa000005") not in iocs
+    view, _ = triage(parsed, policy=RedactionPolicy.standard())
+    assert not _leaks(view, "fd12", "167772165", "10[.]5/", "0xa000005", "10[.]0[.]0[.]5")
+
+
+def test_msg_attachment_types_are_defanged_and_redacted(monkeypatch):
+    from pathlib import Path
+
+    monkeypatch.syspath_prepend(str(Path(__file__).parent / "fixtures"))
+    import build_synthetic_msg as msgbuild
+
+    raw = msgbuild.build_message(
+        subject="Invoice",
+        body_text="See attached.",
+        recipients=[(msgbuild.RECIP_TO, "Victim Person", "victim.person@gmail.com")],
+        attachments=[
+            ("invoice.pdf", "https://evil.example/pay?u=victim.person@gmail.com", b"%PDF-1.4\n")
+        ],
+    )
+    plain, _ = triage(parse_msg(raw))
+    assert plain.attachments[0].declared_type.startswith("hxxps://evil[.]example/pay")
+    assert not _leaks(plain, "https://evil.example")
+    redacted, _ = triage(parse_msg(raw), policy=RedactionPolicy.standard())
+    assert not _leaks(redacted, "victim.person", "victim[.]person")
+
+
+def test_a_hidden_received_header_hides_its_addresses_in_enrichment_evidence():
+    from phishbowl.connectors import EnrichmentSettings, run_enrichment
+    from phishbowl.connectors.targets import sending_ips
+
+    raw = (
+        b"Received: from relay.sender.example (relay.sender.example [8.8.8.8])\r\n"
+        b" by mx.victim.example; Tue, 03 Jun 2026 02:05:09 +0000\r\n"
+        b"From: attacker@evil.example\r\nTo: v@victim.example\r\n\r\nhello\r\n"
+    )
+    parsed = parse_eml(raw)
+
+    async def nosleep(_seconds):
+        return None
+
+    settings = EnrichmentSettings(
+        enabled=True,
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, json={"data": {"abuseConfidenceScore": 80, "totalReports": 3}}
+            )
+        ),
+        sleep=nosleep,
+        cache_enabled=False,
+        api_keys={"abuseipdb": "test-key"},
+        select=frozenset({"abuseipdb"}),
+    )
+    report = run_enrichment(sending_ips(parsed), settings)
+    view, result = triage(parsed, policy=RedactionPolicy.standard(("Received",)), enrichment=report)
+    assert any(rule.id == "enrichment.abuseipdb.confidence" for rule in result.fired)
+    assert not _leaks(view, "8[.]8[.]8[.]8", "8.8.8.8", "relay.sender", "relay[.]sender")
+
+
+def test_idn_recipient_domains_are_redacted_in_either_spelling():
+    raw = (
+        "Delivered-To: kim@bücher.example\r\nFrom: attacker@evil.example\r\n"
+        "To: kim@bücher.example\r\nSubject: Hi\r\n\r\n"
+        "Ask boss@bücher.example, or mail.bücher.example, or mx1.xn--bcher-kva.example.\r\n"
+    ).encode()
+    view, _ = triage(parse_eml(raw), policy=RedactionPolicy.standard())
+    assert not _leaks(view, "bücher", "xn--bcher", "boss")
+
+
+def test_recipients_are_found_in_any_spacing_case_or_defanging():
+    raw = (
+        b"From: attacker@evil.example\r\nTo: Jonathan Whitaker <victim.person@gmail.com>\r\n"
+        b"Subject: Hi\r\n\r\n"
+        b"Hi Jonathan\r\nWhitaker, JONATHAN   WHITAKER: write victim.person[AT]gmail.com,\r\n"
+        b"victim.person (at) gmail (dot) com, or victim.person [at] gmail [dot] com.\r\n"
+    )
+    view, _ = triage(parse_eml(raw), policy=RedactionPolicy.standard())
+    preview = view.body_preview or ""
+    assert "jonathan" not in preview.casefold() and "whitaker" not in preview.casefold()
+    assert "victim" not in preview and preview.startswith("Hi [redacted:recipient],")
+
+
+def test_generic_names_and_short_values_leave_indicators_alone():
+    raw = (
+        b"From: attacker@evil.example\r\nTo: Sales <sales@victim.example>\r\n"
+        b"X-MS-Exchange-Organization-SCL: 1\r\nContent-Type: text/html\r\n\r\n"
+        b"<a href='https://evil.example/sales/invoice.php'>a</a>"
+        b"<a href='https://sales.evil.example/'>b</a><a href='http://evil.example/1/login'>c</a>\r\n"
+    )
+    policy = RedactionPolicy.standard(("X-MS-Exchange-Organization-SCL",))
+    view, _ = triage(parse_eml(raw), policy=policy)
+    links = {i.value_raw for g in view.ioc_groups for i in g.items if i.type == "url"}
+    assert links == {
+        "https://evil.example/sales/invoice.php",
+        "https://sales.evil.example/",
+        "http://evil.example/1/login",
+    }
+    assert "[redacted:field]" in {h.value for h in view.headers}

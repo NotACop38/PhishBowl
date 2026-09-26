@@ -32,6 +32,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore", SyntaxWarning)
     import iocextract
 
+from phishbowl.domains import web_ipv4
 from phishbowl.html_analysis import MAX_TEXT_CHARS, inspect_html
 from phishbowl.models import IOC, Address, Anomaly, IOCs, IOCType, ParsedEmail
 
@@ -377,7 +378,11 @@ def _is_ipv6(value: str) -> bool:
 
 
 def _ip_of_url(url: str) -> str | None:
-    """The canonical IP literal hosting ``url``, or ``None`` for a named host."""
+    """The canonical IP address hosting ``url``, or ``None`` for a named host.
+
+    The host is read as a browser reads it, so the legacy IPv4 notations
+    (``http://167772165/``, ``http://0x7f.1/``) name an address too.
+    """
     try:
         host = urlsplit(url).hostname
     except ValueError:
@@ -386,6 +391,10 @@ def _ip_of_url(url: str) -> str | None:
         return None
     try:
         return str(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        return web_ipv4(host)
     except ValueError:
         return None
 
@@ -407,6 +416,10 @@ def _host_of_url(url: str) -> str | None:
     if netloc.startswith("["):  # IPv6 literal host — not a domain
         return None
     host = netloc.split(":", 1)[0].strip().casefold().rstrip(".")
-    if not host or host.replace(".", "").isdigit():  # IPv4 literal host
+    if not host:
         return None
-    return host
+    try:
+        # A host ending in a number is an IPv4 address to a browser, or invalid.
+        return None if web_ipv4(host) else host
+    except ValueError:
+        return None

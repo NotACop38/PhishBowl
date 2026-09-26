@@ -88,10 +88,22 @@ redaction, and enrichment gaps found in review.
   restrictive profile, or non-ASCII labels that fold to a known brand or org name.
 - **Domain comparisons** use registered domains from the Public Suffix List (private
   suffixes included) and treat Unicode and punycode spellings as equal.
-- **Redaction** covers every delivery header (`Bcc`, `Delivered-To`, `X-Original-To`,
-  `Resent-*`, …) and `Received … for` clauses, matches whole tokens only, replaces values
-  in place with typed placeholders, and hides everything derived from a
-  `--redact-field` header.
+- **Redaction** covers every recipient and delivery header (`Bcc`, `Resent-*`,
+  `Delivered-To`, `X-Original-To`, `X-Apparently-To`, …) and `Received … for` clauses,
+  and hides what is derived from a `--redact-field` header, including a hidden
+  `Received` header's hosts and addresses in enrichment evidence. Values are replaced in
+  place with typed placeholders, and text with nothing to withhold is left as written.
+- **Redaction matching:** addresses, host names, and IP addresses are matched as whole
+  tokens, through defanging (in any case), IDNA spellings, legacy IP notations, and
+  percent-encoding; names are matched as whole words in any case or spacing, in prose
+  only. Matching time is linear in the text, however many recipients a message names.
+- **Redaction no longer withholds attacker indicators on the sender's say-so.** A
+  recipient domain is withheld only when a delivery header or `Received … for` clause
+  names it, not because `To` or `Cc` lists it; the visible sender headers' addresses and
+  domains, public suffixes, and role names such as "Sales" are never withheld; short
+  field values are not hunted in other text; and a link-protection wrapper that encodes
+  a recipient is withheld without withholding the link it wraps. Set `org_domains` to
+  withhold your own domains wherever they appear.
 - **Enrichment:** VirusTotal's detection ratio counts only engines that returned a
   verdict; urlscan prefers malicious scans and weighs evidence about another page on the
   host at half; AbuseIPDB and VirusTotal report missing data as unknown rather than
@@ -112,6 +124,9 @@ redaction, and enrichment gaps found in review.
 - Base64-encoded `message/rfc822` parts are decoded before being treated as emails.
 - Strict email extraction no longer glues a preceding word onto an address; `mailto:`
   links yield their addresses.
+- A link whose host is an IPv4 address in a legacy notation (`http://167772165/`,
+  `http://0x7f.1/`) yields that address as an IP indicator, as a browser reads it,
+  instead of a bogus domain or nothing.
 - Proofpoint v3 links, trailing-dot hosts, and overlong or deeply nested wrappers unwrap
   correctly or are marked unresolved.
 - Defanging is idempotent and neutralizes every non-web scheme; `javascript:`, `data:`,

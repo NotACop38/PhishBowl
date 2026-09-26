@@ -200,8 +200,9 @@ A review of the shipped phases against hostile input, completed without adding s
   distinguished from informational notes.
 - [x] Scoring: homograph (TR39) and lookalike precision, `identity.multiple_from`,
   `identity.freemail_role`, `attach.html`; strict configuration validation.
-- [x] Redaction: every recipient header and `Received … for` clause, whole-token
-  matching, in-place placeholders, operator-field derivatives.
+- [x] Redaction: every recipient header and `Received … for` clause, linear whole-token
+  and whole-word matching, in-place placeholders, operator-field derivatives; recipient
+  domains only from delivery headers, never the visible sender's.
 - [x] Enrichment: HTTPS only, bootstrap-redirect target checks, per-connector isolation,
   cache integrity checks, defensive vendor-response parsing.
 - [x] CLI and upload UI: output validation and write errors, secured error pages.

@@ -205,10 +205,11 @@ the connector contract.
 ### PII redaction
 
 An opt-in report mode (`--redact`) that withholds bystander data — every recipient
-address with its display name and domain, hosts under your `org_domains`, non-public
-IP addresses, and any headers you name with `--redact-field` — so a report can be
-shared more safely. Values are replaced by typed placeholders such as
-`[redacted:recipient]`. Attacker indicators stay in full. It removes known values;
+address with its display name (and its domain, when a delivery header names it), hosts
+under your `org_domains`, non-public IP addresses, and any headers you name with
+`--redact-field` — so a report can be shared more safely. Values are replaced by typed
+placeholders such as `[redacted:recipient]`. Attacker indicators, including every
+address and domain in the visible sender headers, stay in full. It removes known values;
 it is not anonymization, so review free text before sharing.
 
 ### `ParsedEmail`

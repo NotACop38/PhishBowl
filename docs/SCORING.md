@@ -159,7 +159,7 @@ own `enrichment.*` IDs; see [`CONNECTORS.md`](CONNECTORS.md).
 | `url_shorteners` | list | Shortener domains, for `url.shortener`. |
 | `credential_keywords` | list | Phrases matched in URL paths and queries. |
 | `urgency_keywords` | list | Pressure phrases matched in the subject and body. |
-| `role_keywords` | list | Organizational roles matched as whole words in display names. |
+| `role_keywords` | list | Organizational roles matched as whole words in display names. `--redact` also treats a recipient display name made of role words as a role, not a person's name. |
 | `brands` | mapping | Brand keyword to the domains that legitimately belong to it. An empty list removes a bundled brand. |
 | `org_domains` | list | Your own domains: lookalikes of them fire `url.lookalike`, hosts under them are redacted as internal by `--redact`, and they are never sent to enrichment services, as indicators or as URL hosts. |
 
@@ -219,7 +219,7 @@ silently changing verdicts:
 
 - **Set `org_domains` first.** It points lookalike detection at the impersonations that
   target you, keeps your domains out of enrichment queries, and lets `--redact` hide
-  your internal hosts.
+  your domains and internal hosts wherever they appear.
 - **Prune `brands`** to the brands your users actually receive mail from. Keywords that
   are also common words or names ("chase", "apple") can match unrelated senders.
 - **Observe before removing.** Set a noisy rule to 0 and watch its evidence for a while.

@@ -305,22 +305,37 @@ stops the run or changes the offline score. To write your own connector, see
 Reports travel into tickets and vendor submissions. `--redact` withholds bystander data
 in every output while keeping the attacker's indicators:
 
-- **Recipients:** every address the message was delivered to (`To`, `Cc`, `Bcc`,
-  `Delivered-To`, `X-Original-To`, `Resent-*`, similar delivery headers, and
-  `Received … for <address>` clauses), with their display names and non-freemail
-  domains.
-- **Internal topology:** hosts under your configured `org_domains` and non-public IP
-  addresses.
-- **Named fields:** each `--redact-field` header, with everything derived from it; hiding
-  `Authentication-Results` also hides the parsed results and the evidence quoting them,
-  and hiding `Received` hides the routing path.
+- **Recipients:** every address the message names as a recipient (`To`, `Cc`, `Bcc`,
+  `Resent-*`, delivery headers such as `Delivered-To`, `X-Original-To`, and
+  `X-Apparently-To`, and `Received … for <address>` clauses) wherever it appears, and
+  recipients' display names in prose. A recipient's domain is withheld when a delivery
+  header or `Received … for` clause names it; `To` and `Cc` are written by the sender, so
+  a domain seen only there is withheld as an indicator but not elsewhere.
+- **Internal topology:** hosts under your configured `org_domains`, addresses at those
+  hosts, and non-public IP addresses in any notation a browser accepts.
+- **Named fields:** each `--redact-field` header, with what was parsed from it: its
+  addresses, domains, and display names, and its value wherever it recurs in prose.
+  Hiding `Authentication-Results` hides the parsed results and the evidence quoting
+  them; hiding `Received` hides the routing path and its hosts and IP addresses,
+  including in enrichment evidence.
+
+The sender stays visible: addresses and domains in the `From`, `Reply-To`,
+`Return-Path`, and `Sender` headers are never withheld as recipients or as another
+header's values, even when the message also lists them as recipients. To hide one, name
+its header with `--redact-field`. Free-webmail domains, public suffixes, and role names
+such as "Sales" or "IT Support" identify no one and are also kept. Set `org_domains` so
+that your own domains are withheld however the message names them.
 
 Values are replaced in place by typed placeholders such as `[redacted:recipient]`, so the
-report still shows that something was there. Matching works on whole tokens and sees
-through defanging and URL encoding; when a protected value survives only inside
-percent-encoding, the whole value is withheld. Redaction removes the values it knows
-about. It is not anonymization: free text can still identify people, so review a report
-before sharing it.
+report still shows that something was there, and text with nothing to withhold is left
+as written. Addresses, host names, and IP addresses are matched as whole tokens, through
+defanging, IDNA spellings, and percent-encoding; names are matched as whole words in any
+case or spacing, in prose but not inside links. When a withheld value survives only
+inside percent-encoding, the whole token around it is withheld, but a link-protection
+wrapper that encodes a recipient (as Microsoft Safe Links does) is withheld on its own
+and the link it wraps is kept. Redaction removes the values it knows about. It is not
+anonymization: free text can still identify people, so review a report before sharing
+it.
 
 ## SOAR playbook drafts
 

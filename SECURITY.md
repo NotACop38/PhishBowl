@@ -134,9 +134,16 @@ to any other interface.
   resistance to every resource-exhaustion attack against them. Compressed RTF bodies in
   Outlook items are not expanded; a missing body is disclosed as incomplete analysis.
 - **Redaction removes known values; it does not anonymize.** It withholds recipients,
-  internal topology, and named fields, but free text can still identify people. Review
-  a report before sharing it. Redaction also cannot undo an enrichment query made
-  earlier: complete public URLs sent to a vendor may contain sensitive tokens.
+  internal topology, and named fields, but free text can still identify people, and a
+  name is not matched inside a link. Review a report before sharing it. Redaction also
+  cannot undo an enrichment query made earlier: complete public URLs sent to a vendor
+  may contain sensitive tokens.
+- **Recipient domains come from headers a message can forge.** A recipient's domain is
+  withheld only when a delivery header or `Received … for` clause names it, because the
+  sender writes `To` and `Cc`; configure `org_domains` to withhold your own domains
+  reliably. A forged delivery header can still make a redacted report withhold a domain
+  it names, though never a domain of the visible sender headers, and the unredacted
+  report and enrichment are unaffected.
 - **urlscan.io submissions contact the message's infrastructure.** `--urlscan-submit`
   makes urlscan visit the URL, which can alert the attacker and can disclose a
   per-victim token. Private visibility only hides the result page.

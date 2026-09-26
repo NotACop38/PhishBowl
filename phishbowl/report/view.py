@@ -307,17 +307,24 @@ def _address_view(
                 domain=None,
                 redacted=True,
             )
+    # Display names are attacker-chosen free text and can themselves carry a
+    # URL/email/IP — defang like any other free text. Bare domains follow the
+    # same free-text policy as subjects (left legible; not one-click); a brand
+    # domain in a display name is the *scorer's* job
+    # (identity.display_name_brand_mismatch), not the defanger's.
+    display_name = _safe_text(redactor.text(addr.display_name))
     raw = addr.addr_spec
-    if redactor.active and raw and redactor.text(raw) != raw:
-        # An internal or otherwise protected address: withheld whole.
-        return AddressView(addr_spec_display=REDACTED_FIELD, redacted=True)
+    shown = redactor.text(raw)
+    if shown != raw:
+        # An internal address, or one a hidden field names: it leaves the
+        # machine channel, and the display shows what was withheld.
+        return AddressView(
+            display_name=display_name,
+            addr_spec_display=_clean(defang(shown, IOCType.EMAIL)) if shown else None,
+            redacted=True,
+        )
     return AddressView(
-        # Display names are attacker-chosen free text and can themselves carry a
-        # URL/email/IP — defang like any other free text. Bare domains follow the
-        # same free-text policy as subjects (left legible; not one-click); a brand
-        # domain in a display name is the *scorer's* job
-        # (identity.display_name_brand_mismatch), not the defanger's.
-        display_name=_safe_text(redactor.text(addr.display_name)),
+        display_name=display_name,
         addr_spec_display=defang(raw, IOCType.EMAIL) if raw else None,
         addr_spec_raw=raw,
         domain=addr.domain,
@@ -326,9 +333,7 @@ def _address_view(
 
 
 def _ioc_view(ioc, redactor: Redactor) -> IOCView:
-    shown = redactor.classify_ioc(ioc.type.value, ioc.value)
-    if shown is None and ioc.wrapped and redactor.text(ioc.wrapped) != ioc.wrapped:
-        shown = REDACTED_FIELD  # the wrapper encodes a protected value
+    shown = redactor.classify_ioc(ioc.type.value, ioc.value, ioc.provenance)
     if shown is not None:
         # A redacted indicator keeps its metadata but leaves the machine channel.
         return IOCView(
@@ -341,7 +346,12 @@ def _ioc_view(ioc, redactor: Redactor) -> IOCView:
             unresolved=ioc.unresolved,
             redacted=True,
         )
-    wrapped_display = _clean(defang(ioc.wrapped, ioc.type)) if ioc.wrapped else None
+    # A wrapper can encode a protected value that the link it wraps does not
+    # (Safe Links carries the recipient's address): then only the wrapper is
+    # withheld, and the attacker's link stays usable.
+    wrapped_display = None
+    if ioc.wrapped and redactor.text(ioc.wrapped) == ioc.wrapped:
+        wrapped_display = _clean(defang(ioc.wrapped, ioc.type))
     return IOCView(
         type=ioc.type.value,
         value_display=_clean(ioc.defanged) or "",
@@ -569,8 +579,8 @@ def build_report(
         AttachmentView(
             filename=_safe_text(redactor.text(att.filename)),
             # Declared types are attacker text too (a .msg passes MAPI's raw
-            # string through): control-strip them like every other field.
-            declared_type=_clean(att.declared_type),
+            # string through): treat them like every other free-text field.
+            declared_type=_safe_text(redactor.text(att.declared_type)),
             detected_type=_clean(att.detected_type),
             type_mismatch="type_mismatch" in [f.value for f in att.flags],
             size=att.size,
