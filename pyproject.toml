@@ -4,12 +4,12 @@ build-backend = "hatchling.build"
 
 [project]
 name = "phishbowl"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Self-hostable, defensive-only phishing triage: parse an email, extract and defang IOCs, risk-score it, and produce an analyst-ready report."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
-authors = [{ name = "Phishbowl contributors" }]
+authors = [{ name = "PhishBowl contributors" }]
 keywords = ["phishing", "triage", "security", "soc", "dfir", "email", "ioc"]
 classifiers = [
     "Development Status :: 4 - Beta",
@@ -20,10 +20,11 @@ classifiers = [
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security",
 ]
 
-# Runtime dependencies. Lower bounds only — Phishbowl is meant to `pip install`
+# Runtime dependencies. Lower bounds only — PhishBowl is meant to `pip install`
 # cleanly. The offline core never reaches the network; httpx is for the
 # optional, key-gated enrichment layer (PRD §9).
 dependencies = [
@@ -33,12 +34,14 @@ dependencies = [
     "jinja2>=3.1",
     "rich>=13.7",
     "tldextract>=5.3,<6",
-  "iocextract>=1.16",
+    "iocextract>=1.16",
+    # Timeout-capable regex engine for the IOC passes (also an iocextract dependency).
+    "regex>=2023.10.3",
     "extract-msg>=0.48",
     "pyyaml>=6",
     # iocextract imports `requests` unconditionally at module load but does not
     # declare it (its metadata lists only `regex`), so a clean install of
-    # Phishbowl would otherwise break on first import with
+    # PhishBowl would otherwise break on first import with
     # `ModuleNotFoundError: No module named 'requests'`. We declare it here to
     # keep `pip install phishbowl` working; the offline core never uses it to
     # reach the network. Floor stays off the temp-file extraction CVE
@@ -69,7 +72,7 @@ web = [
 
 # Dev tooling. The routine gate is `make test` (pytest) only; bandit and
 # pip-audit are run once, in the dedicated security step. build is for the
-# release step. No coverage plugin, no type-checker, no pre-commit (CLAUDE.md).
+# release step. No coverage plugin, no type-checker, no pre-commit (AGENTS.md).
 # Includes the web extra so the upload-UI tests run under `make test`.
 dev = [
     "pytest>=8",
@@ -86,6 +89,9 @@ phishbowl = "phishbowl.cli:app"
 [project.urls]
 Homepage = "https://github.com/notacop38/phishbowl"
 Repository = "https://github.com/notacop38/phishbowl"
+
+[tool.hatch.version]
+path = "phishbowl/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["phishbowl"]

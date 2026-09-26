@@ -6,7 +6,7 @@ transform — **never** by fetching; and defang everything in human-facing outpu
 by default. Deduplicated, normalized, and provenance-tagged.
 
 Nothing in this package touches the network: the analyzed email's URLs are
-pattern-matched and string-decoded, never opened (CLAUDE.md defensive invariants).
+pattern-matched and string-decoded, never opened (AGENTS.md defensive invariants).
 """
 
 from __future__ import annotations

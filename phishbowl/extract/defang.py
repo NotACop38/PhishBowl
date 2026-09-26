@@ -20,57 +20,81 @@ from phishbowl.models import IOCType
 # http -> hxxp, https -> hxxps, only when it's a real scheme (followed by "://").
 _SCHEME_RE = re.compile(r"^(https?)(?=://)", re.IGNORECASE)
 
-# Dangerous code-execution / data URI schemes. A link extracted from a hostile
-# message can carry these (e.g. an anchor href), and they must never appear live
-# in any output, so we neuter the colon: ``javascript:`` -> ``javascript[:]``.
-# The colon is consumed (not a lookahead) so it is replaced, not duplicated —
-# keeping the refang round-trip lossless.
-_DANGEROUS_SCHEME_RE = re.compile(r"^(javascript|data|vbscript):", re.IGNORECASE)
+# Every other URI scheme has its colon bracketed: ``javascript:`` → ``javascript[:]``,
+# ``file://host`` → ``file[:]//host``. That covers script and inline-document
+# URIs, ``file:`` UNC links (a one-click NTLM credential leak) and application
+# protocol handlers (``search-ms:``, ``ms-word:``, ...) alike. The colon is
+# consumed, not duplicated, so the refang round trip stays lossless; the
+# already-neutered ``hxxp``/``hxxps`` spellings are left alone.
+_OTHER_SCHEME_RE = re.compile(r"^(?!hxxps?:)([a-z][a-z0-9+.\-]*):(?!\])", re.IGNORECASE)
+
+# A neutered web scheme, in any case.
+_NEUTERED_SCHEME = re.compile(r"hxxp(s?)://", re.IGNORECASE)
+
+# Separators that are not already bracketed. Matching only bare separators makes
+# every defang function idempotent: defanging defanged text changes nothing.
+_BARE_DOT = re.compile(r"(?<!\[)\.(?!\])")
+_BARE_COLON = re.compile(r"(?<!\[):(?!\])")
 
 # Indicator-shaped tokens inside free text (subject, body preview, evidence). We
-# only ever defang things that are actually clickable/copyable indicators — full
-# URLs, www-hosts, email addresses, and IPv4 literals — and leave ordinary prose
-# (and bare words that merely contain a dot) untouched, so a defanged preview
-# stays readable. Applied in order: a scheme URL is bracketed whole first, so the
-# later passes never re-touch a host already inside a neutered URL.
-_TEXT_URL_RE = re.compile(r"\b(?:https?|hxxps?)://[^\s<>\"'`]+", re.IGNORECASE)
-_TEXT_WWW_RE = re.compile(r"\bwww\.[^\s<>\"'`]+", re.IGNORECASE)
-_TEXT_EMAIL_RE = re.compile(
-    r"(?<![A-Za-z0-9._%+\-])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
-)
-_TEXT_IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+# only ever defang things that are actually clickable/copyable indicators — URLs
+# with a scheme, www-hosts, email addresses, and IPv4 literals — and leave ordinary
+# prose (and bare words that merely contain a dot) untouched, so a defanged preview
+# stays readable. Applied in order: a scheme URL is handled whole first, so the
+# later passes never re-touch a host already inside a neutered URL. A URL glued to
+# the preceding word (``see_https://…``) still matches: the scheme only has to
+# start where a scheme character does not precede it.
+_TEXT_URL_RE = re.compile(r"(?<![a-z0-9+.\-])[a-z][a-z0-9+.\-]*://[^\s<>\"'`]+", re.IGNORECASE)
+_TEXT_WWW_RE = re.compile(r"(?<![a-z0-9.\-])www\.[^\s<>\"'`]+", re.IGNORECASE)
+# ``\w`` is Unicode-aware, so internationalized addresses (``ceo@bücher.example``)
+# are caught as well as ASCII ones.
+_TEXT_EMAIL_RE = re.compile(r"(?<![\w.%+\-])[\w.%+\-]+@(?:[\w\-]+\.)+[\w\-]{2,}")
+# Not part of a longer dotted number ("1.2.3.4.5" is a version, not an address).
+_TEXT_IPV4_RE = re.compile(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?!\.?\d)")
+
+# Browsers delete tabs and newlines anywhere in a URL and ignore leading control
+# characters and spaces, so "java\tscript:" is "javascript:" to them.
+_URL_IGNORED = re.compile(r"[\t\n\r]")
+_URL_LEADING = re.compile(r"^[\x00-\x20]+")
+
+
+def _bracket_dots(value: str) -> str:
+    return _BARE_DOT.sub("[.]", value)
 
 
 def defang_url(value: str) -> str:
     """Defang a URL: neuter the scheme and bracket every dot.
 
-    HTTP(S) schemes become ``hxxp(s)``; dangerous code/data URI schemes
-    (``javascript:``/``data:``/``vbscript:``) have their colon bracketed so the
-    string can never be a live, one-click URI in any viewer.
+    HTTP(S) becomes ``hxxp(s)``; every other scheme has its colon bracketed
+    (``javascript[:]``, ``file[:]//``) so the string can never be a live,
+    one-click URI in any viewer. The scheme is read the way a browser reads it
+    (tabs/newlines deleted, leading controls ignored), so ``java<TAB>script:`` is
+    shown — and neutered — as ``javascript[:]``. Idempotent.
     """
-    out = _SCHEME_RE.sub(lambda m: "hxxp" + m.group(1)[4:], value)
-    out = _DANGEROUS_SCHEME_RE.sub(lambda m: m.group(1) + "[:]", out)
-    return out.replace(".", "[.]")
+    out = _URL_LEADING.sub("", _URL_IGNORED.sub("", value))
+    out = _SCHEME_RE.sub(lambda m: "hxxp" + m.group(1)[4:].lower(), out)
+    out = _OTHER_SCHEME_RE.sub(lambda m: m.group(1) + "[:]", out)
+    return _bracket_dots(out)
 
 
 def defang_ipv4(value: str) -> str:
     """Defang an IPv4 literal: ``1.2.3.4`` -> ``1[.]2[.]3[.]4``."""
-    return value.replace(".", "[.]")
+    return _bracket_dots(value)
 
 
 def defang_ipv6(value: str) -> str:
     """Defang an IPv6 literal by bracketing its separators."""
-    return value.replace(":", "[:]")
+    return _BARE_COLON.sub("[:]", value)
 
 
 def defang_email(value: str) -> str:
     """Defang an address: ``user@evil.com`` -> ``user[at]evil[.]com``."""
-    return value.replace("@", "[at]").replace(".", "[.]")
+    return _bracket_dots(value.replace("@", "[at]"))
 
 
 def defang_domain(value: str) -> str:
     """Defang a bare domain: ``evil.com`` -> ``evil[.]com``."""
-    return value.replace(".", "[.]")
+    return _bracket_dots(value)
 
 
 def defang(value: str, ioc_type: IOCType) -> str:
@@ -96,12 +120,12 @@ def defang_text(text: str | None) -> str | None:
     where an attacker's live URL, address, or IP would otherwise be copy-pasteable
     (and, in some viewers, auto-linkable). Only URL/www/email/IPv4 tokens are
     rewritten; surrounding prose (and incidental dotted words) is left intact so
-    the text stays legible. ``None`` and empty strings pass through unchanged.
+    the text stays legible. Idempotent. ``None`` and empty strings pass through.
     """
     if not text:
         return text
     text = _TEXT_URL_RE.sub(lambda m: defang_url(m.group(0)), text)
-    text = _TEXT_WWW_RE.sub(lambda m: m.group(0).replace(".", "[.]"), text)
+    text = _TEXT_WWW_RE.sub(lambda m: _bracket_dots(m.group(0)), text)
     text = _TEXT_EMAIL_RE.sub(lambda m: defang_email(m.group(0)), text)
     text = _TEXT_IPV4_RE.sub(lambda m: defang_ipv4(m.group(0)), text)
     return text
@@ -110,9 +134,12 @@ def defang_text(text: str | None) -> str | None:
 def refang(value: str) -> str:
     """Reverse :func:`defang` — restore a live indicator from its defanged form.
 
-    Covers the brackets and scheme swaps Phishbowl emits, plus the common
-    ``[at]`` / ``(.)`` variants seen in the wild, so a defang round-trip is
-    lossless for the indicators we produce.
+    Covers the brackets and scheme swaps PhishBowl emits, plus the common
+    ``[at]`` / ``(.)`` variants seen in the wild. The round trip is lossless for
+    ordinary indicators, except that a web scheme comes back lower-case
+    (schemes are case-insensitive); one that itself contains those tokens (a
+    literal ``[.]`` or ``hxxp://`` in a path, or a tab browsers would delete)
+    cannot be told apart from its defanged form and comes back normalized.
     """
     out = (
         value.replace("[.]", ".")
@@ -124,4 +151,4 @@ def refang(value: str) -> str:
     )
     # Note: ``[:]`` round-trips IPv6 separators and the neutered dangerous-scheme
     # colon alike — both restore to a plain ``:``.
-    return out.replace("hxxps://", "https://").replace("hxxp://", "http://")
+    return _NEUTERED_SCHEME.sub(lambda m: "http" + m.group(1).lower() + "://", out)

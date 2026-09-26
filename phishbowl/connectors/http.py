@@ -6,27 +6,32 @@ HTTPS bootstrap redirect exception. Third-party plugins are trusted Python code;
 this helper is not a network or process sandbox.
 
 The client also owns reactive rate-limit handling: a ``429``/``503`` is retried
-with exponential backoff (honoring ``Retry-After`` when present), and a persistent
-one past the retry budget raises :class:`RateLimitedError` so the orchestrator can
-note it rather than hang. Proactive spacing lives in :mod:`.ratelimit`.
+with exponential backoff (honoring a finite ``Retry-After`` when present), and a
+persistent one past the retry budget raises :class:`RateLimitedError` so the
+orchestrator can note it rather than hang. Proactive spacing lives in
+:mod:`.ratelimit`. :func:`json_object` reads a vendor's JSON body, turning a
+malformed one into a :class:`ConnectorError` the orchestrator soft-fails.
 """
 
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
+from phishbowl.domains import public_host
+
 from .errors import ConnectorError, RateLimitedError, SSRFGuardError
 
 # Statuses that mean "slow down / try again", not "here's your answer".
 _RETRY_STATUSES = frozenset({429, 503})
-# Schemes a connector may use. Vendor APIs are HTTPS; anything exotic
-# (file://, gopher://, ftp://, …) is refused outright as an SSRF vector.
-_ALLOWED_SCHEMES = frozenset({"http", "https"})
+# Vendor APIs are HTTPS. Plain http would expose API keys and results on the
+# wire, and anything exotic (file://, gopher://, ...) is an SSRF vector.
+_ALLOWED_SCHEMES = frozenset({"https"})
 # Cap a single backoff wait so a hostile ``Retry-After`` can't park a run forever.
 _MAX_BACKOFF_SECONDS = 30.0
 # Most redirect hops a vendor chain may take (RDAP bootstrap → registry →
@@ -44,6 +49,22 @@ def host_is_allowed(host: str, allowed: frozenset[str]) -> bool:
     if not host:
         return False
     return any(host == a or host.endswith("." + a) for a in allowed)
+
+
+def json_object(response: httpx.Response, vendor: str) -> dict[str, Any]:
+    """The response body as a JSON object, or a :class:`ConnectorError`.
+
+    Vendor responses are untrusted input: an HTML error page, a truncated body,
+    or a JSON array where an object belongs is a soft failure for that one
+    indicator, never a crash.
+    """
+    try:
+        body = response.json()
+    except (ValueError, RecursionError):  # bad JSON or encoding; absurd nesting
+        raise ConnectorError(f"{vendor} returned a non-JSON response") from None
+    if not isinstance(body, dict):
+        raise ConnectorError(f"{vendor} returned an unexpected JSON document")
+    return body
 
 
 class AllowlistedClient:
@@ -93,7 +114,7 @@ class AllowlistedClient:
             # Fail closed: a URL we can't even parse is never allowed out.
             raise SSRFGuardError("refused unparseable request URL") from exc
         if parts.scheme.casefold() not in _ALLOWED_SCHEMES:
-            raise SSRFGuardError(f"refused non-web scheme {parts.scheme!r}")
+            raise SSRFGuardError(f"refused non-https scheme {parts.scheme!r}")
         if not host_is_allowed(host, self._allowed):
             # The message names the host but never the indicator/path that may
             # have carried per-victim data — and never a secret.
@@ -112,9 +133,11 @@ class AllowlistedClient:
         guarantee httpx's internal following would silently bypass.
 
         With ``bootstrap_redirect=True`` (RDAP), exactly one hop issued by an
-        allowlisted host may leave the allowlist — https only — because the
-        vendor's documented job is to designate the authoritative host. The
-        designated host gets exactly one request: a further redirect from it
+        allowlisted host may leave the allowlist, because the vendor's
+        documented job is to designate the authoritative host. That hop must be
+        https to a public DNS name (never an IP literal or a local name), and
+        the designated host gets exactly one plain GET — none of the caller's
+        headers, no body, no rate-limit retries: a further redirect from it
         soft-fails, so a registrant-chosen second hop can never be followed.
         """
         self._guard(url)
@@ -122,7 +145,8 @@ class AllowlistedClient:
         redirects = 0
         off_allowlist = False
         while True:
-            response = await self._send_with_backoff(request)
+            retries = 0 if off_allowlist else self._max_retries
+            response = await self._send_with_backoff(request, retries)
             next_request = response.next_request
             if not (self._follow_redirects and response.is_redirect and next_request is not None):
                 return response
@@ -146,23 +170,35 @@ class AllowlistedClient:
                     raise
                 if next_request.url.scheme != "https":
                     raise SSRFGuardError("refused non-https bootstrap redirect target") from None
+                designated = public_host(next_request.url.host)
+                if designated is None or designated[0] != "name":
+                    raise SSRFGuardError(
+                        "refused bootstrap redirect to an IP literal or local host"
+                    ) from None
+                # The designated host is not the vendor: it gets a bare GET,
+                # without the caller's headers (which may carry an API key; httpx
+                # strips only Authorization across hosts) or body.
+                next_request = self._client.build_request("GET", next_request.url)
                 off_allowlist = True
             request = next_request
             redirects += 1
 
-    async def _send_with_backoff(self, request: httpx.Request) -> httpx.Response:
+    async def _send_with_backoff(self, request: httpx.Request, retries: int) -> httpx.Response:
         """Send one (already-guarded) request, backing off on 429/503."""
         attempt = 0
         while True:
             response = await self._client.send(request)
             if response.status_code not in _RETRY_STATUSES:
                 return response
-            if attempt >= self._max_retries:
-                # Strip the query — it can carry an API key (e.g. Shodan's).
+            if attempt >= retries:
+                await response.aclose()
+                # Name the host only: a path or query can carry the indicator
+                # (per-victim data) or an API key (Shodan's).
                 raise RateLimitedError(
-                    f"{request.url.copy_with(query=None)} still rate-limited after "
-                    f"{self._max_retries} retr{'y' if self._max_retries == 1 else 'ies'}"
+                    f"{request.url.host} still rate-limited after "
+                    f"{retries} retr{'y' if retries == 1 else 'ies'}"
                 )
+            await response.aclose()
             delay = self._retry_delay(response, attempt)
             self.sleeps.append(delay)
             await self._sleep(delay)
@@ -170,13 +206,15 @@ class AllowlistedClient:
 
     @staticmethod
     def _retry_delay(response: httpx.Response, attempt: int) -> float:
-        """Honor ``Retry-After`` if sane, else exponential backoff (1, 2, 4, …s)."""
+        """Honor a finite ``Retry-After`` in seconds, else back off exponentially (1, 2, 4, …s)."""
         header = response.headers.get("Retry-After")
         if header:
             try:
-                return min(max(float(header), 0.0), _MAX_BACKOFF_SECONDS)
+                seconds = float(header)
             except ValueError:
-                pass  # HTTP-date form — fall through to exponential backoff
+                seconds = math.nan  # HTTP-date form: fall back to exponential backoff
+            if math.isfinite(seconds):
+                return min(max(seconds, 0.0), _MAX_BACKOFF_SECONDS)
         return min(2.0**attempt, _MAX_BACKOFF_SECONDS)
 
     async def get(self, url: str, **kwargs: Any) -> httpx.Response:

@@ -6,7 +6,7 @@ XSOAR 6.x **playbook** YAML artifact, the format an analyst uploads under
 *Playbooks → Upload*. See ``docs/SOAR_EXPORT.md`` for the field-by-field mapping
 and import steps.
 
-**Draft / export only — never acts (CLAUDE.md, PRD §4).** Every task in the
+**Draft / export only — never acts (AGENTS.md, PRD §4).** Every task in the
 emitted playbook is a *manual* task (``task.iscommand: false``, ``task.brand: ""``).
 A manual task in XSOAR is a checklist item an analyst completes by hand — it binds
 no integration command — so importing and even *running* this playbook triggers no
@@ -43,6 +43,18 @@ _FROM_VERSION = "6.5.0"
 # Layout hint XSOAR stores per task (a JSON string). Cosmetic only — the editor
 # re-lays-out on import — but included so the uploaded playbook renders cleanly.
 _VIEW_TEMPLATE = '{{"position":{{"x":450,"y":{y}}}}}'
+
+# Raw values are joined into comma-separated playbook inputs. XSOAR resolves
+# ``${...}`` in input values as context/DT expressions (which can run inline
+# JavaScript), and list-taking commands split on commas. An attacker-chosen
+# URL containing either would become an expression or several bogus values,
+# so such values are withheld from the inputs; the task notes still list them
+# defanged.
+_UNSAFE_INPUT_TOKENS = ("${", ",")
+
+
+def _safe_input_value(value: str) -> bool:
+    return not any(token in value for token in _UNSAFE_INPUT_TOKENS)
 
 
 def _task(
@@ -90,22 +102,37 @@ def _task(
     return task
 
 
+def _input_buckets(core: TriageCore) -> tuple[dict[str, list[str]], int]:
+    """Raw indicator values safe to embed in playbook inputs, and how many were withheld."""
+    safe: dict[str, list[str]] = {}
+    withheld = 0
+    for bucket, values in core.raw_buckets().items():
+        safe[bucket] = [value for value in values if _safe_input_value(value)]
+        withheld += len(values) - len(safe[bucket])
+    return safe, withheld
+
+
 def _inputs(core: TriageCore) -> list[dict[str, Any]]:
     """Playbook inputs: the verdict and the RAW indicators, for tooling/pivots.
 
     Raw values are what a SOAR acts on, and these inputs are inert until an analyst
     wires them into a (manual) step — nothing here auto-runs. Redacted indicators
-    (bystander PII) are already dropped from the raw channel, so they never appear.
+    (bystander PII) are already dropped from the raw channel, so they never appear,
+    and values XSOAR would parse as expressions or split apart are withheld.
     """
     inputs: list[dict[str, Any]] = [
-        _input("PhishbowlVerdict", core.verdict, "Phishbowl verdict band for the message."),
+        _input(
+            "PhishbowlVerdict",
+            core.verdict if _safe_input_value(core.verdict) else "see playbook description",
+            "PhishBowl verdict band for the message.",
+        ),
         _input(
             "PhishbowlScore",
             f"{core.score}/{core.max_score}",
-            "Phishbowl risk score (0-100) and its maximum.",
+            "PhishBowl risk score (0-100) and its maximum.",
         ),
     ]
-    raw = core.raw_buckets()
+    raw, _ = _input_buckets(core)
     for bucket in BUCKETS:
         values = raw[bucket]
         if not values:
@@ -134,16 +161,24 @@ def _input(key: str, value: str, description: str) -> dict[str, Any]:
 
 def _description(core: TriageCore) -> str:
     """The playbook description: disclaimer first, then the verdict at a glance."""
+    _, withheld = _input_buckets(core)
     return (
         f"{DRAFT_DISCLAIMER}\n\n"
-        f"Phishbowl triage summary\n"
+        f"PhishBowl triage summary\n"
         f"Verdict: {core.verdict} (score {core.score}/{core.max_score}, "
         f"offline {core.offline_score}).\n"
         f"Source: {core.source_filename or 'message'} ({core.source_format}).\n"
         f"Authentication: {core.auth_summary() or 'n/a'}.\n"
         f"Indicators: {core.raw_indicator_count()} extracted "
         f"(listed defanged in the tasks below; raw values are in the playbook inputs).\n"
-        f"Rules fired: {len(core.reasons)}.\n"
+        + (
+            f"{withheld} raw value(s) containing ',' or '${{' were withheld from the "
+            "inputs (XSOAR would split them or evaluate them as expressions); they are "
+            "listed defanged in the tasks.\n"
+            if withheld
+            else ""
+        )
+        + f"Rules fired: {len(core.reasons)}.\n"
         + (
             "PII redaction was active: bystander recipients/internal topology are withheld.\n"
             if core.redaction_enabled
@@ -175,12 +210,12 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
         f"Sender authentication: {core.auth_summary() or 'n/a'}.\n"
         "Review SPF/DKIM/DMARC and the From / Reply-To / Return-Path alignment for spoofing."
     )
-    containment_note = "DRAFT — Phishbowl proposes; it never acts.\n\n" + "\n".join(
+    containment_note = "DRAFT — PhishBowl proposes; it never acts.\n\n" + "\n".join(
         f"- {step}" for step in core.recommended_review()
     )
 
     steps = [
-        ("Review Phishbowl verdict", verdict_note),
+        ("Review PhishBowl verdict", verdict_note),
         ("Review extracted indicators (defanged)", indicators_note),
         ("Review sender authentication", auth_note),
         ("Decide containment & response (MANUAL — analyst-driven)", containment_note),
@@ -193,7 +228,7 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
         seed=seed,
         seq=1,
         task_type="title",
-        name="Phishbowl Triage (DRAFT — review before acting)",
+        name="PhishBowl Triage (DRAFT — review before acting)",
         description=DRAFT_DISCLAIMER,
         next_seq=2,
     )
@@ -212,7 +247,7 @@ def build_xsoar_playbook(view: ReportView) -> dict[str, Any]:
     return {
         "id": stable_uuid("xsoar-playbook", seed),
         "version": -1,
-        "name": f"Phishbowl Triage — {core.verdict} (DRAFT)",
+        "name": f"PhishBowl Triage — {core.verdict} (DRAFT)",
         "description": _description(core),
         "starttaskid": "0",
         "tasks": tasks,

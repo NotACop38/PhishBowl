@@ -9,14 +9,14 @@ Design notes from the PRD that are load-bearing here:
 - Headers preserve order and duplicates (PRD §6.1).
 - From / Return-Path / Reply-To are trivially comparable — domain mismatch is
   a core offline scoring signal (PRD §8); see :mod:`phishbowl.models.addresses`.
-- ``Body.html_raw`` is stored but NEVER rendered (CLAUDE.md / PRD §10).
+- ``Body.html_raw`` is stored but NEVER rendered (AGENTS.md / PRD §10).
 """
 
 from ._base import PhishbowlModel
 from .addresses import Address, Addresses
 from .attachments import Attachment
 from .auth import Auth, AuthResult
-from .body import Body
+from .body import Body, TextPart
 from .enums import AttachmentFlag, AuthResultState, EmailFormat, IOCType
 from .headers import Header, Headers
 from .iocs import IOC, IOCs
@@ -40,6 +40,7 @@ __all__ = [
     "Address",
     "Addresses",
     "Body",
+    "TextPart",
     "Attachment",
     "IOC",
     "IOCs",

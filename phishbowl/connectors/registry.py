@@ -15,6 +15,7 @@ taking down discovery (or the run) — it is logged and skipped (PRD §11).
 from __future__ import annotations
 
 import importlib
+import inspect
 import logging
 from importlib import metadata
 
@@ -39,6 +40,8 @@ def register(cls: type[Connector]) -> type[Connector]:
     """
     if not cls.name:
         raise ValueError(f"connector {cls.__name__} must set a non-empty 'name'")
+    if inspect.isabstract(cls):
+        raise ValueError(f"connector {cls.__name__} is abstract; implement enrich()")
     _REGISTRY[cls.name] = cls
     return cls
 
@@ -74,8 +77,13 @@ def discover(*, include_entry_points: bool = True) -> dict[str, type[Connector]]
             except Exception:  # a third-party packaging error must not crash discovery
                 log.warning("failed to load connector entry point %r", ep.name)
                 continue
-            if isinstance(loaded, type) and issubclass(loaded, Connector) and loaded.name:
+            if (
+                isinstance(loaded, type)
+                and issubclass(loaded, Connector)
+                and loaded.name
+                and not inspect.isabstract(loaded)
+            ):
                 classes.setdefault(loaded.name, loaded)
             else:
-                log.warning("entry point %r is not a Connector subclass; skipping", ep.name)
+                log.warning("entry point %r is not a usable Connector; skipping", ep.name)
     return classes

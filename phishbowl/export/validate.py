@@ -1,6 +1,6 @@
 """A tiny, dependency-free JSON Schema validator (PRD §6.6).
 
-Phishbowl's SOAR exports each ship an *expected schema* — a real JSON Schema
+PhishBowl's SOAR exports each ship an *expected schema* — a real JSON Schema
 (draft 2020-12) document under :mod:`phishbowl.export.schemas` — and a validation
 test asserts every emitted artifact conforms to it (Phase 6 DoD). The offline-first
 ethos means ``make test`` stays self-contained and key-free, so rather than pull in
@@ -24,18 +24,34 @@ from __future__ import annotations
 import re
 from typing import Any
 
-# JSON type name -> Python predicate. ``bool`` is a subclass of ``int`` in Python,
-# so it is explicitly excluded from ``integer``/``number`` (a JSON boolean is not a
-# JSON number).
+
+def _is_number(value: Any) -> bool:
+    # ``bool`` subclasses ``int`` in Python, but a JSON boolean is not a number.
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+# JSON type name -> Python predicate. As in JSON Schema, an "integer" is any
+# number with a zero fractional part, so 1.0 qualifies.
 _TYPE_CHECKS = {
     "object": lambda v: isinstance(v, dict),
     "array": lambda v: isinstance(v, list),
     "string": lambda v: isinstance(v, str),
-    "integer": lambda v: isinstance(v, int) and not isinstance(v, bool),
-    "number": lambda v: isinstance(v, (int, float)) and not isinstance(v, bool),
+    "integer": lambda v: _is_number(v) and (isinstance(v, int) or v.is_integer()),
+    "number": _is_number,
     "boolean": lambda v: isinstance(v, bool),
     "null": lambda v: v is None,
 }
+
+
+def _json_equal(left: Any, right: Any) -> bool:
+    """Equality with JSON semantics: ``true`` is not ``1``, but ``1`` equals ``1.0``."""
+    if _is_number(left) and _is_number(right):
+        return left == right
+    if isinstance(left, list) and isinstance(right, list):
+        return len(left) == len(right) and all(map(_json_equal, left, right))
+    if isinstance(left, dict) and isinstance(right, dict):
+        return left.keys() == right.keys() and all(_json_equal(left[k], right[k]) for k in left)
+    return type(left) is type(right) and left == right
 
 
 def _resolve(ref: str, root: dict[str, Any]) -> dict[str, Any]:
@@ -70,10 +86,10 @@ def validate(
         # which matches pre-2019 semantics and keeps resolution unambiguous.
         return validate(instance, _resolve(schema["$ref"], root), root=root, path=path)
 
-    if "const" in schema and instance != schema["const"]:
+    if "const" in schema and not _json_equal(instance, schema["const"]):
         errors.append(f"{path}: expected const {schema['const']!r}, got {instance!r}")
 
-    if "enum" in schema and instance not in schema["enum"]:
+    if "enum" in schema and not any(_json_equal(instance, v) for v in schema["enum"]):
         errors.append(f"{path}: {instance!r} is not one of {schema['enum']!r}")
 
     if "type" in schema:

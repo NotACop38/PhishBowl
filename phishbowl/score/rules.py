@@ -109,9 +109,9 @@ class ScoreResult:
 
     ``score`` is the final 0-100 value and ``verdict`` its band. ``offline_score``
     is the score from offline rules alone — always computed and always meaningful
-    even with zero enrichment (PRD §8). For Phase 3 (offline only) the two are
-    equal; the split is kept so Phase 5 enrichment can add on top without
-    obscuring the offline base.
+    even with zero enrichment (PRD §8); without enrichment the two are equal.
+    ``analysis_complete`` is ``False`` when some of the message's evidence was
+    not analyzed: the score is then a lower bound and the verdict says so.
     """
 
     score: int

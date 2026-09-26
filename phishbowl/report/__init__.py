@@ -18,12 +18,13 @@ from .cli_render import render_cli
 from .html import render_html
 from .json_output import render_json
 from .redact import RedactionPolicy
-from .view import ReportView, build_report, severity_for
+from .view import SEVERITY_FLOORS, ReportView, build_report, severity_for
 
 __all__ = [
     "build_report",
     "ReportView",
     "severity_for",
+    "SEVERITY_FLOORS",
     "render_html",
     "render_json",
     "render_cli",

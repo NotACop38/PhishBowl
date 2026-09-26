@@ -5,7 +5,7 @@ message, its extracted IOCs, and the resolved config) that returns a list of
 **evidence strings**: non-empty means the rule fired, empty means it stayed
 silent. Detectors never mutate state and — like everything in the offline core —
 never touch the network: the email's URLs are string-inspected, never fetched
-(CLAUDE.md). All domain/URL evidence is defanged for human-facing output
+(AGENTS.md). All domain/URL evidence is defanged for human-facing output
 (PRD §6.2).
 
 Anti-double-counting is built in (PRD §8 "no signal is double-counted"):
@@ -16,8 +16,11 @@ Anti-double-counting is built in (PRD §8 "no signal is double-counted"):
   header is absent, while ``auth.dkim_none`` only fires when the header IS
   present — the two can never both claim the same gap;
 * ``url.lookalike`` skips non-ASCII and punycode domains, leaving those to
-  ``url.idn_homograph`` / ``url.punycode`` so a single confusable domain isn't
-  counted twice.
+  ``url.idn_homograph`` / ``url.punycode``, and ``url.punycode`` skips a domain
+  ``url.idn_homograph`` already flagged, so one confusable domain counts once;
+* ``identity.freemail_role`` stays silent when the display name claims a brand
+  (``identity.display_name_brand_mismatch`` owns that fact), and
+  ``attach.archive`` skips archives ``attach.password_protected_archive`` scores.
 """
 
 from __future__ import annotations
@@ -28,13 +31,18 @@ from dataclasses import dataclass
 from functools import cached_property
 from urllib.parse import urlsplit
 
-from tldextract import TLDExtract
-
-from phishbowl.extract.defang import defang_domain
+from phishbowl.domains import _PUBLIC_SUFFIX, registrable_domain, registrable_label, web_ipv4
+from phishbowl.extract.defang import defang_domain, defang_email
 from phishbowl.html_analysis import inspect_html
-from phishbowl.models import IOC, AuthResultState, IOCType, ParsedEmail
+from phishbowl.models import IOC, AttachmentFlag, AuthResultState, IOCs, IOCType, ParsedEmail
 
 from .config import ScoringConfig
+from .confusables import (
+    confusable_skeleton,
+    decode_label,
+    is_suspicious_mix,
+    latin_skeleton,
+)
 from .rules import DetectorSpec, RuleSource
 
 # --- small text/domain helpers ---------------------------------------------
@@ -50,15 +58,8 @@ _TEXT_HOST_RE = re.compile(
 )
 _WS_RE = re.compile(r"\s+")
 
-
-_PUBLIC_SUFFIX = TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True)
-
-
-def registrable_domain(host: str) -> str:
-    """Use the packaged Public Suffix List without network or cache access."""
-    host = host.strip().strip(".").casefold()
-    result = _PUBLIC_SUFFIX(host)
-    return result.top_domain_under_public_suffix or host
+# Domain indicators that only name the message's recipients.
+_RECIPIENT_PROVENANCE = frozenset({"header:To", "header:Cc"})
 
 
 def url_host(url: str) -> str | None:
@@ -71,65 +72,41 @@ def url_host(url: str) -> str | None:
 
 
 def is_ip_literal(host: str) -> bool:
-    """True if ``host`` is an IPv4/IPv6 literal rather than a domain name."""
+    """True if ``host`` is an IP address rather than a domain name.
+
+    Includes the legacy IPv4 notations browsers still accept (``3405803785``,
+    ``0xcb007109``, ``127.1``): they are raw-IP links in disguise.
+    """
     try:
         ipaddress.ip_address(host)
     except ValueError:
-        return False
+        try:
+            return web_ipv4(host) is not None
+        except ValueError:
+            return False
     return True
 
 
-def levenshtein(a: str, b: str) -> int:
-    """Classic edit distance (insert/delete/substitute), iterative DP."""
+def edit_distance(a: str, b: str) -> int:
+    """Optimal-string-alignment distance: insert, delete, substitute, transpose.
+
+    A swapped pair of adjacent letters (``paypla``) costs 1, as it reads.
+    """
     if a == b:
         return 0
-    if not a:
-        return len(b)
-    if not b:
-        return len(a)
+    if not a or not b:
+        return len(a) or len(b)
+    before: list[int] | None = None
     prev = list(range(len(b) + 1))
     for i, ca in enumerate(a, 1):
         cur = [i]
         for j, cb in enumerate(b, 1):
-            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
-        prev = cur
+            cost = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb))
+            if before is not None and i > 1 and j > 1 and ca == b[j - 2] and a[i - 2] == cb:
+                cost = min(cost, before[j - 2] + 1)
+            cur.append(cost)
+        before, prev = prev, cur
     return prev[-1]
-
-
-def _script_of(ch: str) -> str | None:
-    """Coarse Unicode script bucket for an alphabetic char (``None`` otherwise).
-
-    Only enough scripts to catch the classic homograph attack — Latin mixed with
-    a confusable from another alphabet (Cyrillic/Greek/...). Digits, hyphens, and
-    dots return ``None`` so they never count as "another script".
-    """
-    if not ch.isalpha():
-        return None
-    o = ord(ch)
-    if (0x41 <= o <= 0x5A) or (0x61 <= o <= 0x7A) or (0xC0 <= o <= 0x24F):
-        return "Latin"
-    if (0x0370 <= o <= 0x03FF) or (0x1F00 <= o <= 0x1FFF):
-        return "Greek"
-    if (0x0400 <= o <= 0x04FF) or (0x0500 <= o <= 0x052F):
-        return "Cyrillic"
-    if 0x0530 <= o <= 0x058F:
-        return "Armenian"
-    if 0x0590 <= o <= 0x05FF:
-        return "Hebrew"
-    if 0x0600 <= o <= 0x06FF:
-        return "Arabic"
-    return "Other"
-
-
-def is_mixed_script(label: str) -> bool:
-    """True if a single domain label mixes alphabets (a confusable homograph).
-
-    The textbook IDN attack swaps one ASCII letter for an identical-looking glyph
-    from another script (``pаypal`` — Cyrillic ``а`` among Latin), which shows up
-    as more than one script within one label.
-    """
-    scripts = {s for s in (_script_of(c) for c in label) if s is not None}
-    return len(scripts) > 1
 
 
 def _word_in(word: str, text: str) -> bool:
@@ -137,24 +114,34 @@ def _word_in(word: str, text: str) -> bool:
     return re.search(rf"\b{re.escape(word)}\b", text, re.IGNORECASE) is not None
 
 
-def _first_host_in_text(text: str) -> str | None:
-    m = _TEXT_HOST_RE.search(text)
-    return m.group(1).casefold() if m else None
+# Public suffixes that are also common file extensions: "invoice.zip" or
+# "README.md" in link text names a file far more often than a host.
+_FILE_EXTENSION_SUFFIXES = frozenset({"zip", "mov", "md", "py", "sh", "rs", "pm", "ps"})
+
+
+def _first_host_in_text(text: str, href: str = "") -> str | None:
+    """The first host name a reader would take from link text, if any.
+
+    A candidate needs a real public suffix, so file names ("statement.pdf",
+    "setup.exe") are not hosts. Without a scheme or "www.", a name ending in a
+    common file extension that is also a suffix (".zip", ".md", ".py", ...) is
+    a file, and so is text that names a file in the link's own path.
+    """
+    path = href.casefold().split("?", 1)[0]
+    for match in _TEXT_HOST_RE.finditer(text):
+        host = match.group(1).casefold()
+        suffix = _PUBLIC_SUFFIX(host).suffix
+        if not suffix:
+            continue
+        explicit = match.group(0).casefold().startswith(("http", "www."))
+        if not explicit and (suffix in _FILE_EXTENSION_SUFFIXES or f"/{host}" in path):
+            continue
+        return host
+    return None
 
 
 def _strip_tags(html: str) -> str:
     return _WS_RE.sub(" ", inspect_html(html).text).strip()
-
-
-def _dedup(items: list[str]) -> list[str]:
-    """Order-preserving de-duplication of evidence strings."""
-    seen: set[str] = set()
-    out: list[str] = []
-    for it in items:
-        if it not in seen:
-            seen.add(it)
-            out.append(it)
-    return out
 
 
 # --- scoring context --------------------------------------------------------
@@ -170,7 +157,7 @@ class ScoringContext:
     """
 
     parsed: ParsedEmail
-    iocs: object  # phishbowl.models.IOCs (typed loosely to avoid import cycle churn)
+    iocs: IOCs
     config: ScoringConfig
 
     @cached_property
@@ -203,6 +190,8 @@ class ScoringContext:
         domains: set[str] = set()
         for ioc in self.iocs:
             if ioc.type is IOCType.DOMAIN:
+                if set(ioc.provenance) <= _RECIPIENT_PROVENANCE:
+                    continue  # the recipients' own domains are not the sender's claims
                 domains.add(ioc.value.casefold())
             elif ioc.type is IOCType.URL:
                 host = url_host(ioc.value)
@@ -215,12 +204,52 @@ class ScoringContext:
         return domains
 
     @cached_property
+    def lure_words(self) -> frozenset[str]:
+        """Words that make a hyphenated brand name a lure (see ``_COMBOSQUAT_LURES``)."""
+        words = set(_COMBOSQUAT_LURES)
+        for phrase in (*self.config.credential_keywords, *self.config.role_keywords):
+            words.update(w for w in re.split(r"[\s\-]+", phrase.casefold()) if len(w) > 2)
+        return frozenset(words)
+
+    @cached_property
     def lookalike_targets(self) -> set[str]:
         """Domains worth typosquat-comparing against: bundled brands + org domains."""
         targets: set[str] = set(self.config.org_domains)
         for legit in self.config.brands.values():
             targets |= set(legit)
         return targets
+
+    @cached_property
+    def homographs(self) -> dict[str, str]:
+        """Candidate domains that are IDN homographs, mapped to their evidence.
+
+        Punycode labels are decoded first. A label is a homograph when it mixes
+        scripts outside TR39's highly-restrictive profile, or when it is
+        non-ASCII and folds (look-alike letters, accents) to a brand or org label.
+        """
+        target_labels = {
+            confusable_skeleton(label): label
+            for label in (_name_label(t) for t in self.lookalike_targets)
+            if len(label) >= _LOOKALIKE_MIN_LABEL
+        }
+        found: dict[str, str] = {}
+        for domain in sorted(self.candidate_domains):
+            labels = [decode_label(label) for label in domain.split(".")]
+            display = ".".join(labels)
+            shown = defang_domain(display) + (
+                f" ({defang_domain(domain)})" if display != domain else ""
+            )
+            for label in labels:
+                if label.isascii():
+                    continue
+                imitated = target_labels.get(latin_skeleton(label))
+                if imitated:
+                    found[domain] = f"{shown} imitates {imitated!r} with look-alike characters"
+                    break
+                if is_suspicious_mix(label):
+                    found[domain] = f"mixed-script / confusable domain: {shown}"
+                    break
+        return found
 
     @cached_property
     def anchors(self) -> list[tuple[str, str]]:
@@ -339,73 +368,158 @@ def display_name_brand_mismatch(ctx: ScoringContext) -> list[str]:
     return hits
 
 
-def freemail_brand(ctx: ScoringContext) -> list[str]:
+def freemail_role(ctx: ScoringContext) -> list[str]:
+    """A free-webmail sender presenting as an organizational role or department.
+
+    "IT Support <it.helpdesk.team@gmail.example>" is the business-email-compromise
+    pattern: a personal mailbox claiming an organization's authority. Brand
+    claims are left to ``identity.display_name_brand_mismatch`` so the same
+    display name never scores twice.
+    """
     frm = ctx.parsed.addresses.from_
-    if not frm or not frm.domain:
+    if not frm or not frm.domain or not frm.display_name:
         return []
     dom = frm.domain.casefold()
-    if dom not in ctx.config.freemail_domains:
+    if dom not in ctx.config.freemail_domains or display_name_brand_mismatch(ctx):
         return []
-    dn = frm.display_name or ""
-    for brand, legit in ctx.config.brands.items():
-        if dom in legit:
-            continue  # this freemail IS the brand's domain (e.g. gmail/google)
-        if _word_in(brand, dn):
-            spec = frm.addr_spec or dom
-            return [f'freemail sender {spec.replace("@", "[at]")} claims to be "{brand}"']
-    return []
+    roles = [role for role in ctx.config.role_keywords if _word_in(role, frm.display_name)]
+    if not roles:
+        return []
+    spec = defang_email(frm.addr_spec or dom)
+    return [f'freemail sender {spec} presents as "{frm.display_name}" ({", ".join(roles)})']
+
+
+def multiple_from(ctx: ScoringContext) -> list[str]:
+    """More than one ``From`` header: RFC 5322 allows exactly one.
+
+    Mail clients disagree on which copy to display, and authentication checks
+    may evaluate a different one, so a duplicate is a sender-spoofing technique
+    rather than a formatting accident. The evidence lists every copy.
+    """
+    values = ctx.parsed.headers.get_all("From")
+    if len(values) < 2:
+        return []
+    return [f"{len(values)} From headers: " + " | ".join(value.strip() for value in values)]
 
 
 def display_name_is_email(ctx: ScoringContext) -> list[str]:
     frm = ctx.parsed.addresses.from_
-    if frm and frm.display_name and _EMAIL_RE.search(frm.display_name):
-        return [f'From display name is itself an email address: "{frm.display_name}"']
-    return []
+    if not frm or not frm.display_name:
+        return []
+    shown = _EMAIL_RE.findall(frm.display_name)
+    # A display name that simply repeats the real address is common and harmless.
+    if not shown or {e.casefold() for e in shown} == {(frm.addr_spec or "").casefold()}:
+        return []
+    return [f'From display name is itself an email address: "{frm.display_name}"']
 
 
 # --- domain / URL detectors (PRD §8) ---------------------------------------
 
 
 def punycode(ctx: ScoringContext) -> list[str]:
-    return _dedup(
-        [
-            f"punycode/xn-- domain present: {defang_domain(d)}"
-            for d in sorted(ctx.candidate_domains)
-            if "xn--" in d
-        ]
-    )
+    hits: list[str] = []
+    for d in sorted(ctx.candidate_domains):
+        if "xn--" not in d or d in ctx.homographs:
+            continue  # a homograph is scored once, by url.idn_homograph
+        decoded = ".".join(decode_label(label) for label in d.split("."))
+        hits.append(f"punycode/xn-- domain present: {defang_domain(d)} ({defang_domain(decoded)})")
+    return list(dict.fromkeys(hits))
 
 
 def idn_homograph(ctx: ScoringContext) -> list[str]:
-    hits: list[str] = []
-    for d in sorted(ctx.candidate_domains):
-        if any(is_mixed_script(label) for label in d.split(".")):
-            hits.append(f"mixed-script / confusable domain: {defang_domain(d)}")
-    return _dedup(hits)
+    return list(dict.fromkeys(list(ctx.homographs.values())))
+
+
+# Brand/org labels shorter than this are too short to compare meaningfully
+# (``me``, ``fb``, ``live`` sit one edit away from countless unrelated names).
+_LOOKALIKE_MIN_LABEL = 5
+
+
+# Words that turn a brand name into a lure when hyphenated onto it
+# ("paypal-secure", "account-amazon"), beyond the configured credential and
+# role keywords. A brand's own auxiliary domains ("media-amazon",
+# "paypal-community") use none of them, so they do not fire.
+_COMBOSQUAT_LURES = frozenset(
+    {
+        "access", "alert", "alerts", "auth", "billing", "case", "claim", "com",
+        "customer", "help", "id", "invoice", "limited", "login", "logon", "net",
+        "notice", "org", "password", "payment", "portal", "recovery", "refund",
+        "reset", "resolution", "reward", "secure", "security", "service",
+        "services", "signin", "support", "suspended", "unlock", "update",
+        "validate", "verify", "wallet",
+    }
+)  # fmt: skip
+
+
+def _name_label(domain: str) -> str:
+    """The label that names a registrant: left of the public suffix.
+
+    For a domain without a public suffix (``acme.local``, ``corp.internal``)
+    that is the label left of the last one, not the suffix-like last label.
+    """
+    parts = _PUBLIC_SUFFIX(domain)
+    if parts.suffix:
+        return parts.domain
+    labels = domain.strip(".").casefold().split(".")
+    return labels[-2] if len(labels) >= 2 else labels[0]
+
+
+def _lookalike_reason(
+    label: str, target_label: str, lures: frozenset[str] = _COMBOSQUAT_LURES
+) -> str | None:
+    """Why ``label`` imitates ``target_label``, or ``None`` if it does not.
+
+    Three patterns, checked in order: the same letters after folding ASCII
+    confusables (``paypa1``); the brand as one hyphenated word of a longer name
+    next to a lure word from ``lures`` (``paypal-secure``, combosquatting); or a
+    small typo that keeps the first letter — one edit for labels up to 8
+    characters, two for longer ones. Identical labels are not lookalikes:
+    ``amazon.ca`` beside ``amazon.com`` is a suffix variant, not a typo, and
+    brands legitimately own many of them.
+    """
+    if len(target_label) < _LOOKALIKE_MIN_LABEL or label == target_label:
+        return None
+    skeleton = confusable_skeleton(target_label)
+    if confusable_skeleton(label) == skeleton:
+        return "confusable characters"
+    words = label.split("-")
+    if len(words) > 1 and skeleton in (confusable_skeleton(w) for w in words):
+        lure = next((w for w in words if w in lures), None)
+        return f'embeds the name "{target_label}" with "{lure}"' if lure else None
+    allowed = 1 if len(target_label) <= 8 else 2
+    if (
+        len(target_label) <= 5
+        or label[0] != target_label[0]
+        or abs(len(label) - len(target_label)) > allowed
+    ):
+        return None
+    distance = edit_distance(label, target_label)
+    return f"edit distance {distance}" if distance <= allowed else None
 
 
 def lookalike(ctx: ScoringContext) -> list[str]:
     hits: list[str] = []
-    targets = ctx.lookalike_targets
+    targets = sorted(ctx.lookalike_targets)
+    known = ctx.config.freemail_domains | ctx.config.url_shorteners
     for d in sorted(ctx.candidate_domains):
         # IDN homograph / punycode own non-ASCII & xn-- domains (no double-count).
         if not d.isascii() or "xn--" in d:
             continue
-        reg = registrable_domain(d)
+        # A brand/org domain (or a subdomain of one) is never its own lookalike.
         if any(d == t or d.endswith("." + t) for t in targets):
             continue
-        for target in sorted(targets):
-            if len(target) < 5:
-                continue
-            if reg == target or reg.endswith("." + target):
-                break  # legitimately this brand/org domain — never a lookalike
-            if 1 <= levenshtein(reg, target) <= 2:
+        reg = registrable_domain(d)
+        label = registrable_label(d)
+        if not label or reg in known:
+            continue
+        for target in targets:
+            reason = _lookalike_reason(label, _name_label(target), ctx.lure_words)
+            if reason:
                 hits.append(
-                    f"{defang_domain(reg)} is a lookalike of {defang_domain(target)} "
-                    f"(edit distance {levenshtein(reg, target)})"
+                    f"{defang_domain(reg)} is a lookalike of {defang_domain(target)} ({reason})"
                 )
                 break
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
@@ -416,7 +530,7 @@ def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
         # compare named hosts here so one link can't fire both rules (no double-count).
         if not href_host or is_ip_literal(href_host):
             continue
-        text_host = _first_host_in_text(text)
+        text_host = _first_host_in_text(text, href)
         if not text_host:
             continue
         if registrable_domain(text_host) != registrable_domain(href_host):
@@ -424,7 +538,7 @@ def anchor_href_mismatch(ctx: ScoringContext) -> list[str]:
                 f"link text shows {defang_domain(text_host)} but href points to "
                 f"{defang_domain(href_host)}"
             )
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def raw_ip_host(ctx: ScoringContext) -> list[str]:
@@ -433,7 +547,7 @@ def raw_ip_host(ctx: ScoringContext) -> list[str]:
         host = url_host(ioc.value)
         if host and is_ip_literal(host):
             hits.append(f"URL uses a raw IP host: {ioc.defanged}")
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def shortener(ctx: ScoringContext) -> list[str]:
@@ -442,7 +556,7 @@ def shortener(ctx: ScoringContext) -> list[str]:
         host = url_host(ioc.value)
         if host and registrable_domain(host) in ctx.config.url_shorteners:
             hits.append(f"URL shortener hides destination: {ioc.defanged}")
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def credential_keywords(ctx: ScoringContext) -> list[str]:
@@ -458,10 +572,11 @@ def credential_keywords(ctx: ScoringContext) -> list[str]:
         haystack = f"{parts.path}?{parts.query}".casefold()
         found = sorted({kw for kw in ctx.config.credential_keywords if kw in haystack})
         if found:
+            keywords = ", ".join(found)
             hits.append(
-                f"credential-harvest keywords in URL path ({', '.join(found)}): {ioc.defanged}"
+                f"credential-harvest keywords in URL path or query ({keywords}): {ioc.defanged}"
             )
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 def wrapped_divergence(ctx: ScoringContext) -> list[str]:
@@ -482,63 +597,64 @@ def wrapped_divergence(ctx: ScoringContext) -> list[str]:
                 f"{ioc.wrapper} link unwraps to {defang_domain(reg)} "
                 f"(unrelated to sender {defang_domain(from_reg)})"
             )
-    return _dedup(hits)
+    return list(dict.fromkeys(hits))
 
 
 # --- attachment detectors (PRD §8) -----------------------------------------
 
 
-def _attachments_with(ctx: ScoringContext, flag) -> list[str]:
-    names = [a.filename or "(unnamed)" for a in ctx.parsed.attachments if flag in a.flags]
-    return names
+def _attachments_with(ctx: ScoringContext, flag: AttachmentFlag) -> list[str]:
+    return [a.filename or "(unnamed)" for a in ctx.parsed.attachments if flag in a.flags]
 
 
 def macro_capable(ctx: ScoringContext) -> list[str]:
-    from phishbowl.models import AttachmentFlag
-
     names = _attachments_with(ctx, AttachmentFlag.MACRO_CAPABLE)
     return [f"macro-capable office document: {n}" for n in names]
 
 
 def double_extension(ctx: ScoringContext) -> list[str]:
-    from phishbowl.models import AttachmentFlag
-
     names = _attachments_with(ctx, AttachmentFlag.DOUBLE_EXTENSION)
     return [f"double extension (e.g. invoice.pdf.exe): {n}" for n in names]
 
 
 def type_mismatch(ctx: ScoringContext) -> list[str]:
-    from phishbowl.models import AttachmentFlag
-
     names = _attachments_with(ctx, AttachmentFlag.TYPE_MISMATCH)
     return [f"declared content-type ≠ detected magic bytes: {n}" for n in names]
 
 
 def executable(ctx: ScoringContext) -> list[str]:
-    from phishbowl.models import AttachmentFlag
-
     names = _attachments_with(ctx, AttachmentFlag.EXECUTABLE)
     return [f"executable / script / LNK / disk-image attachment: {n}" for n in names]
 
 
 def password_protected_archive(ctx: ScoringContext) -> list[str]:
-    from phishbowl.models import AttachmentFlag
-
     names = _attachments_with(ctx, AttachmentFlag.PASSWORD_PROTECTED)
     return [f"password-protected archive (evades scanning): {n}" for n in names]
+
+
+def html_attachment(ctx: ScoringContext) -> list[str]:
+    """HTML/SVG attachments: a browser renders them outside the mail client.
+
+    Attached web pages are a common credential-phishing and HTML-smuggling
+    vector: a local form that posts credentials, or script that assembles a
+    payload on open. The file is only flagged here, never opened.
+    """
+    names = _attachments_with(ctx, AttachmentFlag.HTML)
+    return [f"HTML/SVG document attachment (opens in a browser): {n}" for n in names]
 
 
 def archive(ctx: ScoringContext) -> list[str]:
     """Plain archive attachments (zip/rar/7z/…) — a common phish delivery vector.
 
-    Password-protected archives are scored separately (and more heavily) by
-    ``attach.password_protected_archive``; this rule covers the generic case so
-    a plain ``invoice.zip`` still nudges the verdict. Anti-double-counting: the
-    engine fires each rule at most once, and the two flags are independent.
+    Password-protected archives are scored by the heavier
+    ``attach.password_protected_archive`` instead, so an encrypted zip is not
+    counted twice; this rule covers the unencrypted case.
     """
-    from phishbowl.models import AttachmentFlag
-
-    names = _attachments_with(ctx, AttachmentFlag.ARCHIVE)
+    names = [
+        a.filename or "(unnamed)"
+        for a in ctx.parsed.attachments
+        if AttachmentFlag.ARCHIVE in a.flags and AttachmentFlag.PASSWORD_PROTECTED not in a.flags
+    ]
     return [f"archive attachment (common delivery vector): {n}" for n in names]
 
 
@@ -607,10 +723,16 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
         sender_mismatch,
     ),
     DetectorSpec(
-        "identity.freemail_brand",
-        "Freemail sender claims to be a company/brand",
+        "identity.freemail_role",
+        "Freemail sender presents as an organizational role",
         RuleSource.OFFLINE,
-        freemail_brand,
+        freemail_role,
+    ),
+    DetectorSpec(
+        "identity.multiple_from",
+        "Message carries more than one From header",
+        RuleSource.OFFLINE,
+        multiple_from,
     ),
     DetectorSpec(
         "identity.display_name_is_email",
@@ -628,7 +750,7 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
     ),
     DetectorSpec(
         "url.lookalike",
-        "Lookalike domain (edit distance) to a known brand/org",
+        "Lookalike of a known brand or org domain",
         RuleSource.OFFLINE,
         lookalike,
     ),
@@ -644,7 +766,7 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
     DetectorSpec("url.shortener", "URL shortener present", RuleSource.OFFLINE, shortener),
     DetectorSpec(
         "url.credential_keywords",
-        "Credential-harvest keywords in URL path",
+        "Credential-harvest keywords in a URL path or query",
         RuleSource.OFFLINE,
         credential_keywords,
     ),
@@ -681,6 +803,12 @@ OFFLINE_DETECTORS: tuple[DetectorSpec, ...] = (
         "Password-protected archive (evades scanning)",
         RuleSource.OFFLINE,
         password_protected_archive,
+    ),
+    DetectorSpec(
+        "attach.html",
+        "HTML or SVG document attachment",
+        RuleSource.OFFLINE,
+        html_attachment,
     ),
     DetectorSpec(
         "attach.archive",

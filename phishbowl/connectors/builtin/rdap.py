@@ -7,7 +7,9 @@ modern, structured, JSON successor to WHOIS — and flags domains younger than 3
 days.
 
 RDAP is **keyless** and a *passive registry lookup*: it queries the registry's
-RDAP service for the domain, never the suspicious site itself. Discovery goes
+RDAP service for the registered domain (``login.evil.example`` is looked up as
+``evil.example``, since registries hold no records for subdomains), never the
+suspicious site itself. Discovery goes
 through ``rdap.org``, the community RDAP redirector, which forwards to the
 authoritative registry for the TLD (per the IANA bootstrap registry). Because
 RDAP bootstrapping is inherently a cross-host redirect to the *registry*, this
@@ -22,8 +24,11 @@ never fetched. The SSRF guarantee holds (PRD §9).
 
 from __future__ import annotations
 
-from datetime import datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from urllib.parse import quote
 
+from phishbowl.domains import registrable_domain
 from phishbowl.models import IOCType
 
 from ..base import (
@@ -35,18 +40,23 @@ from ..base import (
     Indicator,
 )
 from ..errors import ConnectorError
+from ..http import json_object
 from ..registry import register
 
 _SIGNAL_ID = "enrichment.rdap.young_domain"
 _YOUNG_DOMAIN_DAYS = 30
+# A registration date further in the future than clock skew explains is bad data.
+_CLOCK_SKEW = timedelta(days=1)
 
 
 def _parse_rdap_date(value: str) -> datetime | None:
+    """An RDAP event date as an aware datetime (a date without an offset is UTC)."""
     raw = value.strip().replace("Z", "+00:00")
     try:
-        return datetime.fromisoformat(raw)
+        parsed = datetime.fromisoformat(raw)
     except ValueError:
         return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _registration_date(events: list) -> datetime | None:
@@ -63,7 +73,7 @@ def _registration_date(events: list) -> datetime | None:
 @register
 class RDAPConnector(Connector):
     name = "rdap"
-    version = "1.0.0"
+    version = "1.1.1"
     supported_ioc_types = frozenset({IOCType.DOMAIN.value})
     requires_api_key = False
     allowed_hosts = frozenset({"rdap.org"})
@@ -75,19 +85,28 @@ class RDAPConnector(Connector):
     # cross-host redirect (https only, exactly one request, no further hops).
     bootstrap_redirect = True
 
+    def prepare(self, indicator: Indicator) -> Indicator | None:
+        """Query the registered domain: registries have no records for subdomains."""
+        domain = registrable_domain(indicator.value)
+        if "." not in domain:
+            return None
+        return replace(indicator, value=domain, defanged=domain.replace(".", "[.]"))
+
     async def enrich(self, indicator: Indicator, ctx: EnrichContext) -> EnrichmentResult:
-        response = await ctx.http.get(f"{self.base_url}/domain/{indicator.value}")
+        response = await ctx.http.get(f"{self.base_url}/domain/{quote(indicator.value, safe='')}")
         if response.status_code == 404:
             # No RDAP record (unregistered / unsupported TLD) — nothing to assert.
             return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, None)
         if response.status_code != 200:
             raise ConnectorError(f"RDAP returned HTTP {response.status_code}")
 
-        registered = _registration_date(response.json().get("events", []))
-        if registered is None:
+        events = json_object(response, "RDAP").get("events")
+        registered = _registration_date(events if isinstance(events, list) else [])
+        now = ctx.now()
+        if registered is None or registered > now + _CLOCK_SKEW:
             return self._result(indicator, EnrichmentVerdict.UNKNOWN, None, None)
 
-        age_days = (ctx.now() - registered).days
+        age_days = (now - registered).days
         if age_days < _YOUNG_DOMAIN_DAYS:
             signal = EnrichmentSignal(
                 id=_SIGNAL_ID,
@@ -114,6 +133,6 @@ class RDAPConnector(Connector):
             indicator=indicator.value,
             verdict=verdict,
             signals=(signal,) if signal else (),
-            references=(f"https://rdap.org/domain/{indicator.value}",),
+            references=(f"https://rdap.org/domain/{quote(indicator.value, safe='')}",),
             raw={"registration": registered.isoformat()} if registered else None,
         )

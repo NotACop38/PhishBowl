@@ -1,43 +1,58 @@
-# Contributing to Phishbowl
+# Contributing to PhishBowl
 
-Thanks for your interest! Phishbowl is an early, phase-by-phase build. Please
-read [`docs/PRD.md`](docs/PRD.md) (the product spec) and
-[`CLAUDE.md`](CLAUDE.md) (the invariants and working rules) first — together
-with [`docs/CHECKLIST.md`](docs/CHECKLIST.md) they are the source of truth.
+Thanks for your interest. Before you start, read [`AGENTS.md`](AGENTS.md) (the
+defensive invariants and working rules) and the parts of [`docs/PRD.md`](docs/PRD.md)
+(the product specification) that touch your change.
 
-## 🚫 Never commit real phishing samples
+## Never commit real phishing samples
 
-This is the single most important rule in the project.
+This is the most important rule in the project.
 
-**All fixtures and sample emails MUST be synthetic** — authored by us, using
-`example.com`-class indicators and obviously-fake malicious markers.
+**Every fixture and sample email must be synthetic**: written by you, using reserved
+example indicators (`example.com`, `.example`, and the documentation IP ranges
+`192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`) and obviously fake malicious
+markers.
 
 **Never commit a real phishing email.** Real samples can carry:
 
-- **live links** to attacker infrastructure (opening or leaking them can tip off the attacker or harm victims),
-- **real PII** belonging to the people who were targeted,
+- **live links** to attacker infrastructure (opening or leaking them can alert the
+  attacker or harm victims);
+- **real personal data** belonging to the people who were targeted;
 - **actual malware** in their attachments.
 
-Committing one is a security and privacy incident, not a shortcut. If you need
-a sample to demonstrate a detection, **synthesize** one. Pull requests that add
-real samples will be rejected.
+Committing one is a security and privacy incident, not a shortcut. If you need a sample
+to demonstrate a detection, synthesize one. Pull requests that add real samples will be
+rejected. `tests/fixtures/build_synthetic_msg.py` shows how to build synthetic Outlook
+`.msg` files.
 
 ## Defensive scope
 
-Phishbowl is **defensive-only**. It never sends, never detonates attachments,
-never fetches the analyzed email's URLs, and never auto-remediates — and the
-HTML report does zero network egress when opened. Every contribution must
-preserve these invariants (see [`CLAUDE.md`](CLAUDE.md)).
+PhishBowl is defensive-only. It never sends, never detonates attachments, never fetches
+the analyzed email's URLs, and never auto-remediates, and the HTML report makes no
+network requests when opened. Every contribution must preserve these invariants, which
+the test suite enforces.
 
 ## Development
 
 ```bash
 pip install -e ".[dev]"
-make test     # routine gate — keep it green
-make lint
-make format
+make test         # the routine gate: keep it green
+make lint         # ruff check
+make format       # ruff format
+make screenshot   # regenerate the README images (needs the Playwright CLI)
 ```
 
-- Build one phase at a time per [`docs/CHECKLIST.md`](docs/CHECKLIST.md); don't jump ahead.
-- Add tests alongside each feature.
-- `make test` must be green before a change is considered done.
+- Add or update tests with every change, including the unhappy paths: malformed input,
+  hostile content, and failing services. Tests never reach the network; connectors are
+  tested with mocked transports.
+- Keep documentation in step with behavior: the README, the guides under `docs/`, and
+  `CHANGELOG.md` (under *Unreleased*).
+- CI stays minimal: no new GitHub Actions, coverage gates, or type checkers. Bandit and
+  pip-audit run once, in the dedicated security step described in
+  [`SECURITY.md`](SECURITY.md).
+- To add an enrichment connector, follow [`docs/CONNECTORS.md`](docs/CONNECTORS.md).
+
+## Reporting security issues
+
+Report vulnerabilities privately, as described in [`SECURITY.md`](SECURITY.md), not in
+a public issue.

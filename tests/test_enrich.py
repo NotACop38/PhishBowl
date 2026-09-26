@@ -21,12 +21,14 @@ HTTP — no live calls ever leave the process**:
   signal, defanged.
 
 Crafted inputs use reserved example-only values (RFC 2606 / RFC 5737) and
-obviously-fake markers — never a real sample (CLAUDE.md).
+obviously-fake markers — never a real sample (AGENTS.md).
 """
 
 from __future__ import annotations
 
 import io
+import json
+import logging
 import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,9 +52,9 @@ from phishbowl.connectors import (
 from phishbowl.connectors import registry as registry_mod
 from phishbowl.connectors.base import ConnectorOutcome, EnrichmentSignal
 from phishbowl.connectors.cache import EnrichmentCache
-from phishbowl.connectors.errors import SSRFGuardError
+from phishbowl.connectors.errors import RateLimitedError, SSRFGuardError
 from phishbowl.connectors.http import AllowlistedClient
-from phishbowl.connectors.secrets import ENV_KEYS, scrub_secrets
+from phishbowl.connectors.secrets import scrub_secrets
 from phishbowl.connectors.targets import sending_ips
 from phishbowl.extract import extract_iocs
 from phishbowl.parse import parse, parse_eml
@@ -60,6 +62,9 @@ from phishbowl.report import build_report, render_cli, render_html, render_json
 from phishbowl.score import RuleSource, load_config, score_email
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# Every bundled connector's API-key environment variable, keyed by connector.
+ENV_KEYS = {name: cls.api_key_env for name, cls in discover().items() if cls.api_key_env}
 MALICIOUS = FIXTURES / "crafted_malicious.eml"
 BENIGN = FIXTURES / "benign_newsletter.eml"
 
@@ -1303,3 +1308,613 @@ def test_urlscan_active_submission_does_not_reuse_or_replace_passive_cache(tmp_p
     assert calls == ["GET", "POST"]
     assert passive.status_for("urlscan").cache_hits == 1
     assert passive.results[0].references == ()
+
+
+# --------------------------------------------------------------------------- #
+# Quality-review regressions                                                  #
+# --------------------------------------------------------------------------- #
+
+
+class _KeyedThirdPartyConnector(Connector):
+    name = "acmerep"
+    supported_ioc_types = frozenset({"domain"})
+    requires_api_key = True
+    api_key_env = "ACMEREP_API_KEY"
+    allowed_hosts = frozenset({"api.acme-rep.example"})
+    base_url = "https://api.acme-rep.example/v1"
+
+    async def enrich(self, indicator: Indicator, ctx) -> EnrichmentResult:
+        response = await ctx.http.get(
+            f"{self.base_url}/domain/{indicator.value}",
+            headers={"Authorization": f"Bearer {ctx.api_key}"},
+        )
+        return EnrichmentResult(
+            self.name, indicator.type, indicator.value, raw={"echo": response.text}
+        )
+
+
+def test_third_party_connector_reads_its_declared_env_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_ep = types.SimpleNamespace(name="acmerep", load=lambda: _KeyedThirdPartyConnector)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    monkeypatch.setenv("ACMEREP_API_KEY", _SENTINEL + "-acme")
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, text=f"echo {request.headers['Authorization']}")
+
+    settings = make_settings(handler, select=frozenset({"acmerep"}), api_keys={})
+    report = run_enrichment([Indicator("domain", "evil.example", "evil[.]example")], settings)
+
+    status = report.status_for("acmerep")
+    assert status.outcome is ConnectorOutcome.USED
+    assert seen == [f"Bearer {_SENTINEL}-acme"]
+    # The declared variable's value is scrubbed like a bundled connector's key.
+    assert _SENTINEL not in json.dumps(status.results[0].raw)
+
+
+def test_keyed_connector_without_an_env_var_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _NoEnv(_KeyedThirdPartyConnector):
+        name = "noenv"
+        api_key_env = ""
+
+    fake_ep = types.SimpleNamespace(name="noenv", load=lambda: _NoEnv)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    settings = make_settings(lambda r: httpx.Response(500), select=frozenset({"noenv"}))
+    status = run_enrichment([Indicator("domain", "a.example", "a[.]example")], settings)
+    assert status.status_for("noenv").note == "skipped — no API key (none configured)"
+
+
+def test_rdap_queries_each_registered_domain_once() -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return rdap_response("2026-05-30T00:00:00Z")(request)
+
+    settings = make_settings(handler, select=frozenset({"rdap"}))
+    report = run_enrichment(
+        [
+            Indicator("domain", "login.evil.co.uk", "login[.]evil[.]co[.]uk"),
+            Indicator("domain", "mail.evil.co.uk", "mail[.]evil[.]co[.]uk"),
+        ],
+        settings,
+    )
+
+    assert requested == ["/domain/evil.co.uk"]
+    [result] = report.status_for("rdap").results
+    assert result.indicator == "evil.co.uk"
+    assert "evil[.]co[.]uk registered" in result.signals[0].evidence
+
+
+def test_rdap_date_without_offset_is_read_as_utc() -> None:
+    status = run_one(
+        "rdap",
+        Indicator("domain", "new.example", "new[.]example"),
+        rdap_response("2026-05-30T00:00:00"),
+    )
+    assert status.outcome is ConnectorOutcome.USED
+    assert status.results[0].signals[0].id == "enrichment.rdap.young_domain"
+
+
+def test_existing_cache_root_permissions_are_left_alone(tmp_path: Path) -> None:
+    import stat
+
+    shared = tmp_path / "shared"
+    shared.mkdir(mode=0o755)
+    shared.chmod(0o755)
+    EnrichmentCache(shared, enabled=True, now=_fixed_now).put(
+        EnrichmentResult("rdap", "domain", "d.example", verdict=EnrichmentVerdict.BENIGN)
+    )
+    assert stat.S_IMODE(shared.stat().st_mode) == 0o755
+    assert stat.S_IMODE((shared / "rdap").stat().st_mode) == 0o700
+
+
+# --------------------------------------------------------------------------- #
+# 11. Hostile vendors, broken connectors, and bounded egress                  #
+# --------------------------------------------------------------------------- #
+
+
+def _client_get(client: AllowlistedClient, url: str):
+    import asyncio
+
+    async def go():
+        try:
+            return await client.get(url)
+        finally:
+            await client.aclose()
+
+    return asyncio.run(go())
+
+
+def test_plain_http_vendor_urls_are_refused() -> None:
+    # A plaintext request would expose the API key and the result on the wire.
+    calls: list[str] = []
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"api.vendor.example"}),
+        transport=httpx.MockTransport(lambda r: calls.append(str(r.url)) or httpx.Response(200)),
+    )
+    with pytest.raises(SSRFGuardError):
+        _client_get(client, "http://api.vendor.example/v1/lookup")
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "https://10.0.0.5/domain/x.example",
+        "https://[::1]/domain/x.example",
+        "https://2130706433/domain/x.example",
+        "https://8.8.8.8/domain/x.example",
+        "https://rdap.localhost/domain/x.example",
+        "https://intranet/domain/x.example",
+    ],
+)
+def test_bootstrap_redirect_never_designates_an_ip_or_local_host(location: str) -> None:
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        return httpx.Response(302, headers={"Location": location})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+    )
+    with pytest.raises(SSRFGuardError):
+        _client_get(client, "https://rdap.org/domain/x.example")
+    assert seen_hosts == ["rdap.org"]
+
+
+def test_bootstrap_designated_host_is_not_retried() -> None:
+    seen_hosts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_hosts.append(request.url.host)
+        if request.url.host == "rdap.org":
+            return httpx.Response(302, headers={"Location": "https://rdap.registry.example/d"})
+        return httpx.Response(429)
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+        sleep=_nosleep,
+        max_retries=3,
+    )
+    with pytest.raises(RateLimitedError) as excinfo:
+        _client_get(client, "https://rdap.org/domain/x.example")
+    assert seen_hosts == ["rdap.org", "rdap.registry.example"]
+    # The error names the host, never the path that carried the indicator.
+    assert str(excinfo.value).startswith("rdap.registry.example ")
+    assert "/d" not in str(excinfo.value)
+
+
+@pytest.mark.parametrize("header", ["nan", "inf", "-inf", "Wed, 21 Oct 2026 07:28:00 GMT"])
+def test_unusable_retry_after_falls_back_to_exponential_backoff(header: str) -> None:
+    sleeps: list[float] = []
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, headers={"Retry-After": header})
+
+    target = Indicator("domain", "x.example", "x[.]example")
+    settings = make_settings(handler, select=frozenset({"rdap"}), sleep=record_sleep, max_retries=2)
+    status = run_enrichment([target], settings).status_for("rdap")
+    assert sleeps == [1.0, 2.0]
+    assert status.outcome is ConnectorOutcome.FAILED
+    assert "/domain/" not in status.note  # host only, never the indicator path
+
+
+def test_a_connector_that_cannot_be_constructed_fails_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BrokenInit(Connector):
+        name = "broken-init"
+        supported_ioc_types = frozenset({"domain"})
+        requires_api_key = False
+        allowed_hosts = frozenset({"api.broken.example"})
+
+        def __init__(self) -> None:
+            raise RuntimeError("misconfigured plugin")
+
+        async def enrich(self, indicator: Indicator, ctx) -> EnrichmentResult:  # pragma: no cover
+            raise AssertionError("never constructed")
+
+    fake_ep = types.SimpleNamespace(name="broken-init", load=lambda: _BrokenInit)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    settings = make_settings(
+        rdap_response("2026-05-30T00:00:00Z"), select=frozenset({"rdap", "broken-init"})
+    )
+    report = run_enrichment([Indicator("domain", "new.example", "new[.]example")], settings)
+
+    assert report.status_for("broken-init").outcome is ConnectorOutcome.FAILED
+    assert report.status_for("broken-init").note == "failed — unexpected connector error"
+    # The healthy connector still delivered its result.
+    assert report.status_for("rdap").outcome is ConnectorOutcome.USED
+
+
+def test_abstract_connectors_are_rejected_at_registration() -> None:
+    class _Incomplete(Connector):
+        name = "incomplete"
+
+    with pytest.raises(ValueError, match="abstract"):
+        registry_mod.register(_Incomplete)
+
+
+def test_capped_runs_say_how_many_indicators_were_not_queried() -> None:
+    targets = [Indicator("domain", f"d{i}.example", f"d{i}[.]example") for i in range(5)]
+    settings = make_settings(
+        rdap_response("1998-01-01T00:00:00Z"), select=frozenset({"rdap"}), max_indicators=2
+    )
+    status = run_enrichment(targets, settings).status_for("rdap")
+    assert status.queried == 2
+    assert status.note.endswith("; 3 more not queried (limit 2 per run)")
+
+
+def test_run_enrichment_works_inside_a_running_event_loop() -> None:
+    import asyncio
+
+    settings = make_settings(rdap_response("2026-05-30T00:00:00Z"), select=frozenset({"rdap"}))
+
+    async def caller() -> EnrichmentReport:
+        # A synchronous caller that happens to run inside a loop (a notebook
+        # cell, an async web handler) cannot re-enter it.
+        return run_enrichment([Indicator("domain", "new.example", "new[.]example")], settings)
+
+    report = asyncio.run(caller())
+    assert report.status_for("rdap").outcome is ConnectorOutcome.USED
+
+
+def test_cache_ignores_entries_for_another_key_or_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+
+    cache = EnrichmentCache(tmp_path, enabled=True, now=_fixed_now)
+    cache.put(
+        EnrichmentResult("rdap", "domain", "planted.example", verdict=EnrichmentVerdict.BENIGN),
+        version="1.0",
+    )
+    planted = cache._path("rdap", "domain", "planted.example", "1.0")
+    assert cache.get("rdap", "domain", "planted.example", ttl=3600, version="1.0") is not None
+
+    # A result filed under another indicator's key is not that indicator's answer.
+    target = cache._path("rdap", "domain", "victim.example", "1.0")
+    target.write_bytes(planted.read_bytes())
+    assert cache.get("rdap", "domain", "victim.example", ttl=3600, version="1.0") is None
+
+    # A connector upgrade never reads its predecessor's results.
+    assert cache.get("rdap", "domain", "planted.example", ttl=3600, version="1.1") is None
+
+    # Nor does anyone else's file count, or a link to one.
+    link = cache._path("rdap", "domain", "linked.example", "1.0")
+    link.symlink_to(planted)
+    assert cache.get("rdap", "domain", "linked.example", ttl=3600, version="1.0") is None
+    monkeypatch.setattr(os, "getuid", lambda: os.stat(planted).st_uid + 1, raising=False)
+    assert cache.get("rdap", "domain", "planted.example", ttl=3600, version="1.0") is None
+
+
+def test_settings_and_context_reprs_never_show_keys() -> None:
+    from phishbowl.connectors.base import EnrichContext
+
+    settings = EnrichmentSettings(api_keys={"virustotal": "vt-secret-value"})
+    context = EnrichContext(http=None, settings=settings, api_key="vt-secret-value")  # type: ignore[arg-type]
+    assert "vt-secret-value" not in repr(settings)
+    assert "vt-secret-value" not in repr(context)
+
+
+def test_scrub_replaces_the_longest_overlapping_secret_whole() -> None:
+    secrets = frozenset({"key123", "key123456"})
+    assert scrub_secrets("token=key123456;", secrets) == "token=[redacted];"
+
+
+def _vt(stats) -> httpx.Response:
+    return httpx.Response(200, json={"data": {"attributes": {"last_analysis_stats": stats}}})
+
+
+def test_virustotal_ratio_counts_only_engines_that_returned_a_verdict() -> None:
+    stats = {"malicious": 2, "suspicious": 0, "harmless": 3, "undetected": 5, "timeout": 20}
+    status = run_one(
+        "virustotal", Indicator("domain", "evil.example", "evil[.]example"), lambda r: _vt(stats)
+    )
+    signal = status.results[0].signals[0]
+    assert signal.magnitude == pytest.approx(0.2)
+    assert "2/10 engines" in signal.evidence
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _vt(None),
+        _vt({"malicious": None, "harmless": "many", "undetected": -1}),
+        httpx.Response(200, json={"data": None}),
+        httpx.Response(200, json=[1, 2, 3]),
+    ],
+)
+def test_virustotal_malformed_answers_are_unknown_not_a_crash(response) -> None:
+    status = run_one(
+        "virustotal", Indicator("domain", "evil.example", "evil[.]example"), lambda r: response
+    )
+    if status.outcome is ConnectorOutcome.USED:
+        assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+        assert status.results[0].signals == ()
+    else:
+        assert status.note == "failed — VirusTotal returned an unexpected JSON document"
+
+
+def test_virustotal_only_timeouts_is_unknown_not_benign() -> None:
+    status = run_one(
+        "virustotal",
+        Indicator("domain", "evil.example", "evil[.]example"),
+        lambda r: _vt({"timeout": 70, "type-unsupported": 3}),
+    )
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+
+
+def test_non_json_vendor_body_soft_fails_with_a_clear_note() -> None:
+    status = run_one(
+        "virustotal",
+        Indicator("domain", "evil.example", "evil[.]example"),
+        lambda r: httpx.Response(200, text="<html>maintenance</html>"),
+    )
+    assert status.outcome is ConnectorOutcome.FAILED
+    assert status.note == "failed — VirusTotal returned a non-JSON response"
+
+
+def test_abuseipdb_without_a_score_is_unknown_not_benign() -> None:
+    status = run_one(
+        "abuseipdb",
+        Indicator("ipv4", "8.8.8.8", "8[.]8[.]8[.]8"),
+        lambda r: httpx.Response(200, json={"data": {"totalReports": 0}}),
+    )
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+    assert status.results[0].signals == ()
+
+
+def _urlscan(*results) -> httpx.Response:
+    return httpx.Response(200, json={"results": list(results)})
+
+
+def test_urlscan_prefers_a_malicious_scan_over_a_higher_benign_score() -> None:
+    url = "https://evil.example/a?t=1"
+    response = _urlscan(
+        {"verdicts": {"overall": {"malicious": False, "score": 50}}},
+        {"task": {"url": url}, "verdicts": {"overall": {"malicious": True, "score": 0}}},
+    )
+    status = run_one(
+        "urlscan", Indicator("url", url, "hxxps://evil[.]example/a?t=1"), lambda r: response
+    )
+    signal = status.results[0].signals[0]
+    assert status.results[0].verdict is EnrichmentVerdict.MALICIOUS
+    assert signal.magnitude == 1.0  # a scan of this very URL
+
+
+def test_urlscan_evidence_about_another_page_on_the_host_counts_half() -> None:
+    response = _urlscan(
+        {
+            "task": {"url": "https://shared.example/someone-else"},
+            "verdicts": {"overall": {"malicious": True, "score": 100}},
+        }
+    )
+    status = run_one(
+        "urlscan",
+        Indicator("url", "https://shared.example/mine", "hxxps://shared[.]example/mine"),
+        lambda r: response,
+    )
+    signal = status.results[0].signals[0]
+    assert signal.magnitude == 0.5
+    assert "another page on shared[.]example" in signal.evidence
+
+
+def test_urlscan_keeps_only_urlscan_result_links() -> None:
+    response = _urlscan(
+        {"result": "javascript:alert(1)"},
+        {"result": "https://evil.example/fake-result"},
+        {"result": "https://urlscan.io/result/abc/"},
+    )
+    status = run_one(
+        "urlscan",
+        Indicator("url", "https://evil.example/a", "hxxps://evil[.]example/a"),
+        lambda r: response,
+    )
+    assert status.results[0].references == ("https://urlscan.io/result/abc/",)
+
+
+def test_shodan_ignores_ports_that_are_not_ports() -> None:
+    status = run_one(
+        "shodan",
+        Indicator("ipv4", "8.8.8.8", "8[.]8[.]8[.]8"),
+        lambda r: httpx.Response(200, json={"ports": [True, -22, 70000, "3389", 22.0, 22]}),
+    )
+    assert status.results[0].raw == {"ports": [22]}
+
+
+def test_rdap_registration_in_the_future_is_unknown() -> None:
+    status = run_one(
+        "rdap",
+        Indicator("domain", "odd.example", "odd[.]example"),
+        rdap_response("2030-01-01T00:00:00Z"),
+    )
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+    assert status.results[0].signals == ()
+
+
+# --------------------------------------------------------------------------- #
+# 12. Review regressions: host derivation, queue order, pacing, hostile data   #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://attacker.example\\@intranet.corp.example/login",
+        "https://attacker.example\\@10.0.0.5/login",
+    ],
+)
+def test_urlscan_searches_the_host_the_filter_checked(url: str) -> None:
+    queries: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        queries.append(request.url.params.get("q", ""))
+        return httpx.Response(200, json={"results": []})
+
+    config = load_config(overrides={"org_domains": ["corp.example"]})
+    raw = (
+        "From: a@sender.example\r\nTo: b@corp.example\r\nSubject: t\r\n"
+        "Content-Type: text/plain\r\n\r\n" + url + "\r\n"
+    ).encode()
+    from phishbowl.pipeline import triage
+
+    settings = make_settings(handler, select=frozenset({"urlscan"}))
+    triage(parse_eml(raw), config=config, enrichment_settings=settings)
+    # A browser reads "\" as "/": the host is attacker.example, which is what
+    # the filter approved and what urlscan may search. Nothing else leaves.
+    assert queries == ['page.domain:"attacker.example"']
+
+
+@pytest.mark.parametrize("url", ["https://printer.local/", "https://10.0.0.5/x"])
+def test_urlscan_never_queries_a_non_public_host(url: str) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json={"results": []})
+
+    status = run_one("urlscan", Indicator("url", url, url), handler)
+    assert calls == []
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+
+
+def test_hash_shaped_text_cannot_push_links_past_the_cap() -> None:
+    padding = " ".join(f"{i:032x}" for i in range(1, 13))  # 12 MD5-shaped strings
+    raw = (
+        "From: a@sender.example\r\nSubject: t\r\nContent-Type: text/plain\r\n\r\n"
+        f"{padding}\r\nhttps://phish.example/login\r\n"
+    ).encode()
+    parsed = parse_eml(raw)
+    targets = build_targets(parsed, extract_iocs(parsed))
+    # Only attachment hashes jump the queue: the link keeps its collection-order
+    # place within VirusTotal's per-run budget of 12 lookups.
+    virustotal = [t for t in targets if t.type in {"url", "domain", "hash"}][:12]
+    assert "https://phish.example/login" in {t.value for t in virustotal}
+
+
+def test_attachment_hashes_still_go_first() -> None:
+    raw = (
+        b"From: a@sender.example\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain\r\n\r\nhttps://phish.example/login\r\n"
+        b"--b\r\nContent-Type: application/pdf\r\n"
+        b"Content-Disposition: attachment; filename=a.pdf\r\n\r\n%PDF-1.4\r\n--b--\r\n"
+    )
+    parsed = parse_eml(raw)
+    targets = build_targets(parsed, extract_iocs(parsed))
+    assert targets[0].type == "hash"
+    assert targets[0].value == parsed.attachments[0].sha256
+
+
+def test_a_connector_that_stays_rate_limited_is_not_asked_again() -> None:
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request.url.path)
+        return httpx.Response(429, headers={"Retry-After": "30"})
+
+    targets = [Indicator("domain", f"d{i}.example", f"d{i}[.]example") for i in range(6)]
+    settings = make_settings(handler, select=frozenset({"virustotal"}), max_retries=3)
+    status = run_enrichment(targets, settings).status_for("virustotal")
+    assert len(requests) == 4  # one indicator: the request and its three retries
+    assert status.outcome is ConnectorOutcome.FAILED
+    assert status.queried == 1
+    assert status.note.endswith("; 5 more not queried (rate-limited)")
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, json={"data": {"abuseConfidenceScore": 10**400}}),
+        httpx.Response(200, content=b"[" * 100_000 + b"]" * 100_000),
+    ],
+)
+def test_absurd_vendor_json_is_unknown_or_a_soft_failure(response) -> None:
+    status = run_one("abuseipdb", Indicator("ipv4", "8.8.8.8", "8[.]8[.]8[.]8"), lambda r: response)
+    if status.outcome is ConnectorOutcome.USED:
+        assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+    else:
+        assert status.note == "failed — AbuseIPDB returned a non-JSON response"
+
+
+def test_urlscan_ignores_scan_urls_that_are_not_strings() -> None:
+    response = _urlscan(
+        {"task": {"url": ["a"]}, "page": {"url": {"b": 1}}, "verdicts": {"overall": {}}}
+    )
+    status = run_one(
+        "urlscan",
+        Indicator("url", "https://evil.example/a", "hxxps://evil[.]example/a"),
+        lambda r: response,
+    )
+    assert status.outcome is ConnectorOutcome.USED
+    assert status.results[0].verdict is EnrichmentVerdict.UNKNOWN
+
+
+def test_bootstrap_designated_host_gets_no_caller_headers() -> None:
+    seen: dict[str, str | None] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.host] = request.headers.get("X-Api-Key")
+        if request.url.host == "rdap.org":
+            return httpx.Response(302, headers={"Location": "https://rdap.registry.example/d"})
+        return httpx.Response(200, json={})
+
+    client = AllowlistedClient(
+        allowed_hosts=frozenset({"rdap.org"}),
+        transport=httpx.MockTransport(handler),
+        bootstrap_redirect=True,
+    )
+    import asyncio
+
+    async def go() -> None:
+        try:
+            await client.get("https://rdap.org/domain/x.example", headers={"X-Api-Key": "k-123"})
+        finally:
+            await client.aclose()
+
+    asyncio.run(go())
+    assert seen == {"rdap.org": "k-123", "rdap.registry.example": None}
+
+
+def test_percent_encoded_keys_are_scrubbed_from_http_logs(
+    caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from urllib.parse import quote
+
+    class _QueryKey(Connector):
+        name = "querykey-test"
+        supported_ioc_types = frozenset({"ipv4"})
+        api_key_env = "QUERYKEY_TEST_API_KEY"
+        allowed_hosts = frozenset({"api.querykey.example"})
+
+        async def enrich(self, indicator: Indicator, ctx) -> EnrichmentResult:
+            await ctx.http.get(
+                f"https://api.querykey.example/ip/{indicator.value}", params={"key": ctx.api_key}
+            )
+            return EnrichmentResult(self.name, indicator.type, indicator.value)
+
+    fake_ep = types.SimpleNamespace(name="querykey-test", load=lambda: _QueryKey)
+    monkeypatch.setattr(registry_mod, "_iter_entry_points", lambda: [fake_ep])
+    secret = "Zm9v+YmFy/c2VjcmV0=="  # a base64-style key httpx must percent-encode
+    settings = make_settings(
+        lambda r: httpx.Response(200, json={}),
+        select=frozenset({"querykey-test"}),
+        api_keys={"querykey-test": secret},
+    )
+    with caplog.at_level(logging.DEBUG):
+        run_enrichment([Indicator("ipv4", "198.51.100.7", "198[.]51[.]100[.]7")], settings)
+    logged = "\n".join(record.getMessage() for record in caplog.records)
+    assert "api.querykey.example" in logged
+    assert secret not in logged and quote(secret, safe="") not in logged

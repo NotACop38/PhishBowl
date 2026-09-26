@@ -2,7 +2,7 @@
 
 Every tunable number and list the scorer needs lives in an editable YAML file
 (``defaults.yaml`` next to this module): rule weights, verdict bands, and the
-supporting lists (freemail providers, URL shorteners, credential/urgency
+supporting lists (freemail providers, URL shorteners, credential/urgency/role
 keywords, the bundled brand-impersonation list, and operator org domains).
 
 The **override mechanism** is a deep merge: load the bundled defaults, then
@@ -16,11 +16,14 @@ precedence:
 4. an explicit ``overrides=`` dict argument to :func:`load_config`
 
 Loading is offline and side-effect free — it reads local YAML only and never
-touches the network (CLAUDE.md).
+touches the network (AGENTS.md). Validation is strict: an unknown rule id, a
+non-numeric weight, or a scalar where a list belongs raises :class:`ValueError`
+naming the key, because a silently ignored typo would quietly change verdicts.
 """
 
 from __future__ import annotations
 
+import difflib
 import math
 import os
 from collections.abc import Mapping
@@ -29,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from phishbowl.domains import normalize_domain_pattern
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("defaults.yaml")
 
@@ -61,15 +66,15 @@ class ScoringConfig:
     url_shorteners: frozenset[str]
     credential_keywords: tuple[str, ...]
     urgency_keywords: tuple[str, ...]
+    role_keywords: tuple[str, ...]
     brands: dict[str, frozenset[str]]
     org_domains: frozenset[str]
 
     def weight(self, rule_id: str) -> float:
         """Weight for ``rule_id``; ``0.0`` if the rule isn't in the config.
 
-        A rule absent from ``weights`` is effectively disabled (it can fire but
-        contributes nothing), which is the intended way to switch a rule off via
-        config without code changes.
+        A rule weighted 0 still fires and reports its evidence, at +0: that is
+        how a rule is switched off without hiding what it observed.
         """
         return float(self.weights.get(rule_id, 0.0))
 
@@ -85,16 +90,44 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
     out = dict(base)
     for key, value in override.items():
         existing = out.get(key)
-        if isinstance(existing, dict) and isinstance(value, Mapping):
+        if isinstance(existing, dict) and value is None:
+            # An empty "weights:" key would otherwise zero every rule silently.
+            raise ValueError(f"'{key}' is empty; remove the key or give it entries")
+        if isinstance(existing, dict) and not isinstance(value, Mapping):
+            # "weights: []" (or 0, "") must not silently replace every weight.
+            raise ValueError(f"'{key}' must be a mapping, got {type(value).__name__}")
+        if isinstance(existing, dict):
             out[key] = _deep_merge(existing, value)
         else:
             out[key] = value
     return out
 
 
+# Top-level keys a scoring config may set.
+_LIST_KEYS = (
+    "freemail_domains",
+    "url_shorteners",
+    "credential_keywords",
+    "urgency_keywords",
+    "role_keywords",
+    "org_domains",
+)
+
+# A single rule can never need more than the whole score.
+_MAX_WEIGHT = 100.0
+_KNOWN_KEYS = frozenset({"weights", "bands", "brands", *_LIST_KEYS})
+
+# Weights for enrichment signals are keyed by connector-defined ids, so any key
+# under this prefix is accepted (third-party connectors define their own).
+ENRICHMENT_PREFIX = "enrichment."
+
+
 def _load_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
+        try:
+            data = yaml.safe_load(fh)
+        except yaml.YAMLError as exc:
+            raise ValueError(f"{path} is not valid YAML: {exc}") from exc
     if data is None:
         return {}
     if not isinstance(data, dict):
@@ -102,28 +135,52 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _folded_set(values: Any) -> frozenset[str]:
-    """Case-fold a sequence of strings into a frozenset (empty for ``None``)."""
-    if not values:
-        return frozenset()
-    return frozenset(str(v).strip().casefold() for v in values if str(v).strip())
+def _string_list(values: Any, key: str) -> list[str]:
+    """The non-empty, case-folded strings of list ``key`` (a scalar is an error)."""
+    if values is None:
+        return []
+    if not isinstance(values, list):
+        raise ValueError(f"'{key}' must be a list, got {type(values).__name__}")
+    return [str(v).strip().casefold() for v in values if str(v).strip()]
 
 
-def _str_tuple(values: Any) -> tuple[str, ...]:
-    if not values:
-        return ()
-    return tuple(str(v).strip().casefold() for v in values if str(v).strip())
+def _weights(raw: dict[str, Any]) -> dict[str, float]:
+    from .detectors import OFFLINE_DETECTORS  # deferred: detectors import this module
+
+    values = raw.get("weights")
+    values = {} if values is None else values
+    if not isinstance(values, Mapping):
+        raise ValueError(f"'weights' must be a mapping, got {type(values).__name__}")
+    known = {spec.id for spec in OFFLINE_DETECTORS}
+    weights: dict[str, float] = {}
+    for key, value in values.items():
+        rule = str(key)
+        if rule not in known and not rule.startswith(ENRICHMENT_PREFIX):
+            hint = difflib.get_close_matches(rule, sorted(known), n=1)
+            suggestion = f" (did you mean '{hint[0]}'?)" if hint else ""
+            raise ValueError(f"unknown rule id '{rule}' in weights{suggestion}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"weight for '{rule}' must be a number, got {value!r}")
+        weight = float(value)
+        if not math.isfinite(weight) or not 0 <= weight <= _MAX_WEIGHT:
+            raise ValueError(f"weight for '{rule}' must be between 0 and {_MAX_WEIGHT:g}")
+        weights[rule] = weight
+    return weights
 
 
-def _build(raw: dict[str, Any]) -> ScoringConfig:
-    weights = {str(k): float(v) for k, v in (raw.get("weights") or {}).items()}
-
-    if any(not math.isfinite(v) or v < 0 for v in weights.values()):
-        raise ValueError("weights must be finite and nonnegative")
-
+def _bands(raw: dict[str, Any]) -> tuple[Band, ...]:
+    entries = raw.get("bands")
+    entries = [] if entries is None else entries
+    if not isinstance(entries, list):
+        raise ValueError(f"'bands' must be a list, got {type(entries).__name__}")
     bands: list[Band] = []
-    for entry in raw.get("bands") or []:
-        bands.append(Band(max=int(entry["max"]), verdict=str(entry["verdict"])))
+    for entry in entries:
+        limit = entry.get("max") if isinstance(entry, Mapping) else None
+        verdict = entry.get("verdict") if isinstance(entry, Mapping) else None
+        if isinstance(limit, bool) or not isinstance(limit, int) or not isinstance(verdict, str):
+            message = f"each band needs an integer 'max' and a 'verdict': {entry!r}"
+            raise ValueError(message)
+        bands.append(Band(max=limit, verdict=verdict))
     bands.sort(key=lambda b: b.max)
     if (
         not bands
@@ -132,19 +189,39 @@ def _build(raw: dict[str, Any]) -> ScoringConfig:
         or len({b.max for b in bands}) != len(bands)
     ):
         raise ValueError("bands need unique limits in 0..100 ending at 100 and nonempty verdicts")
+    return tuple(bands)
 
-    brands_raw = raw.get("brands") or {}
-    brands = {str(name).casefold(): _folded_set(domains) for name, domains in brands_raw.items()}
 
+def _brands(raw: dict[str, Any]) -> dict[str, frozenset[str]]:
+    values = raw.get("brands")
+    values = {} if values is None else values
+    if not isinstance(values, Mapping):
+        raise ValueError(f"'brands' must be a mapping, got {type(values).__name__}")
+    brands: dict[str, frozenset[str]] = {}
+    for name, domains in values.items():
+        owned = frozenset(_string_list(domains, f"brands.{name}"))
+        # An empty list (or null) removes a bundled brand: a brand that owns no
+        # domain would otherwise flag every sender that mentions it.
+        if owned:
+            brands[str(name).casefold()] = owned
+    return brands
+
+
+def _build(raw: dict[str, Any]) -> ScoringConfig:
+    unknown = sorted(set(raw) - _KNOWN_KEYS)
+    if unknown:
+        raise ValueError(f"unknown scoring config key(s): {', '.join(map(str, unknown))}")
+    lists = {key: _string_list(raw.get(key), key) for key in _LIST_KEYS}
     return ScoringConfig(
-        weights=weights,
-        bands=tuple(bands),
-        freemail_domains=_folded_set(raw.get("freemail_domains")),
-        url_shorteners=_folded_set(raw.get("url_shorteners")),
-        credential_keywords=_str_tuple(raw.get("credential_keywords")),
-        urgency_keywords=_str_tuple(raw.get("urgency_keywords")),
-        brands=brands,
-        org_domains=_folded_set(raw.get("org_domains")),
+        weights=_weights(raw),
+        bands=_bands(raw),
+        freemail_domains=frozenset(lists["freemail_domains"]),
+        url_shorteners=frozenset(lists["url_shorteners"]),
+        credential_keywords=tuple(lists["credential_keywords"]),
+        urgency_keywords=tuple(lists["urgency_keywords"]),
+        role_keywords=tuple(lists["role_keywords"]),
+        brands=_brands(raw),
+        org_domains=frozenset(normalize_domain_pattern(d) for d in lists["org_domains"]),
     )
 
 

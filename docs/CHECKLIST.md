@@ -1,4 +1,4 @@
-# Phishbowl — Engineering Checklist
+# PhishBowl — Engineering Checklist
 
 **Status:** v1 — all phases complete (0–7, incl. the stretch) · Mirrors the build order in `PRD.md` §5.
 
@@ -61,7 +61,7 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Tasks:**
 - [x] Extract addresses, URLs, domains, IPv4/IPv6, hashes (via `iocextract` + custom passes).
 - [x] Wrapper unwrapping (string transform only, **never fetch**): Microsoft Safelinks; Proofpoint URL Defense v1/v2/v3. Retain both wrapped + unwrapped.
-- [x] Detect-and-mark non-reversible wrappers (Mimecast/Barracuda/Cisco) as "wrapped, unresolved."
+- [x] Other wrappers: Barracuda and Cisco Secure Email decoded offline; Mimecast (not reversible offline) kept wrapped and marked "wrapped, unresolved," with its target domain recorded when present.
 - [x] Defanger: URLs, IPs, emails (`hxxps`, `[.]`, `[at]`) for all human-facing output.
 - [x] Dedup/normalize indicators; preserve provenance (source header/part).
 - [x] Tests: known wrapped samples unwrap correctly; defang round-trips; provenance retained; extraction does zero network I/O.
@@ -124,7 +124,7 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 **Tasks:**
 - [x] Define stable `Connector` ABC/Protocol + `EnrichmentResult` (normalized).
 - [x] Discovery: in-repo registry **and** `phishbowl.connectors` entry-points.
-- [x] On-disk cache keyed by `(connector, ioc_type, value)` with per-connector TTL.
+- [x] On-disk cache keyed by `(connector, version, ioc_type, value)` with per-connector TTL.
 - [x] Rate-limit handling (per documented free tiers) + backoff + global concurrency cap.
 - [x] Graceful degrade: missing key → skipped w/ note; API/network error → soft-fail w/ note; never crash.
 - [x] SSRF guard: connectors reach only their vendor's documented base URL; never fetch email URLs.
@@ -145,7 +145,7 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 - [x] Define export schema mapping `ParsedEmail` + verdict + IOCs → XSOAR playbook artifact.
 - [x] Define export mapping → Microsoft Sentinel playbook artifact.
 - [x] CLI flags to emit each; documented field mappings.
-- [x] Reinforce in code/docs: export is a draft; Phishbowl never quarantines/blocks/acts.
+- [x] Reinforce in code/docs: export is a draft; PhishBowl never quarantines/blocks/acts.
 - [x] Tests: exports validate against expected schema on a fixture.
 
 **DoD:** Both exports generate from a fixture and validate; docs explain how to import into each platform. ✅ **Met** — `phishbowl analyze --xsoar` / `--sentinel` emit a Cortex XSOAR playbook (all-manual tasks) and a Microsoft Sentinel playbook (a disabled Logic App ARM template), both mapped from one prepared report view so defanging/redaction stay consistent. The never-acts invariant is enforced in code, in the disclaimer stamped into every artifact, **and** structurally by each export's bundled JSON Schema (`task.iscommand` is `const false`; workflow `state` is `const "Disabled"`). Each export validates against its schema on every fixture, the validator is proven non-vacuous (it rejects a tampered acting artifact), and `docs/SOAR_EXPORT.md` documents the field mappings and per-platform import steps (`tests/test_export.py`).
@@ -186,3 +186,25 @@ CI is intentionally lightweight: the routine gate is a fast `pytest` run (`make 
 - [x] **Tests** accompany each feature; `make test` green before advancing a phase.
 - [x] **Docs** kept in step: README, connector-authoring guide (by Phase 5), glossary, scoring-config guide.
 - [x] **PRD/CHECKLIST** updated as decisions land (these are living documents).
+
+---
+
+## Maintenance: hardening revision (unreleased)
+
+A review of the shipped phases against hostile input, completed without adding scope:
+
+- [x] Parsing: RFC 2047 decoded only where permitted; `Authentication-Results` trusted
+  only from the topmost `authserv-id`; RFC 2231 parameters; bounded MIME construction
+  with a headers-only fallback; malformed address headers read as clients display them.
+- [x] Analysis completeness: coverage gaps (incomplete verdict, exit status 3) are
+  distinguished from informational notes.
+- [x] Scoring: homograph (TR39) and lookalike precision, `identity.multiple_from`,
+  `identity.freemail_role`, `attach.html`; strict configuration validation.
+- [x] Redaction: every recipient header and `Received … for` clause, linear whole-token
+  and whole-word matching, in-place placeholders, operator-field derivatives; recipient
+  domains only from delivery headers, never the visible sender's.
+- [x] Enrichment: HTTPS only, bootstrap-redirect target checks, per-connector isolation,
+  cache integrity checks, defensive vendor-response parsing.
+- [x] CLI and upload UI: output validation and write errors, secured error pages.
+- [x] Docs: README, scoring, connector, SOAR, glossary, security, and changelog aligned
+  with the code.

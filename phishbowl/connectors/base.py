@@ -204,16 +204,16 @@ class EnrichmentSettings:
     max_indicators: int = 16
     cache_enabled: bool = True
     cache_dir: Any = None
-    api_keys: Mapping[str, str] = field(default_factory=dict)
+    api_keys: Mapping[str, str] = field(default_factory=dict, repr=False)
     transport: Any = None
     sleep: Callable[[float], Awaitable[None]] | None = None
     now: Callable[[], datetime] | None = None
 
-    def api_key_for(self, name: str) -> str | None:
-        """Resolve a connector's key: explicit override first, then env (PRD §11)."""
-        if name in self.api_keys:
-            return self.api_keys[name] or None
-        return api_key_from_env(name)
+    def api_key_for(self, connector: Connector) -> str | None:
+        """Resolve a connector's key: explicit override first, then its env var (PRD §11)."""
+        if connector.name in self.api_keys:
+            return self.api_keys[connector.name] or None
+        return api_key_from_env(connector.api_key_env)
 
     def clock(self) -> Callable[[], datetime]:
         return self.now or utcnow
@@ -232,7 +232,7 @@ class EnrichContext:
 
     http: AllowlistedClient
     settings: EnrichmentSettings
-    api_key: str | None = None
+    api_key: str | None = field(default=None, repr=False)
     now: Callable[[], datetime] = utcnow
 
 
@@ -255,8 +255,12 @@ class Connector(ABC):
     version: str = "0.1.0"
     #: Which IOC types this connector enriches (``ipv4``/``ipv6``/``domain``/``url``/``hash``).
     supported_ioc_types: frozenset[str] = frozenset()
-    #: When ``True`` the connector is skipped (with a note) unless its env key is set.
+    #: When ``True`` the connector is skipped (with a note) unless its key is set.
     requires_api_key: bool = True
+    #: Environment variable the API key is read from (e.g. ``ACMEREP_API_KEY``).
+    #: Keys are read from the environment only, and every declared variable's
+    #: value is scrubbed from outputs and logs.
+    api_key_env: str = ""
     #: Hosts the connector may reach. Egress to anything else is refused (SSRF guard).
     allowed_hosts: frozenset[str] = frozenset()
     #: The vendor's documented API base URL.
@@ -279,6 +283,15 @@ class Connector(ABC):
     #: Implies ``follow_redirects``. The redirect target is chosen by the
     #: allowlisted vendor, never by email content.
     bootstrap_redirect: bool = False
+
+    def prepare(self, indicator: Indicator) -> Indicator | None:
+        """Map an indicator to the form this connector queries, or ``None`` to skip it.
+
+        Called before caching and de-duplication, so indicators that prepare
+        to the same value are looked up once. The default is the identity; RDAP,
+        for example, maps a host to its registered domain.
+        """
+        return indicator
 
     @abstractmethod
     async def enrich(self, indicator: Indicator, ctx: EnrichContext) -> EnrichmentResult:

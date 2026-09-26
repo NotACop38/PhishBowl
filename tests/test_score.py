@@ -11,11 +11,12 @@ Covers the Phase 3 definition of done:
 
 Crafted inputs are tiny synthetic ``.eml`` blobs or directly-built models, using
 reserved example-only values (RFC 2606 / RFC 5737) and obviously-fake markers —
-never a real sample (CLAUDE.md).
+never a real sample (AGENTS.md).
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -227,10 +228,16 @@ def test_display_name_brand_mismatch_fires_and_respects_legit_domain() -> None:
         'From: "Microsoft Account Team" <security@evil.example>\r\nSubject: hi\r\n\r\nbody\r\n'
     )
     assert "identity.display_name_brand_mismatch" in _fired(spoof)
-    # A brand display name whose From domain legitimately owns it must NOT fire
-    # (the bundled "example" brand owns example.com).
-    legit = _score_fixture("benign_newsletter.eml")
+    # A brand display name whose From domain (or a subdomain of it) owns the
+    # brand must NOT fire.
+    legit = _score_raw(
+        'From: "Microsoft Account Team" <account@accountprotection.microsoft.com>\r\n'
+        "Subject: hi\r\n\r\nbody\r\n"
+    )
     assert "identity.display_name_brand_mismatch" not in _fired(legit)
+    assert "identity.display_name_brand_mismatch" not in _fired(
+        _score_fixture("benign_newsletter.eml")
+    )
 
 
 def test_display_name_brand_mismatch_catches_brand_stuffing() -> None:
@@ -251,12 +258,23 @@ def test_display_name_brand_mismatch_catches_brand_stuffing() -> None:
     assert "identity.display_name_brand_mismatch" not in _fired(legit)
 
 
-def test_freemail_brand_fires() -> None:
-    raw = 'From: "PayPal Support" <paypalhelp@gmail.com>\r\nSubject: hi\r\n\r\nbody\r\n'
-    assert "identity.freemail_brand" in _fired(_score_raw(raw))
-    # A personal gmail with no brand claim does not fire.
+def test_freemail_role_fires_for_organizational_claims() -> None:
+    raw = 'From: "IT Support Desk" <it.helpdesk.team@gmail.com>\r\nSubject: hi\r\n\r\nbody\r\n'
+    fired = {f.id: f for f in _score_raw(raw).fired}
+    assert "identity.freemail_role" in fired
+    assert "(support)" in fired["identity.freemail_role"].evidence[0]
+    # A personal gmail with no organizational claim does not fire.
     plain = 'From: "Jordan Lee" <jordan.lee@gmail.com>\r\nSubject: hi\r\n\r\nbody\r\n'
-    assert "identity.freemail_brand" not in _fired(_score_raw(plain))
+    assert "identity.freemail_role" not in _fired(_score_raw(plain))
+
+
+def test_freemail_brand_claim_is_counted_once() -> None:
+    # "PayPal Support" from gmail is one fact — a brand the sender does not own —
+    # so only the brand-mismatch rule scores it.
+    raw = 'From: "PayPal Support" <paypalhelp@gmail.com>\r\nSubject: hi\r\n\r\nbody\r\n'
+    fired = _fired(_score_raw(raw))
+    assert "identity.display_name_brand_mismatch" in fired
+    assert "identity.freemail_role" not in fired
 
 
 def test_display_name_is_email_fires() -> None:
@@ -284,12 +302,41 @@ def test_idn_homograph_fires_on_mixed_script() -> None:
     assert "url.idn_homograph" not in _fired(_score_fixture("benign_newsletter.eml"))
 
 
-def test_lookalike_fires_on_edit_distance() -> None:
-    # examp1e.com (digit one) is edit-distance 1 from the bundled example.com brand.
-    res = _score_raw(_html_eml('<a href="https://examp1e.com/">x</a>'))
-    assert "url.lookalike" in _fired(res)
-    # The genuine example.com is not a lookalike of itself.
-    assert "url.lookalike" not in _fired(_score_fixture("benign_newsletter.eml"))
+@pytest.mark.parametrize(
+    ("host", "reason"),
+    [
+        ("paypa1.com", "confusable characters"),  # digit one for "l"
+        ("arnazon.com", "confusable characters"),  # "rn" reads as "m"
+        ("login.rnicrosoft.net", "confusable characters"),
+        ("paypal-secure.net", 'embeds the name "paypal"'),  # combosquatting
+        ("login.secure-paypa1-verify.com", 'embeds the name "paypal"'),
+        ("mircosoft.com", "edit distance 1"),  # transposed letters
+        ("docusing.com", "edit distance 1"),
+    ],
+)
+def test_lookalike_fires_on_brand_imitations(host: str, reason: str) -> None:
+    res = _score_raw(_html_eml(f'<a href="https://{host}/">x</a>'))
+    fired = {f.id: f for f in res.fired}
+    assert "url.lookalike" in fired
+    assert reason in fired["url.lookalike"].evidence[0]
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "paypal.com",  # the brand itself
+        "www.paypal.com",  # a subdomain of the brand
+        "amazon.ca",  # same name under another suffix: a variant, not a typo
+        "life.com",  # "live" is too short a label to compare
+        "ymail.com",  # a known freemail provider, not an imitation of gmail
+        "email.com",  # different first letter from "gmail"
+        "amazing.com",  # two edits from a six-letter brand
+        "example.com",
+    ],
+)
+def test_lookalike_stays_silent_on_legitimate_neighbours(host: str) -> None:
+    res = _score_raw(_html_eml(f'<a href="https://{host}/">x</a>'))
+    assert "url.lookalike" not in _fired(res)
 
 
 def test_anchor_href_mismatch_fires() -> None:
@@ -492,3 +539,204 @@ def test_scoring_does_no_network_io(monkeypatch: pytest.MonkeyPatch) -> None:
 
     res = score_email(parsed, iocs)
     assert res.score > 0
+
+
+# --- Rules added in the quality review -----------------------------------------
+
+
+def test_multiple_from_headers_fire() -> None:
+    raw = (
+        f"{_AUTH_PASS}"
+        'From: "IT Support" <it@example.com>\r\n'
+        'From: "PayPal" <service@paypal.com>\r\n'
+        "Subject: hi\r\n\r\nbody\r\n"
+    )
+    fired = {f.id: f for f in _score_raw(raw).fired}
+    assert "identity.multiple_from" in fired
+    assert fired["identity.multiple_from"].evidence[0].startswith("2 From headers")
+    assert "identity.multiple_from" not in _fired(_score_fixture("benign_newsletter.eml"))
+
+
+def test_html_attachment_rule_fires() -> None:
+    parsed = _model_email(
+        from_addr=Address(addr_spec="a@example.com", domain="example.com"),
+        attachments=[Attachment(filename="Remittance.html", flags=[AttachmentFlag.HTML])],
+    )
+    fired = {f.id: f for f in score_email(parsed, IOCs()).fired}
+    assert fired["attach.html"].evidence == [
+        "HTML/SVG document attachment (opens in a browser): Remittance.html"
+    ]
+
+
+# --- Strict config validation -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"weights": {"auth.spf_fial": 20}}, "did you mean 'auth.spf_fail'"),
+        ({"weights": {"auth.spf_fail": "high"}}, "must be a number"),
+        ({"org_domains": "acme.com"}, "'org_domains' must be a list"),
+        ({"brands": {"acme": "acme.com"}}, "'brands.acme' must be a list"),
+        ({"bands": [{"max": 100}]}, "integer 'max' and a 'verdict'"),
+        ({"brand": {}}, "unknown scoring config key(s): brand"),
+    ],
+)
+def test_invalid_config_is_rejected_with_the_offending_key(overrides, message) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        load_config(overrides=overrides)
+
+
+def test_enrichment_weights_accept_connector_defined_ids() -> None:
+    config = load_config(overrides={"weights": {"enrichment.acmerep.risk": 20}})
+    assert config.weight("enrichment.acmerep.risk") == 20
+
+
+def test_malformed_yaml_is_a_value_error(tmp_path: Path) -> None:
+    site = tmp_path / "site.yaml"
+    site.write_text("weights: [unclosed\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="not valid YAML"):
+        load_config(path=site)
+
+
+def test_incomplete_analysis_keeps_its_band_in_the_verdict() -> None:
+    raw = (
+        "From: a@example.com\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n"
+        "--x\r\nContent-Type: text/plain\r\n\r\nhello\r\n"
+    )
+    result = _score_raw(raw)
+    assert not result.analysis_complete
+    assert result.verdict == f"{verdict_for(result.score, load_config())} (incomplete analysis)"
+
+
+# --- Homographs, raw IPs, anchors: precision fixes ---------------------------
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("аррӏе.com", "imitates 'apple'"),  # every letter Cyrillic
+        ("xn--80ak6aa92e.com", "imitates 'apple'"),  # the same domain, encoded
+        ("pаypal.com", "imitates 'paypal'"),  # one Cyrillic letter
+        ("pàypal.com", "imitates 'paypal'"),  # an accent on a Latin letter
+        ("gооgle-lоgin.com", "mixed-script"),  # mixed scripts, no exact brand fold
+    ],
+)
+def test_idn_homographs_are_detected(host: str, expected: str) -> None:
+    fired = {f.id: f for f in _score_raw(_html_eml(f'<a href="https://{host}/">x</a>')).fired}
+    assert expected in fired["url.idn_homograph"].evidence[0]
+    assert "url.punycode" not in fired  # one domain, one rule
+    assert "url.lookalike" not in fired
+
+
+@pytest.mark.parametrize("host", ["việtnam.vn", "abcショップ.jp", "xn--mnchen-3ya.de"])
+def test_legitimate_idns_are_not_homographs(host: str) -> None:
+    fired = _fired(_score_raw(_html_eml(f'<a href="https://{host}/">x</a>')))
+    assert "url.idn_homograph" not in fired
+
+
+def test_punycode_evidence_shows_the_decoded_name() -> None:
+    fired = {
+        f.id: f for f in _score_raw(_html_eml('<a href="https://xn--mnchen-3ya.de/">x</a>')).fired
+    }
+    assert fired["url.punycode"].evidence == [
+        "punycode/xn-- domain present: xn--mnchen-3ya[.]de (münchen[.]de)"
+    ]
+
+
+@pytest.mark.parametrize("url", ["http://3405803785/verify", "http://0xcb007109/verify"])
+def test_legacy_ipv4_notations_are_raw_ip_hosts(url: str) -> None:
+    assert "url.raw_ip_host" in _fired(_score_raw(_html_eml(f'<a href="{url}">x</a>')))
+
+
+@pytest.mark.parametrize("label", ["Download statement.pdf", "setup.exe", "invoice.zip", "Node.js"])
+def test_file_names_in_link_text_are_not_hosts(label: str) -> None:
+    raw = _html_eml(f'<a href="https://files.example.com/dl/123">{label}</a>')
+    assert "url.anchor_href_mismatch" not in _fired(_score_raw(raw))
+
+
+def test_explicit_zip_host_in_link_text_still_counts() -> None:
+    raw = _html_eml('<a href="https://files.example.com/dl/123">https://invoice.zip/view</a>')
+    assert "url.anchor_href_mismatch" in _fired(_score_raw(raw))
+
+
+def test_display_name_repeating_the_address_is_not_suspicious() -> None:
+    same = 'From: "alice@example.com" <alice@example.com>\r\nSubject: hi\r\n\r\nbody\r\n'
+    assert "identity.display_name_is_email" not in _fired(_score_raw(same))
+
+
+def test_encrypted_archive_is_scored_once() -> None:
+    parsed = _model_email(
+        from_addr=Address(addr_spec="a@example.com", domain="example.com"),
+        attachments=[
+            Attachment(
+                filename="invoice.zip",
+                flags=[AttachmentFlag.ARCHIVE, AttachmentFlag.PASSWORD_PROTECTED],
+            )
+        ],
+    )
+    fired = _fired(score_email(parsed, IOCs()))
+    assert "attach.password_protected_archive" in fired
+    assert "attach.archive" not in fired
+
+
+def test_same_organization_subdomains_are_not_mismatches() -> None:
+    raw = (
+        f"{_AUTH_PASS}From: news@example.com\r\nReturn-Path: <bounce@em.example.com>\r\n"
+        "Sender: mailer@mail.example.com\r\nSubject: hi\r\n\r\nbody\r\n"
+    )
+    fired = _fired(_score_raw(raw))
+    assert "identity.return_path_mismatch" not in fired
+    assert "identity.sender_mismatch" not in fired
+
+
+@pytest.mark.parametrize("display", ["Wells Fargo Online", "Bank of America Alerts"])
+def test_multi_word_brands_match_display_names(display: str) -> None:
+    raw = f'From: "{display}" <alerts@notify.example>\r\nSubject: hi\r\n\r\nbody\r\n'
+    assert "identity.display_name_brand_mismatch" in _fired(_score_raw(raw))
+
+
+def test_enrichment_magnitudes_are_clamped_and_never_subtract() -> None:
+    from phishbowl.connectors import EnrichmentReport, EnrichmentSignal
+    from phishbowl.connectors.base import ConnectorOutcome, ConnectorStatus, EnrichmentResult
+
+    def report(magnitude: float) -> EnrichmentReport:
+        signal = EnrichmentSignal("enrichment.rdap.young_domain", "Young", magnitude, "x")
+        result = EnrichmentResult("rdap", "domain", "d.example", signals=(signal,))
+        status = ConnectorStatus("rdap", "1", ConnectorOutcome.USED, "ok", results=(result,))
+        return EnrichmentReport(enabled=True, statuses=(status,))
+
+    parsed = parse(FIXTURES / "auth_fail_spoofed.eml")
+    iocs = extract_iocs(parsed)
+    base = score_email(parsed, iocs).score
+    assert score_email(parsed, iocs, enrichment=report(-0.5)).score == base
+    assert score_email(parsed, iocs, enrichment=report(float("nan"))).score == base
+    young = [
+        f
+        for f in score_email(parsed, iocs, enrichment=report(3.0)).fired
+        if f.id.startswith("enrichment")
+    ]
+    assert young[0].weight == load_config().weight("enrichment.rdap.young_domain")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"weights": {"auth.dmarc_fail": True}}, "must be a number"),
+        ({"weights": {"auth.dmarc_fail": 1e308}}, "between 0 and 100"),
+        ({"bands": [{"max": 19.9, "verdict": "a"}, {"max": 100, "verdict": "b"}]}, "integer 'max'"),
+        ({"weights": None}, "'weights' is empty"),
+    ],
+)
+def test_more_invalid_config_is_rejected(overrides, message) -> None:
+    with pytest.raises(ValueError, match=re.escape(message)):
+        load_config(overrides=overrides)
+
+
+def test_an_empty_brand_list_removes_the_brand() -> None:
+    config = load_config(overrides={"brands": {"apple": []}})
+    assert "apple" not in config.brands
+    raw = 'From: "Apple Farm Newsletter" <news@orchard.example>\r\nSubject: hi\r\n\r\nbody\r\n'
+    parsed = parse_eml(raw.encode(), filename="c.eml")
+    fired = {f.id for f in score_email(parsed, extract_iocs(parsed), config).fired}
+    assert "identity.display_name_brand_mismatch" not in fired

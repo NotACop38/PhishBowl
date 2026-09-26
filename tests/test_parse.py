@@ -589,3 +589,402 @@ def test_attachment_digests_are_consistent_with_each_other() -> None:
     assert len(pdf.sha1) == len(hashlib.sha1(b"").hexdigest())
     assert len(pdf.sha256) == len(hashlib.sha256(b"").hexdigest())
     assert all(int(h, 16) >= 0 for h in (pdf.md5, pdf.sha1, pdf.sha256))
+
+
+# --- Anomaly classification: coverage gaps vs notices ------------------------
+
+
+def _anomalies(raw: bytes) -> dict[str, list[bool]]:
+    parsed = parse_eml(raw, filename="probe.eml")
+    found: dict[str, list[bool]] = {}
+    for anomaly in parsed.anomalies:
+        found.setdefault(anomaly.code, []).append(anomaly.coverage_gap)
+    return found
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        # Start boundary never appears: the multipart cannot be split.
+        b"From: a@example.com\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n"
+        b"--y\r\nContent-Type: text/plain\r\n\r\nhello\r\n--y--\r\n",
+        # Multipart without a boundary parameter.
+        b"From: a@example.com\r\nContent-Type: multipart/mixed\r\n\r\nhello\r\n",
+        # A non-header line inside the header block.
+        b"From: a@example.com\r\nnot a header line\r\nSubject: x\r\n\r\nbody\r\n",
+    ],
+)
+def test_ambiguous_mime_structure_is_a_coverage_gap(raw: bytes) -> None:
+    anomalies = _anomalies(raw)
+    assert True in anomalies["mime_defect"]
+    assert not parse_eml(raw).analysis_complete
+
+
+def test_value_level_defects_and_missing_from_are_notices() -> None:
+    raw = (
+        b"Subject: no sender\r\nContent-Type: text/plain\r\n"
+        b"Content-Transfer-Encoding: base64\r\n\r\naGVsbG8gd29ybGQ\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert parsed.body.text == "hello world"
+    assert {a.code for a in parsed.anomalies} == {"mime_defect", "missing_from"}
+    assert not any(a.coverage_gap for a in parsed.anomalies)
+    assert parsed.analysis_complete
+
+
+def test_unsplit_multipart_content_is_still_scanned() -> None:
+    raw = (
+        b"From: a@example.com\r\nContent-Type: multipart/mixed; boundary=x\r\n\r\n"
+        b"--y\r\nContent-Type: text/plain\r\n\r\nclaim https://prize.example/claim\r\n--y--\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert [part.content_type for part in parsed.body.other_text] == ["multipart/mixed"]
+    assert "https://prize.example/claim" in parsed.body.other_text[0].text
+    assert not parsed.analysis_complete  # still a gap: encoded subparts are not decoded
+
+
+def test_calendar_invitation_is_unfolded_and_scanned() -> None:
+    raw = (
+        b"From: organizer@example.com\r\nContent-Type: multipart/alternative; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain\r\n\r\nJoin the meeting\r\n"
+        b"--b\r\nContent-Type: text/calendar; method=REQUEST\r\n\r\n"
+        b"BEGIN:VEVENT\r\nDESCRIPTION:Join at https://meet.example/abc\r\n defghi/jkl\r\n"
+        b"END:VEVENT\r\n--b--\r\n"
+    )
+    parsed = parse_eml(raw)
+    [calendar] = parsed.body.other_text
+    assert calendar.content_type == "text/calendar"
+    assert "https://meet.example/abcdefghi/jkl" in calendar.text  # RFC 5545 unfolding
+    assert parsed.analysis_complete
+    assert any(a.code == "other_body_type" and not a.coverage_gap for a in parsed.anomalies)
+
+
+# --- HTML attachments ----------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("filename", "declared", "data"),
+    [
+        ("remittance.html", "application/octet-stream", b""),
+        ("invoice.SVG", "application/octet-stream", b""),
+        ("statement", "text/html", b""),
+        ("statement.pdf", "application/pdf", b"\xef\xbb\xbf  <!DOCTYPE html><html>"),
+        ("logo.png", "image/png", b'<?xml version="1.0"?>\n<!-- x --><svg xmlns="">'),
+    ],
+)
+def test_html_attachments_are_flagged(filename: str, declared: str, data: bytes) -> None:
+    from phishbowl.parse.attachments import detect_type
+
+    assert AttachmentFlag.HTML in _flags(filename, declared, detect_type(data), data)
+
+
+def test_markup_disguised_as_a_pdf_is_a_type_mismatch() -> None:
+    from phishbowl.parse.attachments import detect_type
+
+    data = b"<html><form action='https://harvest.example/login'>"
+    flags = _flags("statement.pdf", "application/pdf", detect_type(data), data)
+    assert AttachmentFlag.TYPE_MISMATCH in flags
+    assert _flags_for("invoice.pdf.html").count(AttachmentFlag.DOUBLE_EXTENSION) == 1
+
+
+def test_plain_text_is_not_mistaken_for_markup() -> None:
+    from phishbowl.parse.attachments import detect_type
+
+    assert detect_type(b"hello <html> world") is None
+    assert AttachmentFlag.HTML not in _flags_for("notes.txt", "text/plain")
+
+
+# --- Emails attached to an Outlook .msg ----------------------------------------
+
+
+def test_list_embedded_emails_walks_msg_attachments() -> None:
+    from phishbowl.parse import list_embedded_emails, parse_bytes
+
+    inner = _msgbuild.embedded_message_storage(subject="Reported phish", body_text="prize")
+    eml = b"From: a@evil.example\r\nSubject: attached eml\r\n\r\nhello\r\n"
+    data = _msgbuild.build_message(
+        subject="Outer",
+        body_text="see attached",
+        sender=("Bob", "bob@sender.example"),
+        attachments=[("forwarded.eml", "message/rfc822", eml)],
+        embedded=[("reported", inner)],
+    )
+
+    found = list_embedded_emails(data)
+
+    assert [(e.index, e.filename) for e in found] == [(0, "forwarded.eml"), (1, "reported.msg")]
+    assert found[0].data == eml
+    assert parse_bytes(found[1].data, found[1].filename).subject == "Reported phish"
+    assert list_embedded_emails(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1 not a container") == []
+
+
+# --- Hostile-input regressions (quality review) --------------------------------
+
+
+def test_encoded_words_cannot_forge_authentication_results() -> None:
+    # An attacker-chosen envelope address carrying an RFC 2047 encoded-word must
+    # not decode into "; dkim=pass; dmarc=pass" inside the receiver's header.
+    raw = (
+        b"Authentication-Results: mx.example.net; spf=fail smtp.mailfrom="
+        b"=?us-ascii?q?x=3Bdkim=3Dpass=3Bdmarc=3Dpass?=@attacker.example; dkim=none; "
+        b"dmarc=fail header.from=bank.example\r\n"
+        b"From: Bank <alerts@bank.example>\r\nSubject: =?utf-8?q?Caf=C3=A9?=\r\n\r\nbody\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert (parsed.auth.dkim.result, parsed.auth.dmarc.result) == (
+        AuthResultState.NONE,
+        AuthResultState.FAIL,
+    )
+    assert "=?us-ascii?q?" in parsed.headers.get("Authentication-Results")
+    assert parsed.headers.get("Subject") == "Café"  # unstructured headers still decode
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        'mx.example.net; spf=fail smtp.mailfrom="x;dmarc=pass"@evil.example; dmarc=fail',
+        "mx.example.net; spf=fail (not permitted; dmarc=pass) smtp.mailfrom=evil.example; "
+        "dmarc=fail",
+    ],
+)
+def test_semicolons_in_quotes_and_comments_are_not_results(value: str) -> None:
+    from phishbowl.models import Header, Headers
+    from phishbowl.parse.auth import parse_auth
+
+    auth, _ = parse_auth(Headers(items=[Header(name="Authentication-Results", value=value)]))
+    assert auth.dmarc.result is AuthResultState.FAIL
+
+
+def test_only_the_topmost_authserv_id_is_trusted() -> None:
+    raw = (
+        b"Authentication-Results: mx.receiver.example; spf=softfail smtp.mailfrom=evil.example\r\n"
+        b"Authentication-Results: mx.forged.example; dkim=pass header.d=bank.example; "
+        b"dmarc=pass header.from=bank.example\r\n"
+        b"From: alerts@bank.example\r\nSubject: s\r\n\r\nbody\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert parsed.auth.spf.result is AuthResultState.SOFTFAIL
+    assert parsed.auth.dkim.result is AuthResultState.NONE
+    assert parsed.auth.dmarc.result is AuthResultState.NONE
+    [note] = [a for a in parsed.anomalies if a.code == "auth_untrusted_results"]
+    assert "mx.forged.example" in note.message and not note.coverage_gap
+
+
+def test_dkim_result_prefers_the_signature_aligned_with_from() -> None:
+    raw = (
+        b"Authentication-Results: mx.receiver.example; dkim=pass header.d=esp.example; "
+        b"dkim=fail header.d=bank.example\r\nFrom: alerts@bank.example\r\n\r\nbody\r\n"
+    )
+    assert parse_eml(raw).auth.dkim.result is AuthResultState.FAIL
+
+
+@pytest.mark.parametrize(
+    "parameter",
+    [
+        b"Content-Disposition: inline; filename*=idna''x",
+        b"Content-Type: image/png; name*=idna''x",
+        b"Content-Type: text/plain; charset*=punycode''" + b"a" * 20000,
+    ],
+)
+def test_hostile_rfc2231_parameters_never_drop_other_parts(parameter: bytes) -> None:
+    raw = (
+        b"From: a@example.com\r\nSubject: s\r\nContent-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: text/plain\r\n\r\nPay at https://evil.example/pay\r\n"
+        b"--b\r\n" + parameter + b"\r\n\r\nX\r\n--b--\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert parsed.subject == "s"
+    assert "https://evil.example/pay" in (parsed.body.text or "")
+    assert not [a for a in parsed.anomalies if a.code.endswith("_error")]
+
+
+def test_decoded_text_never_carries_lone_surrogates() -> None:
+    raw = (
+        b"From: a@example.com\r\nSubject: =?utf-7?q?+2AA-?= invoice\r\n"
+        b"Content-Type: text/plain; charset=utf-7\r\n\r\nPay +2AA- now\r\n"
+    )
+    parsed = parse_eml(raw)
+    parsed.model_dump_json()  # would raise on a lone surrogate
+    assert parsed.subject == "� invoice"
+
+
+def test_encoded_word_decoding_is_linear_and_mixes_with_raw_text() -> None:
+    import time
+
+    from phishbowl.parse.charset import decode_mime_words
+
+    started = time.perf_counter()
+    decode_mime_words("=?x?q?A" * 40_000)
+    assert time.perf_counter() - started < 1.0
+    assert decode_mime_words("Rechnung für =?utf-8?q?Kunde?=") == "Rechnung für Kunde"
+    assert decode_mime_words("=?utf-8?q?a?= =?utf-8?q?b?=") == "ab"  # RFC 2047 §6.2
+
+
+def test_charset_labels_resolve_through_aliases_and_refuse_non_mail_codecs() -> None:
+    from phishbowl.parse.charset import _codec
+
+    assert _codec("ks_c_5601-1987") == "cp949"
+    assert _codec("iso-8859-8-i") == "iso8859-8"
+    assert _codec("punycode") is None and _codec("unicode_escape") is None
+
+
+def test_a_hostile_received_date_keeps_the_routing_path() -> None:
+    raw = (
+        b"Received: from relay.example.net (relay.example.net [192.0.2.7]) by "
+        b"mx.example.org; Mon, 1 Jan 2024 00:00:00 +0000\r\n"
+        b"Received: from b by c; Mon, 1 Jan 2024 00:00:00 +99999999999999999999\r\n"
+        b"From: a@example.com\r\n\r\nbody\r\n"
+    )
+    parsed = parse_eml(raw)
+    assert len(parsed.routing.hops) == 2
+    assert parsed.routing.hops[1].timestamp is None
+
+
+@pytest.mark.parametrize(
+    ("received", "expected"),
+    [
+        (
+            "from a.example.com (a.example.com [192.0.2.1]) (using TLSv1.3 with cipher X) "
+            "by mx.example.org (Postfix) with ESMTPS id 1; Mon, 1 Jan 2024 00:00:00 +0000",
+            ("a.example.com", "mx.example.org", "ESMTPS"),
+        ),
+        (
+            "by mail.example.com (Postfix, from userid 1000) id 1; Mon, 1 Jan 2024 00:00:00 +0000",
+            (None, "mail.example.com", None),
+        ),
+        ("(qmail 1 invoked from network); 1 Jan 2024 00:00:00 -0000", (None, None, None)),
+    ],
+)
+def test_received_clauses_are_read_outside_comments(received: str, expected) -> None:
+    from phishbowl.parse.routing import _parse_hop
+
+    hop = _parse_hop(received)
+    assert (hop.from_, hop.by, hop.with_) == expected
+
+
+@pytest.mark.parametrize(
+    ("header", "display", "address"),
+    [
+        (
+            b"From: security@bank.example <attacker@evil.example>",
+            "security@bank.example",
+            "attacker@evil.example",
+        ),
+        (b"From: Doe, John <jd@example.com>", "Doe, John", "jd@example.com"),
+    ],
+)
+def test_malformed_from_is_read_as_mail_clients_show_it(header, display, address) -> None:
+    parsed = parse_eml(header + b"\r\nSubject: s\r\n\r\nbody\r\n")
+    assert parsed.addresses.from_.display_name == display
+    assert parsed.addresses.from_.addr_spec == address
+    assert any(a.code == "malformed_address" and not a.coverage_gap for a in parsed.anomalies)
+
+
+def test_over_budget_line_count_keeps_header_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    from phishbowl.parse import mime
+
+    monkeypatch.setattr(mime, "MAX_LINES", 10)
+    parsed = parse_eml(b"From: a@example.com\r\nSubject: s\r\n\r\n" + b"line\r\n" * 20)
+    assert parsed.subject == "s" and parsed.addresses.from_ is not None
+    assert any(a.code == "mime_budget" and a.coverage_gap for a in parsed.anomalies)
+
+
+def test_msg_transport_headers_are_never_parsed_as_mime() -> None:
+    nested = "".join(
+        f"--b{i}\r\nContent-Type: multipart/mixed; boundary=b{i + 1}\r\n\r\n" for i in range(3000)
+    )
+    headers = (
+        "Authentication-Results: mx.example.org; spf=fail smtp.mailfrom=evil.example; "
+        "dmarc=fail header.from=bank.example\r\nFrom: alerts@bank.example\r\n"
+        "Content-Type: multipart/mixed; boundary=b0\r\n\r\n" + nested
+    )
+    data = _msgbuild.build_message(subject="s", body_text="b", transport_headers=headers)
+    parsed = parse_msg(data, filename="t.msg")
+    assert parsed.auth.dmarc.result is AuthResultState.FAIL
+    assert parsed.addresses.from_.addr_spec == "alerts@bank.example"
+    assert not any(a.code in {"headers_error", "msg_auth_unavailable"} for a in parsed.anomalies)
+
+
+def test_embedded_email_with_transfer_encoding_is_decoded_and_dsn_is_skipped() -> None:
+    import base64
+
+    from phishbowl.parse import list_embedded_emails, parse_bytes
+
+    inner = b"From: phish@evil.example\r\nSubject: Inner phish\r\n\r\nclick\r\n"
+    outer = (
+        b"From: fwd@example.org\r\nSubject: Fwd\r\n"
+        b"Content-Type: multipart/mixed; boundary=b\r\n\r\n"
+        b"--b\r\nContent-Type: message/rfc822\r\nContent-Transfer-Encoding: base64\r\n\r\n"
+        + base64.encodebytes(inner)
+        + b"--b\r\nContent-Type: message/delivery-status\r\n\r\nReporting-MTA: dns; mx\r\n--b--\r\n"
+    )
+    [found] = list_embedded_emails(outer)
+    assert found.data == inner
+    assert parse_bytes(found.data, found.filename).subject == "Inner phish"
+    assert parse_eml(outer).attachments[0].sha256 == hashlib.sha256(inner).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [
+        ("invoice.pdf.js .", {AttachmentFlag.EXECUTABLE, AttachmentFlag.DOUBLE_EXTENSION}),
+        ("deck.ppsm", {AttachmentFlag.MACRO_CAPABLE}),
+        ("book.xlsb", {AttachmentFlag.MACRO_CAPABLE}),
+        ("notes.one", {AttachmentFlag.EXECUTABLE}),
+        ("addin.xll", {AttachmentFlag.EXECUTABLE}),
+        ("invoice‮fdp.exe", {AttachmentFlag.EXECUTABLE, AttachmentFlag.DOUBLE_EXTENSION}),
+    ],
+)
+def test_attachment_name_evasions_are_flagged(filename: str, expected) -> None:
+    assert set(_flags_for(filename)) == expected
+
+
+def test_executable_named_as_a_document_is_a_type_mismatch() -> None:
+    from phishbowl.parse.attachments import build_attachment_from_bytes
+
+    flags = build_attachment_from_bytes("invoice.pdf", "application/octet-stream", b"MZ\x90").flags
+    assert AttachmentFlag.TYPE_MISMATCH in flags
+
+
+def test_zip_encryption_is_read_from_every_central_directory_entry() -> None:
+    import io
+    import struct
+    import zipfile
+
+    from phishbowl.parse.attachments import build_attachment_from_bytes
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("decoy.txt", "hello")
+        archive.writestr("payload.bin", "data")
+    data = bytearray(buffer.getvalue())
+    second = data.find(b"PK\x01\x02", data.find(b"PK\x01\x02") + 4)
+    struct.pack_into("<H", data, second + 8, 1)  # encrypt only the second entry
+    for blob in (bytes(data), b"\0" * 16 + bytes(data)):  # plain, and behind a prefix
+        flags = build_attachment_from_bytes("a.bin", None, blob).flags
+        assert AttachmentFlag.PASSWORD_PROTECTED in flags
+
+
+def test_one_unreadable_msg_attachment_never_costs_the_others() -> None:
+    import types
+
+    from phishbowl.models import EmailFormat, ParsedEmail, Source
+    from phishbowl.parse.msg import _build_attachments
+
+    class _WebAttachment:
+        longFilename = "shared-link.url"
+
+        @property
+        def data(self):
+            raise NotImplementedError("Cannot get the data of a web attachment.")
+
+    good = types.SimpleNamespace(
+        longFilename="invoice.pdf.exe", mimetype="application/octet-stream", data=b"MZ\x90"
+    )
+    msg = types.SimpleNamespace(attachments=[_WebAttachment(), good])
+    parsed = ParsedEmail(source=Source(format=EmailFormat.MSG, parser_version="test"))
+
+    attachments = _build_attachments(msg, parsed)
+
+    assert [a.filename for a in attachments] == ["invoice.pdf.exe"]
+    assert any(a.code == "msg_attachment_external" for a in parsed.anomalies)

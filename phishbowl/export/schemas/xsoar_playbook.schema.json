@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://phishbowl.dev/schemas/xsoar_playbook.schema.json",
-  "title": "Phishbowl Cortex XSOAR playbook (draft export)",
-  "description": "Schema for the Cortex XSOAR 6.x playbook artifact Phishbowl emits. DRAFT / EXPORT ONLY: every task is a manual task (task.iscommand is const false), so importing this playbook never auto-runs an integration command. Phishbowl never quarantines, blocks, sends, or acts; it only proposes a human-review playbook seeded with the triage verdict and indicators.",
+  "title": "PhishBowl Cortex XSOAR playbook (draft export)",
+  "description": "Schema for the Cortex XSOAR 6.x playbook artifact PhishBowl emits. DRAFT / EXPORT ONLY: every task is a manual task (task.iscommand is const false), so importing this playbook never auto-runs an integration command. PhishBowl never quarantines, blocks, sends, or acts; it only proposes a human-review playbook seeded with the triage verdict and indicators.",
   "type": "object",
   "additionalProperties": true,
   "required": [

@@ -1,7 +1,7 @@
 """Attachment metadata (PRD §7 — *Attachments*).
 
-Attachments are described by metadata and hashes only. Phishbowl never
-executes an attachment and never auto-extracts an archive (CLAUDE.md defensive
+Attachments are described by metadata and hashes only. PhishBowl never
+executes an attachment and never auto-extracts an archive (AGENTS.md defensive
 invariants); ``detected_type`` comes from magic-byte inspection (PRD §6.1).
 """
 

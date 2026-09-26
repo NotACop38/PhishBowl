@@ -9,14 +9,15 @@ in one place so individual connectors stay small:
   with a clear note; it is never invoked (PRD §9 graceful degrade).
 * **Caching** — every lookup checks the on-disk cache first, keyed by
   ``(connector, ioc_type, value)`` with the connector's TTL (:mod:`.cache`).
-* **Rate limiting** — proactive per-connector spacing (:mod:`.ratelimit`) plus a
-  **global concurrency cap** (an :class:`asyncio.Semaphore`) shared by all
-  connectors.
+* **Rate limiting** — proactive per-connector spacing (:mod:`.ratelimit`),
+  measured when a request is actually sent, plus a **global concurrency cap**
+  (an :class:`asyncio.Semaphore`) shared by all connectors.
 * **SSRF guard** — every connector gets an :class:`AllowlistedClient` bound to its
   own ``allowed_hosts`` and can reach nothing else (:mod:`.http`).
 * **Graceful degrade** — any connector error (missing data, network/API failure,
-  rate-limit exhaustion, even an unexpected bug) is caught and recorded as a
-  soft-fail note; it never crashes the run.
+  rate-limit exhaustion, even a connector that cannot be constructed) is caught
+  and recorded as a soft-fail note; one broken connector never costs the others
+  their results, and never crashes the run.
 * **Secret hygiene** — known key values are scrubbed from every retained raw
   response defensively (:mod:`.secrets`).
 
@@ -30,7 +31,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from dataclasses import replace
 
 import httpx
 
@@ -47,11 +50,11 @@ from .base import (
     Indicator,
 )
 from .cache import EnrichmentCache
-from .errors import ConnectorError
+from .errors import ConnectorError, RateLimitedError
 from .http import AllowlistedClient
 from .ratelimit import RateLimiter
 from .registry import discover
-from .secrets import active_key_values, env_var_for, scrub_secrets
+from .secrets import key_values, scrub_secrets, secret_forms
 from .targets import build_targets
 
 log = logging.getLogger(__name__)
@@ -142,11 +145,21 @@ def run_enrichment(
     targets: list[Indicator],
     settings: EnrichmentSettings | None = None,
 ) -> EnrichmentReport:
-    """Synchronous wrapper around :func:`run_enrichment_async` (drives the event loop)."""
+    """Synchronous wrapper around :func:`run_enrichment_async`.
+
+    Callable from plain code and from inside a running event loop (a notebook,
+    an async web handler): in the latter case the run gets its own loop on a
+    worker thread, since a loop cannot be re-entered.
+    """
     settings = settings or EnrichmentSettings()
     if not settings.enabled:
         return EnrichmentReport(enabled=False)
-    return asyncio.run(run_enrichment_async(targets, settings))
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(run_enrichment_async(targets, settings))
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="phishbowl-enrich") as pool:
+        return pool.submit(lambda: asyncio.run(run_enrichment_async(targets, settings))).result()
 
 
 async def run_enrichment_async(
@@ -154,28 +167,31 @@ async def run_enrichment_async(
     settings: EnrichmentSettings,
 ) -> EnrichmentReport:
     """Enrich ``targets`` across all selected connectors, concurrently and safely."""
-    connectors = _select_connectors(settings)
+    available = discover()
+    connectors = _select_connectors(available, settings)
     cache = EnrichmentCache(settings.cache_dir, enabled=settings.cache_enabled, now=settings.now)
-    # Everything key-shaped we know about — env vars *and* programmatic
-    # overrides — so the defensive scrub covers the library-use path too.
-    secrets = active_key_values() | frozenset(v for v in settings.api_keys.values() if v)
+    # Everything key-shaped we know about — every connector's env var (selected
+    # or not) *and* programmatic overrides — so the defensive scrub covers the
+    # library-use path too.
+    secrets = secret_forms(
+        key_values(cls.api_key_env for cls in available.values())
+        | frozenset(v for v in settings.api_keys.values() if v)
+    )
     semaphore = asyncio.Semaphore(max(1, settings.concurrency))
 
     with _scrubbed_http_logs(secrets):
         statuses = await asyncio.gather(
-            *(
-                _run_one_connector(cls(), targets, settings, cache, semaphore, secrets)
-                for cls in connectors
-            )
+            *(_run_guarded(cls, targets, settings, cache, semaphore, secrets) for cls in connectors)
         )
     # Stable, name-sorted ordering so reports read the same run to run.
     statuses = tuple(sorted(statuses, key=lambda s: s.connector))
     return EnrichmentReport(enabled=True, statuses=statuses)
 
 
-def _select_connectors(settings: EnrichmentSettings) -> list[type[Connector]]:
+def _select_connectors(
+    classes: dict[str, type[Connector]], settings: EnrichmentSettings
+) -> list[type[Connector]]:
     """Resolve which connector classes to run, honoring select/disable filters."""
-    classes = discover()
     selected: list[type[Connector]] = []
     for name, cls in sorted(classes.items()):
         if settings.select is not None and name not in settings.select:
@@ -184,6 +200,33 @@ def _select_connectors(settings: EnrichmentSettings) -> list[type[Connector]]:
             continue
         selected.append(cls)
     return selected
+
+
+async def _run_guarded(
+    cls: type[Connector],
+    targets: list[Indicator],
+    settings: EnrichmentSettings,
+    cache: EnrichmentCache,
+    semaphore: asyncio.Semaphore,
+    secrets: frozenset[str],
+) -> ConnectorStatus:
+    """Run one connector class; anything it raises becomes a failed status.
+
+    Construction happens inside the guard too, so a third-party connector whose
+    ``__init__`` or ``prepare`` raises fails alone instead of taking the whole
+    enrichment pass (and every other connector's results) down with it.
+    """
+    try:
+        return await _run_one_connector(cls(), targets, settings, cache, semaphore, secrets)
+    except Exception:  # noqa: BLE001 - last-resort guard: a connector bug must not crash the run
+        detail = scrub_secrets(traceback.format_exc(), secrets)
+        log.warning("connector %r failed unexpectedly\n%s", cls.name, detail)
+        return ConnectorStatus(
+            connector=cls.name,
+            version=str(cls.version),
+            outcome=ConnectorOutcome.FAILED,
+            note="failed — unexpected connector error",
+        )
 
 
 async def _run_one_connector(
@@ -197,13 +240,14 @@ async def _run_one_connector(
     """Run a single connector over its indicators, degrading gracefully throughout."""
     name = connector.name
 
-    api_key = settings.api_key_for(name) if connector.requires_api_key else None
+    api_key = settings.api_key_for(connector) if connector.requires_api_key else None
     if connector.requires_api_key and not api_key:
-        var = env_var_for(name) or "its API key"
-        return _status(connector, ConnectorOutcome.SKIPPED, f"skipped — no API key (set {var})")
+        hint = f"set {connector.api_key_env}" if connector.api_key_env else "none configured"
+        return _status(connector, ConnectorOutcome.SKIPPED, f"skipped — no API key ({hint})")
 
-    indicators = [t for t in targets if t.type in connector.supported_ioc_types]
-    indicators = indicators[: min(connector.max_indicators, settings.max_indicators)]
+    prepared = _prepared(connector, targets)
+    limit = max(0, min(connector.max_indicators, settings.max_indicators))
+    indicators = prepared[:limit]
     if not indicators:
         return _status(connector, ConnectorOutcome.SKIPPED, "skipped — no matching indicators")
 
@@ -225,29 +269,76 @@ async def _run_one_connector(
     results: list[EnrichmentResult] = []
     failures: list[str] = []
     cache_hits = 0
+    queried = 0
+    throttled = 0  # indicators not queried because the vendor kept rate-limiting
     try:
         for indicator in indicators:
             cached = (
-                cache.get(name, indicator.type, indicator.value, ttl=connector.cache_ttl)
+                cache.get(
+                    name,
+                    indicator.type,
+                    indicator.value,
+                    ttl=connector.cache_ttl,
+                    version=connector.version,
+                )
                 if use_cache
                 else None
             )
             if cached is not None:
                 results.append(_sanitize(cached, secrets).as_cached())
                 cache_hits += 1
+                queried += 1
                 continue
-            result = await _enrich_one(
-                connector, indicator, ctx, limiter, semaphore, failures, secrets
-            )
+            if throttled:
+                # The vendor is out of patience (an exhausted quota, typically):
+                # asking again for every remaining indicator would only repeat
+                # the full backoff each time.
+                throttled += 1
+                continue
+            queried += 1
+            try:
+                result = await _enrich_one(
+                    connector, indicator, ctx, limiter, semaphore, failures, secrets
+                )
+            except RateLimitedError as exc:
+                failures.append(scrub_secrets(str(exc), secrets))
+                throttled = 1
+                continue
             if result is not None:
                 result = _sanitize(result, secrets)
                 if use_cache:
-                    cache.put(result)
+                    cache.put(result, version=connector.version)
                 results.append(result)
     finally:
         await client.aclose()
 
-    return _summarize(connector, indicators, results, cache_hits, failures)
+    status = _summarize(connector, queried, results, cache_hits, failures)
+    # Say what was left out: a capped or throttled run must not read as complete.
+    if throttled > 1:
+        status = replace(
+            status, note=f"{status.note}; {throttled - 1} more not queried (rate-limited)"
+        )
+    if len(prepared) > len(indicators):
+        skipped = len(prepared) - len(indicators)
+        status = replace(
+            status, note=f"{status.note}; {skipped} more not queried (limit {limit} per run)"
+        )
+    return status
+
+
+def _prepared(connector: Connector, targets: list[Indicator]) -> list[Indicator]:
+    """The connector's supported indicators, prepared and de-duplicated in order."""
+    seen: set[tuple[str, str]] = set()
+    prepared: list[Indicator] = []
+    for target in targets:
+        if target.type not in connector.supported_ioc_types:
+            continue
+        indicator = connector.prepare(target)
+        if indicator is None or (indicator.type, indicator.value) in seen:
+            continue
+        seen.add((indicator.type, indicator.value))
+        prepared.append(indicator)
+    return prepared
 
 
 async def _enrich_one(
@@ -259,11 +350,19 @@ async def _enrich_one(
     failures: list[str],
     secrets: frozenset[str],
 ) -> EnrichmentResult | None:
-    """One guarded enrichment call: rate-limited, concurrency-capped, soft-failing."""
-    await limiter.acquire()
+    """One guarded enrichment call: concurrency-capped, rate-limited, soft-failing.
+
+    A :class:`RateLimitedError` propagates so the caller can stop asking; every
+    other failure is recorded in ``failures`` and yields ``None``.
+    """
     async with semaphore:
+        # Spacing is measured when the request can actually go out: acquiring
+        # before the semaphore would let queued requests leave back to back.
+        await limiter.acquire()
         try:
             return await connector.enrich(indicator, ctx)
+        except RateLimitedError:
+            raise
         except ConnectorError as exc:
             failures.append(scrub_secrets(str(exc), secrets) or exc.__class__.__name__)
         except httpx.HTTPError as exc:
@@ -281,8 +380,6 @@ async def _enrich_one(
 
 def _sanitize(result: EnrichmentResult, secrets: frozenset[str]) -> EnrichmentResult:
     """Defensively scrub any known key value out of a result's retained raw data."""
-    from dataclasses import replace
-
     return replace(
         result,
         raw=scrub_secrets(result.raw, secrets),
@@ -310,7 +407,7 @@ def _status(connector: Connector, outcome: ConnectorOutcome, note: str) -> Conne
 
 def _summarize(
     connector: Connector,
-    indicators: list[Indicator],
+    queried: int,
     results: list[EnrichmentResult],
     cache_hits: int,
     failures: list[str],
@@ -339,7 +436,7 @@ def _summarize(
         version=connector.version,
         outcome=outcome,
         note=note,
-        queried=len(indicators),
+        queried=queried,
         cache_hits=cache_hits,
         results=tuple(results),
     )

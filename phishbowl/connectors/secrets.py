@@ -1,55 +1,53 @@
 """Env-only API-key access for connectors (PRD §9, §11).
 
 Connector secrets come from environment variables *only* — never a committed
-file, never the CLI, never the analyzed email. They are read here, handed to a
-connector through its :class:`~phishbowl.connectors.base.EnrichContext`, and
-otherwise never touched: never logged, never written into a report or JSON
-output, and defensively scrubbed from any retained raw response (see
-:func:`scrub_secrets`). ``.env.example`` documents the variable names.
+file, never the CLI, never the analyzed email. Each connector names its
+variable (:attr:`~phishbowl.connectors.base.Connector.api_key_env`); the key is
+read here, handed to the connector through its
+:class:`~phishbowl.connectors.base.EnrichContext`, and otherwise never touched:
+never logged, never written into a report or JSON output, and defensively
+scrubbed from any retained raw response (see :func:`scrub_secrets`).
+``.env.example`` documents the bundled connectors' variable names.
 """
 
 from __future__ import annotations
 
 import os
+from collections.abc import Iterable
 from typing import Any
-
-# Connector name → the environment variable holding its key. Keyless connectors
-# (WHOIS/RDAP) are intentionally absent.
-ENV_KEYS: dict[str, str] = {
-    "virustotal": "VIRUSTOTAL_API_KEY",
-    "urlscan": "URLSCAN_API_KEY",
-    "abuseipdb": "ABUSEIPDB_API_KEY",
-    "shodan": "SHODAN_API_KEY",
-}
+from urllib.parse import quote, quote_plus
 
 
-def env_var_for(connector_name: str) -> str | None:
-    """The env-var name a connector's key is read from, or ``None`` if keyless."""
-    return ENV_KEYS.get(connector_name)
-
-
-def api_key_from_env(connector_name: str) -> str | None:
-    """Read a connector's API key from its env var; ``None`` if unset/blank."""
-    var = ENV_KEYS.get(connector_name)
-    if not var:
+def api_key_from_env(env_var: str) -> str | None:
+    """Read an API key from ``env_var``; ``None`` if the name is empty or the value blank."""
+    if not env_var:
         return None
-    value = os.environ.get(var, "").strip()
+    value = os.environ.get(env_var, "").strip()
     return value or None
 
 
-def active_key_values() -> frozenset[str]:
-    """Every API-key value currently set in the environment.
+def key_values(env_vars: Iterable[str]) -> frozenset[str]:
+    """Every non-blank value currently set in ``env_vars``.
 
-    Used purely defensively: the orchestrator scrubs these out of any retained
-    raw response so a key can never ride along into an output, even if a vendor
-    were to echo it back (PRD §11).
+    Used purely defensively: the orchestrator scrubs these out of retained
+    responses, notes and HTTP logs so a key can never ride along into an output,
+    even if a vendor were to echo it back (PRD §11).
     """
-    values: set[str] = set()
-    for var in ENV_KEYS.values():
-        value = os.environ.get(var, "").strip()
-        if value:
-            values.add(value)
-    return frozenset(values)
+    return frozenset(value for var in env_vars if (value := api_key_from_env(var)))
+
+
+def secret_forms(secrets: Iterable[str]) -> frozenset[str]:
+    """Each secret together with the percent-encoded forms it takes in a URL.
+
+    HTTP libraries log request URLs with query values percent-encoded, so a key
+    containing ``+``, ``/`` or ``=`` appears in a log line only in encoded form;
+    scrubbing every form keeps it out regardless.
+    """
+    forms: set[str] = set()
+    for secret in secrets:
+        if secret:
+            forms.update((secret, quote(secret, safe=""), quote_plus(secret)))
+    return frozenset(forms)
 
 
 def scrub_secrets(value: Any, secrets: frozenset[str]) -> Any:
@@ -64,7 +62,9 @@ def scrub_secrets(value: Any, secrets: frozenset[str]) -> Any:
         return value
     if isinstance(value, str):
         out = value
-        for secret in secrets:
+        # Longest first: a key that contains another key must go whole, not
+        # leave its remainder behind around a shorter key's placeholder.
+        for secret in sorted(secrets, key=len, reverse=True):
             if secret and secret in out:
                 out = out.replace(secret, "[redacted]")
         return out

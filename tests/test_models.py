@@ -11,7 +11,6 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from phishbowl.models import (
-    IOC,
     Address,
     Addresses,
     Anomaly,
@@ -24,8 +23,6 @@ from phishbowl.models import (
     EmailFormat,
     Header,
     Headers,
-    IOCs,
-    IOCType,
     ParsedEmail,
     ReceivedHop,
     Routing,
@@ -98,23 +95,7 @@ def _full_parsed_email() -> ParsedEmail:
                 flags=[AttachmentFlag.ARCHIVE],
             )
         ],
-        iocs=IOCs(
-            items=[
-                IOC(
-                    type=IOCType.URL,
-                    value="https://www.example.com/community/digest",
-                    defanged="hxxps://www[.]example[.]com/community/digest",
-                    provenance=["body:html", "body:text"],
-                ),
-                IOC(
-                    type=IOCType.IPV4,
-                    value="192.0.2.10",
-                    defanged="192[.]0[.]2[.]10",
-                    provenance=["header:Received"],
-                ),
-            ]
-        ),
-        anomalies=[Anomaly(code="none", message="no structural anomalies")],
+        anomalies=[Anomaly.notice("none", "no structural anomalies")],
     )
 
 
@@ -184,3 +165,13 @@ def test_addresses_mismatch_properties() -> None:
     assert not sparse.reply_to_mismatch
     assert not sparse.return_path_mismatch
     assert not sparse.sender_mismatch
+
+
+def test_unicode_and_punycode_spellings_of_one_domain_are_the_same_domain() -> None:
+    unicode_form = Address(addr_spec="billing@bücher.example", domain="bücher.example")
+    ascii_form = Address(addr_spec="reply@xn--bcher-kva.example", domain="xn--bcher-kva.example")
+    addresses = Addresses(**{"from": unicode_form}, reply_to=ascii_form, return_path=ascii_form)
+
+    assert unicode_form.domain_matches(ascii_form)
+    assert not addresses.reply_to_mismatch
+    assert not addresses.return_path_mismatch

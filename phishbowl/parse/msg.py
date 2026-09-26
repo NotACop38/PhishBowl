@@ -24,7 +24,7 @@ when it happens we still return a complete model and record an
 silently presenting "no result" as if the headers had been checked.
 
 Defensive invariants honored here mirror the ``.eml`` path: attachment bytes are
-read only to hash and sniff them — never executed, never extracted (CLAUDE.md).
+read only to hash and sniff them — never executed, never extracted (AGENTS.md).
 Robustness is load-bearing: any section that fails is recorded as an anomaly and
 the rest of the parse continues; a malformed ``.msg`` degrades into a noted
 partial result, never a crash (PRD §11).
@@ -32,10 +32,10 @@ partial result, never a crash (PRD §11).
 
 from __future__ import annotations
 
-import email
 import io
 import re
 from datetime import datetime
+from email.parser import HeaderParser
 from pathlib import Path
 
 from phishbowl import __version__
@@ -44,23 +44,18 @@ from phishbowl.models import (
     Addresses,
     Anomaly,
     Attachment,
-    Auth,
-    AuthResultState,
     Body,
     EmailFormat,
-    Headers,
     ParsedEmail,
-    Routing,
     Source,
 )
 
 from .addresses import parse_single_address
 from .attachments import build_attachment_from_bytes
-from .auth import parse_auth
 from .charset import _decode_bytes
-from .eml import _build_addresses, _build_headers, _date, _guard, _subject
+from .eml import _guard, populate_headers
 from .limits import MAX_INPUT_BYTES, read_within_limit
-from .routing import parse_routing
+from .mime import SafeMessage
 
 # The PR_TRANSPORT_MESSAGE_HEADERS stream — the original RFC 822 header block as
 # received, when Outlook preserved it. Read sans the type suffix per extract-msg.
@@ -111,7 +106,7 @@ def parse_msg(data: bytes, filename: str | None = None) -> ParsedEmail:
         return parsed
 
     try:
-        msg = extract_msg.openMsg(io.BytesIO(data), delayAttachments=True)
+        msg = _open(extract_msg, data)
     except Exception as exc:
         parsed.anomalies.append(Anomaly(code="parse_error", message=f"could not parse .msg: {exc}"))
         return parsed
@@ -124,6 +119,19 @@ def parse_msg(data: bytes, filename: str | None = None) -> ParsedEmail:
         except Exception:  # pragma: no cover - close is best-effort  # nosec B110
             pass  # releasing the parser handle must never mask the real result
     return parsed
+
+
+def _open(extract_msg, data: bytes):
+    """Open ``.msg`` bytes, tolerating the container defects extract-msg can skip.
+
+    Suppressing attachment and standards errors keeps one malformed recipient
+    or attachment from taking the whole message down with it.
+    """
+    options: dict = {"delayAttachments": True}
+    behavior = getattr(getattr(extract_msg, "enums", None), "ErrorBehavior", None)
+    if behavior is not None and hasattr(behavior, "SUPPRESS_ALL"):
+        options["errorBehavior"] = behavior.SUPPRESS_ALL
+    return extract_msg.openMsg(io.BytesIO(data), **options)
 
 
 def parse_file(path: str | Path) -> ParsedEmail:
@@ -140,18 +148,7 @@ def _populate(parsed: ParsedEmail, msg) -> None:
     header_msg = _guard(parsed, "headers_error", lambda: _transport_headers(msg), None)
 
     if header_msg is not None:
-        parsed.headers = _guard(
-            parsed, "headers_error", lambda: _build_headers(header_msg), Headers()
-        )
-        parsed.auth = _guard(parsed, "auth_error", lambda: parse_auth(parsed.headers), Auth())
-        parsed.routing = _guard(
-            parsed, "routing_error", lambda: parse_routing(parsed.headers), Routing()
-        )
-        parsed.addresses = _guard(
-            parsed, "address_error", lambda: _build_addresses(header_msg), Addresses()
-        )
-        parsed.subject = _guard(parsed, "subject_error", lambda: _subject(header_msg), None)
-        parsed.date = _guard(parsed, "date_error", lambda: _date(header_msg), None)
+        populate_headers(parsed, header_msg)
 
     # MAPI fallbacks for anything the transport headers didn't (or couldn't)
     # supply. A .msg authored in Outlook may carry no transport headers at all,
@@ -184,7 +181,9 @@ def _populate(parsed: ParsedEmail, msg) -> None:
                 message="No plain text or PR_HTML body recovered; compressed RTF is not expanded",
             )
         )
-    parsed.attachments = _guard(parsed, "attachment_error", lambda: _build_attachments(msg), [])
+    parsed.attachments = _guard(
+        parsed, "attachment_error", lambda: _build_attachments(msg, parsed), []
+    )
 
     _note_msg_anomalies(parsed, header_msg)
 
@@ -200,9 +199,9 @@ def _transport_headers(msg):
     text = _string_stream(msg, _TRANSPORT_HEADERS_ID)
     if not text:
         return None
-    # Headers only — there is no body in this stream. ``message_from_string`` is
-    # as tolerant of malformed headers here as on the .eml path.
-    return email.message_from_string(text)
+    # Headers only: whatever follows the first blank line is never parsed as
+    # MIME (a hostile stream could otherwise smuggle an unbounded part tree).
+    return HeaderParser(_class=SafeMessage).parsestr(text, headersonly=True)
 
 
 def _string_stream(msg, stream_id: str) -> str | None:
@@ -215,6 +214,18 @@ def _string_stream(msg, stream_id: str) -> str | None:
     """
     getter = getattr(msg, "getStringStream", None) or getattr(msg, "_getStringStream", None)
     return getter(stream_id) if getter is not None else None
+
+
+def _lenient_string_stream(msg, stream_id: str) -> str | None:
+    """A MAPI string stream decoded with replacement characters; never raises."""
+    for suffix, codec in (("001F", "utf-16-le"), ("001E", "cp1252")):
+        try:
+            raw = _get_stream(msg, stream_id + suffix)
+        except Exception:
+            continue
+        if raw is not None:
+            return bytes(raw).decode(codec, errors="replace")
+    return None
 
 
 def _mapi_addresses(
@@ -274,7 +285,7 @@ def _address(display: str | None, addr_spec: str | None) -> Address | None:
     display = (display or "").strip() or None
     addr_spec = (addr_spec or "").strip() or None
     if addr_spec:
-        parsed = parse_single_address([addr_spec])
+        parsed, _lenient = parse_single_address([addr_spec])
         if parsed is not None:
             parsed.display_name = display or parsed.display_name
             return parsed
@@ -300,8 +311,16 @@ def _build_body(msg) -> Body:
     exactly as on the .eml path. ``has_html`` reflects whether a *real* HTML part
     was present (matching the .eml parser's semantics).
     """
-    text = msg.getStringStream("__substg1.0_1000")
-    html = _real_html(msg)
+    # Separate guards: an undecodable plain-text stream must not cost the
+    # HTML body (or the reverse), and is itself recovered leniently.
+    try:
+        text = _string_stream(msg, "__substg1.0_1000")
+    except Exception:
+        text = _lenient_string_stream(msg, "__substg1.0_1000")
+    try:
+        html = _real_html(msg)
+    except Exception:
+        html = None
     return Body(text=text, html_raw=html, has_html=html is not None)
 
 
@@ -351,11 +370,23 @@ def _codepage_charset(cpid: int) -> str:
     """Map a Windows code-page id (PR_INTERNET_CPID) to a Python codec name."""
     special = {
         65001: "utf-8",
+        65000: "utf-7",
         1200: "utf-16-le",
         1201: "utf-16-be",
         20127: "ascii",
         12000: "utf-32-le",
         12001: "utf-32-be",
+        50220: "iso2022_jp",
+        50221: "iso2022_jp",
+        50222: "iso2022_jp",
+        51932: "euc_jp",
+        51936: "gb2312",
+        51949: "euc_kr",
+        54936: "gb18030",
+        20866: "koi8_r",
+        21866: "koi8_u",
+        10000: "mac_roman",
+        10007: "mac_cyrillic",
     }
     if cpid in special:
         return special[cpid]
@@ -364,25 +395,67 @@ def _codepage_charset(cpid: int) -> str:
     return f"cp{cpid}"
 
 
-def _build_attachments(msg) -> list[Attachment]:
-    """Inspect MAPI attachments through the shared, format-agnostic inspector."""
+def _attribute(obj, name: str):
+    """An extract-msg attribute, or ``None`` when reading it fails.
+
+    extract-msg decodes MAPI strings strictly, so one malformed string (an
+    unpaired surrogate in a filename) raises from a plain attribute read.
+    """
+    try:
+        return getattr(obj, name, None)
+    except Exception:
+        return None
+
+
+def _build_attachments(msg, parsed: ParsedEmail) -> list[Attachment]:
+    """Inspect MAPI attachments through the shared, format-agnostic inspector.
+
+    Each attachment is guarded on its own: a by-reference or cloud attachment
+    (whose bytes are not in the file) is recorded by name with a notice, and an
+    unreadable one is noted — neither costs the other attachments.
+    """
     attachments: list[Attachment] = []
     for att in msg.attachments or []:
-        filename = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None)
-        declared_type = getattr(att, "mimetype", None)
-        data = att.data
-        if not isinstance(data, (bytes, bytearray)):
-            # An embedded message attachment surfaces as a nested message object,
-            # not bytes. We don't descend into it (no extraction, no detonation),
-            # but we DO serialize the message container back to bytes and hash it
-            # — so a reported phishing email attached as a .msg keeps real
-            # size/hashes/type as evidence instead of looking like an empty file.
-            data = _embedded_message_bytes(data)
-            if not declared_type:
-                declared_type = "application/vnd.ms-outlook"
-            if not filename:
-                filename = "embedded-message.msg"
-        attachments.append(build_attachment_from_bytes(filename, declared_type, bytes(data)))
+        filename = (
+            _attribute(att, "longFilename")
+            or _attribute(att, "shortFilename")
+            # A malformed name is recovered leniently: an ".exe" must stay visible.
+            or _lenient_string_stream(att, "__substg1.0_3707")
+            or _lenient_string_stream(att, "__substg1.0_3704")
+        )
+        declared_type = _attribute(att, "mimetype")
+        try:
+            data = att.data
+        except Exception as exc:
+            parsed.anomalies.append(
+                Anomaly.notice(
+                    "msg_attachment_external",
+                    f"attachment {filename or '(unnamed)'!r} has no embedded content: {exc}",
+                )
+            )
+            continue
+        try:
+            if data is None:
+                continue
+            if not isinstance(data, (bytes, bytearray)):
+                # An embedded message attachment surfaces as a nested message
+                # object, not bytes. We don't descend into it (no extraction, no
+                # detonation), but we DO serialize the container back to bytes
+                # and hash it — so a reported phishing email attached as a .msg
+                # keeps real size/hashes/type as evidence.
+                data = _embedded_message_bytes(data)
+                if not declared_type:
+                    declared_type = "application/vnd.ms-outlook"
+                if not filename:
+                    filename = "embedded-message.msg"
+            attachments.append(build_attachment_from_bytes(filename, declared_type, bytes(data)))
+        except Exception as exc:
+            parsed.anomalies.append(
+                Anomaly(
+                    code="attachment_error",
+                    message=f"attachment {filename or '(unnamed)'!r} could not be read: {exc}",
+                )
+            )
     return attachments
 
 
@@ -403,37 +476,80 @@ def _embedded_message_bytes(embedded) -> bytes:
         return b""
 
 
+def embedded_emails(data: bytes) -> list[tuple[str, bytes]]:
+    """``(filename, bytes)`` for each email attached to raw ``.msg`` bytes, in order.
+
+    Embedded Outlook items (the "forward as attachment" hand-off) are
+    re-serialized as standalone ``.msg`` containers; ``.eml`` / ``message/rfc822``
+    file attachments are returned byte-for-byte. Nothing is executed or
+    extracted beyond that serialization. Never raises: an unreadable container
+    yields no emails.
+    """
+    if len(data) > MAX_INPUT_BYTES:
+        return []
+    try:
+        import extract_msg
+
+        msg = extract_msg.openMsg(io.BytesIO(data), delayAttachments=True)
+    except Exception:
+        return []
+    found: list[tuple[str, bytes]] = []
+    try:
+        for att in msg.attachments or []:
+            filename = getattr(att, "longFilename", None) or getattr(att, "shortFilename", None)
+            payload = att.data
+            if not isinstance(payload, (bytes, bytearray)):
+                blob = _embedded_message_bytes(payload)
+                if blob:
+                    name = filename or "embedded-message.msg"
+                    if not name.casefold().endswith(".msg"):
+                        name += ".msg"
+                    found.append((name, blob))
+                continue
+            declared = (getattr(att, "mimetype", None) or "").casefold()
+            if (filename or "").casefold().endswith(".eml") or declared == "message/rfc822":
+                name = filename or "attached.eml"
+                if not name.casefold().endswith(".eml"):
+                    name += ".eml"
+                found.append((name, bytes(payload)))
+    except Exception:
+        return found
+    finally:
+        try:
+            msg.close()
+        except Exception:  # pragma: no cover - close is best-effort  # nosec B110
+            pass
+    return found
+
+
 def _note_msg_anomalies(parsed: ParsedEmail, header_msg) -> None:
     """Record the .msg-specific lossiness so the report never overstates the data."""
     if header_msg is None:
         parsed.anomalies.append(
-            Anomaly(
-                code="msg_no_transport_headers",
-                message=(
-                    "no transport headers in .msg; routing path and "
-                    "authentication results are unavailable (lossy format)"
-                ),
+            Anomaly.notice(
+                "msg_no_transport_headers",
+                "no transport headers in .msg; routing path and "
+                "authentication results are unavailable (lossy format)",
             )
         )
 
     # Auth is the classic .msg loss: even when transport headers survive, Outlook
     # often strips Authentication-Results, so SPF/DKIM/DMARC read as NONE not
     # because they failed a check but because no result was recoverable.
-    if all(
-        getattr(parsed.auth, mech).result is AuthResultState.NONE
-        for mech in ("spf", "dkim", "dmarc")
+    if header_msg is None or not (
+        "Authentication-Results" in parsed.headers or "Received-SPF" in parsed.headers
     ):
         parsed.anomalies.append(
-            Anomaly(
-                code="msg_auth_unavailable",
-                message=(
-                    "no SPF/DKIM/DMARC results recoverable from .msg "
-                    "(authentication results are commonly absent in this format)"
-                ),
+            Anomaly.notice(
+                "msg_auth_unavailable",
+                "no SPF/DKIM/DMARC results recoverable from .msg "
+                "(authentication results are commonly absent in this format)",
             )
         )
 
-    if parsed.addresses.from_ is None:
+    if parsed.addresses.from_ is None and not any(
+        a.code == "missing_from" for a in parsed.anomalies
+    ):
         parsed.anomalies.append(
-            Anomaly(code="missing_from", message="message has no parseable From address")
+            Anomaly.notice("missing_from", "message has no parseable From address")
         )

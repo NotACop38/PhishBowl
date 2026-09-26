@@ -2,7 +2,7 @@
 
 Two things matter here. First, **conformance**: each export must validate against
 its committed expected schema on every fixture — that is the Phase 6 DoD. Second,
-and load-bearing, the **never-acts invariant** (CLAUDE.md / PRD §4): a draft export
+and load-bearing, the **never-acts invariant** (AGENTS.md / PRD §4): a draft export
 must be inert by construction, and the schemas encode that (XSOAR ``iscommand`` is
 ``const false``; Sentinel ``state`` is ``const "Disabled"``), so the same
 validation that proves conformance also proves the artifact can't auto-remediate.
@@ -55,7 +55,7 @@ ALL_FIXTURES = sorted(
 
 runner = CliRunner()
 
-# Sentinel actions Phishbowl emits are all inert "Compose" steps — they hold data
+# Sentinel actions PhishBowl emits are all inert "Compose" steps — they hold data
 # and call nothing. A draft export must never contain a connector/HTTP action that
 # could egress or remediate, so the allowed set is deliberately this small.
 _INERT_ACTION_TYPES = {"Compose"}
@@ -95,12 +95,29 @@ def test_validator_accepts_a_conforming_instance() -> None:
         ({}, {"type": "object", "minProperties": 1}),  # too few properties
         ("abc", {"type": "string", "pattern": "zzz"}),  # pattern miss
         (True, {"type": "integer"}),  # bool is not integer
+        (1.5, {"type": "integer"}),  # a fraction is not an integer
+        (True, {"const": 1}),  # JSON true is not the number 1
+        (False, {"enum": [0, 1]}),  # nor is false the number 0
+        ([True], {"const": [1]}),  # ... inside arrays either
         ({"x": 1}, {"type": "object", "additionalProperties": False}),  # extra prop
         ({"x": "no"}, {"additionalProperties": {"type": "integer"}}),  # extra prop wrong type
     ],
 )
 def test_validator_rejects_nonconforming_instances(instance, schema) -> None:
     assert validate(instance, schema) != []
+
+
+@pytest.mark.parametrize(
+    "instance,schema",
+    [
+        (1.0, {"type": "integer"}),  # JSON Schema: a zero fraction is an integer
+        (1.0, {"const": 1}),  # and 1.0 equals 1
+        ({"a": [1, 2.0]}, {"enum": [{"a": [1.0, 2]}]}),
+        (False, {"const": False}),
+    ],
+)
+def test_validator_compares_numbers_by_value_like_json_schema(instance, schema) -> None:
+    assert validate(instance, schema) == []
 
 
 def test_validator_resolves_local_refs() -> None:
@@ -370,3 +387,31 @@ def test_cli_emits_both_soar_drafts(tmp_path: Path) -> None:
     # The safety invariants survive the full CLI path.
     assert template["resources"][0]["properties"]["state"] == "Disabled"
     assert all(t["task"]["iscommand"] is False for t in playbook["tasks"].values())
+
+
+# --------------------------------------------------------------------------- #
+# XSOAR inputs never carry context expressions or comma-split values          #
+# --------------------------------------------------------------------------- #
+
+
+def test_xsoar_inputs_withhold_expression_and_comma_values() -> None:
+    from phishbowl.parse import parse_eml
+    from phishbowl.pipeline import triage
+
+    parsed = parse_eml(
+        b"From: sender@example.com\r\nContent-Type: text/html\r\n\r\n"
+        b'<a href="https://evil.example/${.=alert(1)}">a</a>'
+        b'<a href="https://evil.example/x?a=1,2">b</a>'
+        b'<a href="https://safe.example/ok">c</a>'
+    )
+    view, _ = triage(parsed)
+    playbook = build_xsoar_playbook(view)
+
+    inputs = {item["key"]: item["value"]["simple"] for item in playbook["inputs"]}
+    assert inputs["PhishbowlUrls"] == "https://safe.example/ok"
+    assert all("${" not in value for value in inputs.values())
+    assert "2 raw value(s) containing ',' or '${' were withheld" in playbook["description"]
+    # The withheld values stay visible, defanged, in the analyst notes.
+    notes = yaml.safe_dump(playbook["tasks"])
+    assert "hxxps://evil[.]example/${[.]=alert(1)}" in notes
+    assert validate_export(playbook, XSOAR_SCHEMA_NAME) == []

@@ -1,46 +1,39 @@
-# Phishbowl scoring configuration (PRD §8).
+# PhishBowl scoring configuration (PRD §8).
 #
 # Everything the rule engine needs to turn a parsed email into a verdict lives
-# here so an analyst can tune Phishbowl to their environment WITHOUT touching
+# here so an analyst can tune PhishBowl to their environment WITHOUT touching
 # code: rule weights, verdict bands, and the supporting lists (freemail
-# providers, URL shorteners, credential-harvest keywords, urgency phrases, the
-# bundled brand-impersonation list, and operator org domains).
+# providers, URL shorteners, credential-harvest keywords, urgency phrases,
+# organizational-role keywords, the bundled brand-impersonation list, and
+# operator org domains).
 #
 # This file is the *bundled default*. A site override (a second YAML file, or a
 # dict passed to ``load_config``) is deep-merged on top of it, so an operator
 # only has to specify the keys they want to change (see phishbowl/score/config.py).
 #
 # ---------------------------------------------------------------------------
-# Weight & band calibration rationale (Phase 3, calibrated against the synthetic
-# fixtures in tests/fixtures/)
+# Weight & band rationale
 # ---------------------------------------------------------------------------
 # The score is the SUM of the weights of every rule that fired, clamped to
-# 0-100 (PRD §8: "the sum of weights of triggered rules, normalized to 0-100").
-# Clamping (not rescaling) keeps the model transparent and additive: each point
-# traces to one named rule, and adding a rule can never silently dilute the
-# others. A clean email fires nothing and lands at 0.
+# 0-100 (PRD §8). Clamping (not rescaling) keeps the model transparent and
+# additive: each point traces to one named rule, and adding a rule can never
+# silently dilute the others. A message that fires nothing scores 0 — "few
+# signals", not "safe". A rule whose weight is 0 still reports its evidence
+# but adds no points (a way to observe a noisy rule without scoring it).
 #
-# Weights start from the PRD §8 catalog and were sanity-checked so that, on the
-# fixtures:
-#   * benign_newsletter.eml  -> 0   (Benign)        : nothing fires.
-#   * auth_fail_spoofed.eml  -> ~79 (High suspicion): SPF+DKIM+DMARC fail
-#       (15+12+18) plus Reply-To/Return-Path/Sender divergence (12+10+8) plus a
-#       weak urgency hit (4). A textbook header spoof scores high on header
-#       signals alone, exactly as an analyst would triage it.
-#   * a single decisive attachment signal (double extension 22, or an
-#       executable 22) sits at the bottom of "Low suspicion" on its own — one
-#       structural red flag warrants a look but isn't a conviction by itself;
-#       real malware mail trips several rules and climbs fast.
-#
-# Relative weighting philosophy (PRD §8 "transparent over clever"):
+# The weights are hand-set heuristics, sanity-checked against the synthetic
+# fixtures in tests/fixtures/, not calibrated against real mail:
 #   * Authentication and identity forgery are the strongest single offline
-#     signals (DMARC fail 18, display-name brand spoof 20).
-#   * Structural attachment giveaways (double extension, raw executable) are
-#     near-decisive on their own (22).
+#     signals (DMARC fail 18, display-name brand spoof 20, duplicate From 20).
+#     A textbook header spoof (SPF+DKIM+DMARC fail plus Reply-To/Return-Path/
+#     Sender divergence) reaches "High suspicion" on header signals alone.
+#   * Structural attachment giveaways are strong (double extension 22, raw
+#     executable 22); an "invoice.pdf.exe" trips both — deception and an
+#     executable payload are separate facts — and lands at "Suspicious".
 #   * Content/urgency keywords are deliberately the weakest (4): high
 #     false-positive rate, so they only ever nudge a verdict, never make it.
 #
-# Enrichment weights (VirusTotal, urlscan, ...) live under `weights:` below,
+# Enrichment weights (VirusTotal, urlscan, ...) live under `weights:` too,
 # tagged [enrichment] in every output and only ever ADDED on top of the offline
 # base. The offline verdict is always computed independently of them (PRD §8
 # combination rule), so a zero-key run is unaffected.
@@ -59,8 +52,11 @@ weights:
   identity.return_path_mismatch: 10
   identity.reply_to_mismatch: 12
   identity.sender_mismatch: 8
-  identity.freemail_brand: 12
+  # A free-webmail sender presenting as an organizational role (see role_keywords).
+  identity.freemail_role: 12
   identity.display_name_is_email: 8
+  # RFC 5322 allows one From header; clients disagree on which of several to show.
+  identity.multiple_from: 20
 
   # --- Domain / URL signals (PRD §8) ---
   url.punycode: 12
@@ -81,6 +77,8 @@ weights:
   # Plain archives are a common delivery vector; weaker than password-protected
   # (which additionally evade scanning) and weaker than a raw executable.
   attach.archive: 10
+  # Attached HTML/SVG pages open in a browser: credential forms, HTML smuggling.
+  attach.html: 14
 
   # --- Weak content signals (PRD §8 — deliberately low) ---
   # Scans subject + plaintext + visible (de-tagged) HTML text.
@@ -94,13 +92,13 @@ weights:
   # offline verdict is always computed independently of every one of these, and
   # setting any to 0 disables that enrichment signal without touching code.
   enrichment.virustotal.detections: 45    # scaled by detection ratio
-  enrichment.urlscan.malicious: 20        # urlscan judged a prior scan malicious
+  enrichment.urlscan.malicious: 20        # a prior scan judged malicious (host-only match: half)
   enrichment.abuseipdb.confidence: 25     # scaled by abuse-confidence fraction
   enrichment.rdap.young_domain: 18        # domain registered < 30 days ago (strong)
   enrichment.shodan.exposed: 6            # exposed services on a related IP (contextual)
 
-# Verdict bands (PRD §8). The first band whose ``max`` the score is <= wins, so
-# these MUST be listed low-to-high and the last one MUST be 100.
+# Verdict bands (PRD §8). The first band whose ``max`` the score is <= wins; the
+# last one MUST be 100.
 bands:
   - {max: 19, verdict: "Few signals — safety undetermined"}
   - {max: 39, verdict: "Low suspicion"}
@@ -108,8 +106,10 @@ bands:
   - {max: 84, verdict: "High suspicion"}
   - {max: 100, verdict: "Very high suspicion"}
 
-# Free webmail providers. A "brand" sender using one of these is a classic
-# impersonation tell (identity.freemail_brand). Case-insensitive.
+# Free webmail providers. A sender on one of these presenting as an
+# organizational role fires identity.freemail_role; with --redact, recipient
+# addresses here are hidden but the shared domain is not (it identifies no one).
+# Case-insensitive.
 freemail_domains:
   - gmail.com
   - googlemail.com
@@ -193,15 +193,41 @@ urgency_keywords:
   - payment failed
   - wire transfer
 
+# Organizational roles and departments (identity.freemail_role): a free-webmail
+# sender whose display name claims one of these ("IT Support", "Payroll") is the
+# business-email-compromise pattern. Matched as whole words, case-insensitively.
+role_keywords:
+  - support
+  - helpdesk
+  - help desk
+  - service desk
+  - it department
+  - billing
+  - invoicing
+  - accounts payable
+  - accounts receivable
+  - finance department
+  - payroll
+  - human resources
+  - hr department
+  - security team
+  - administrator
+  - mail administrator
+  - webmaster
+  - postmaster
+  - customer service
+  - compliance
+  - legal department
+
 # Bundled brand-impersonation list (PRD §8). Maps a brand keyword (matched as a
-# whole word in a From display name, case-insensitively) to the domains that
-# legitimately belong to that brand. A display name claiming the brand whose
+# whole word or phrase in a From display name, case-insensitively) to the domains
+# that legitimately belong to that brand; an empty list removes a brand in an
+# override. A display name claiming the brand whose
 # addr-spec domain is NOT one of these (nor a subdomain of one) fires
-# identity.display_name_brand_mismatch; the same domains seed lookalike (edit
-# distance) detection alongside any operator ``org_domains``.
-#
-# "example" is intentionally included so the synthetic example.com fixtures
-# exercise the legitimate (no-fire) path; real deployments would prune it.
+# identity.display_name_brand_mismatch; the same domains seed url.lookalike
+# alongside any operator ``org_domains``. Brand keywords that are also common
+# words or names (e.g. "chase", "apple") can match unrelated senders; prune or
+# extend the list for your environment.
 brands:
   microsoft: [microsoft.com, outlook.com, office.com, office365.com, live.com, microsoftonline.com]
   paypal: [paypal.com, paypal.me]
@@ -215,12 +241,12 @@ brands:
   docusign: [docusign.com, docusign.net]
   dropbox: [dropbox.com]
   chase: [chase.com]
-  wellsfargo: [wellsfargo.com]
-  bankofamerica: [bankofamerica.com, bofa.com]
-  example: [example.com]
+  wells fargo: [wellsfargo.com]
+  bank of america: [bankofamerica.com, bofa.com]
 
-# Operator-configured organization domains for lookalike detection (PRD §12 —
-# ships day one). Empty by default; a deployment adds the domains it expects to
-# be impersonated (its own and its key vendors') so near-miss typosquats of them
-# fire url.lookalike. Example: [acme-corp.com, acme.io]
+# Operator-configured organization domains (PRD §12). Empty by default; a
+# deployment adds its own domains (and its key vendors') so that near-miss
+# typosquats of them fire url.lookalike, hosts under them are redacted as
+# internal topology by --redact, and they are never sent to enrichment vendors.
+# Example: [acme-corp.com, acme.io]
 org_domains: []

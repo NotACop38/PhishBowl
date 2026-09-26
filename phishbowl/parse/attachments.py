@@ -1,7 +1,7 @@
 """Attachment inspection (PRD §6.1 / §7 — *Attachments*).
 
-Attachments are described by **metadata and hashes only**. Phishbowl never
-executes an attachment and never extracts an archive (CLAUDE.md defensive
+Attachments are described by **metadata and hashes only**. PhishBowl never
+executes an attachment and never extracts an archive (AGENTS.md defensive
 invariants): we read the bytes, hash them, sniff a handful of magic-byte
 signatures, and set structural red-flags from the filename + declared type +
 detected type. Nothing here opens, runs, or unpacks anything.
@@ -14,12 +14,18 @@ Flags set (mirrors :class:`AttachmentFlag`):
 - ``EXECUTABLE`` — executable / script / installer / LNK / ISO / disk-image, by
   magic bytes or extension.
 - ``TYPE_MISMATCH`` — declared content-type disagrees with the detected family.
-- ``DOUBLE_EXTENSION`` — ``invoice.pdf.exe``-style trailing dangerous extension.
-- ``PASSWORD_PROTECTED`` — zip with its encryption bit set (best-effort).
+- ``DOUBLE_EXTENSION`` — a disguised extension: ``invoice.pdf.exe``-style
+  trailing dangerous extension, or a bidirectional-override character that makes
+  the name display with a different extension.
+- ``PASSWORD_PROTECTED`` — a zip entry with its encryption bit set (read from
+  the central directory; best-effort).
+- ``HTML`` — an HTML-family document a browser renders (HTML, SVG, MHT), by
+  extension, declared type, or leading markup.
 """
 
 from __future__ import annotations
 
+import binascii
 import hashlib
 import io
 import struct
@@ -30,6 +36,10 @@ from phishbowl.models import Attachment, AttachmentFlag
 
 from .charset import decode_mime_words
 from .limits import MAX_PARTS
+
+# Every OLE2 / Compound File Binary container (legacy Office, MSI, Outlook
+# ``.msg``) opens with this signature; no RFC 822 message can.
+OLE_MAGIC = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
 
 # --- Magic-byte signatures -------------------------------------------------
 # (prefix, detected content-type). Order matters: more specific first. We only
@@ -49,9 +59,18 @@ _SIGNATURES: list[tuple[bytes, str]] = [
     (b"\x1f\x8b", "application/gzip"),
     (b"BZh", "application/x-bzip2"),
     (b"\xfd7zXZ\x00", "application/x-xz"),
-    (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1", "application/x-ole-storage"),
+    (OLE_MAGIC, "application/x-ole-storage"),
     (b"{\\rtf", "application/rtf"),
 ]
+
+# Browser-rendered markup, sniffed from the leading bytes (after an optional
+# UTF-8 BOM and whitespace). Only unambiguous document openers are matched.
+_MARKUP_SIGNATURES: tuple[tuple[bytes, str], ...] = (
+    (b"<!doctype html", "text/html"),
+    (b"<html", "text/html"),
+    (b"<svg", "image/svg+xml"),
+)
+_MARKUP_SNIFF_BYTES = 1024
 
 # Detected types that are archive containers.
 _ARCHIVE_TYPES = {
@@ -94,6 +113,42 @@ _DANGEROUS_EXTS = {
     "img",
     "vhd",
     "vhdx",
+    # Also directly dangerous, and common in recent campaigns: OneNote
+    # notebooks, Excel add-ins, compiled help, shortcuts to remote content,
+    # registry and management-console files, app packages, scriptlets.
+    "one",
+    "onepkg",
+    "xll",
+    "chm",
+    "url",
+    "scf",
+    "reg",
+    "msc",
+    "inf",
+    "sct",
+    "wsc",
+    "appx",
+    "appxbundle",
+    "msix",
+    "msixbundle",
+    "application",
+    "gadget",
+    "iqy",
+    "slk",
+    "settingcontent-ms",
+    "library-ms",
+    "search-ms",
+}
+
+# HTML-family documents a browser renders. Attached HTML/SVG files are a common
+# credential-phishing and HTML-smuggling vector (AttachmentFlag.HTML).
+_HTML_EXTS = {"html", "htm", "shtml", "xhtml", "mht", "mhtml", "svg", "svgz"}
+_HTML_TYPES = {
+    "text/html",
+    "application/xhtml+xml",
+    "image/svg+xml",
+    "multipart/related",
+    "message/rfc822+mhtml",
 }
 
 # Macro-enabled Office Open XML (zip-based) extensions.
@@ -106,7 +161,10 @@ _OOXML_MACRO_EXTS = {
     "pptm",
     "potm",
     "ppam",
+    "ppsm",
     "sldm",
+    # Excel binary workbooks are zip containers that can carry VBA macros.
+    "xlsb",
 }
 
 # Legacy OLE (CFB) Office extensions — these can all carry VBA macros too, and
@@ -167,6 +225,9 @@ _DECLARED_FAMILY = {
     "application/vnd.ms-word.document.macroenabled.12": "zip",
     "application/vnd.ms-excel.sheet.macroenabled.12": "zip",
     "application/vnd.ms-powerpoint.presentation.macroenabled.12": "zip",
+    "text/html": "html",
+    "application/xhtml+xml": "html",
+    "image/svg+xml": "html",
 }
 _DETECTED_FAMILY = {
     "application/pdf": "pdf",
@@ -185,7 +246,25 @@ _DETECTED_FAMILY = {
     # OLE/CFB container (legacy Office, MSI, …). A file declared e.g.
     # application/pdf whose bytes sniff as OLE is a classic mismatch.
     "application/x-ole-storage": "ole",
+    # Markup declared as a PDF or image is the HTML-smuggling disguise.
+    "text/html": "html",
+    "image/svg+xml": "html",
 }
+
+
+def is_other_inline_text(part: Message) -> bool:
+    """True for an inline body part in a text format other than plain text/HTML.
+
+    ``text/calendar`` invitations are the common case. Such a part is both
+    listed with the attachments (so its hashes are kept) and scanned as plain
+    text for indicators.
+    """
+    return (
+        part.get_content_maintype() == "text"
+        and part.get_content_type() not in {"text/plain", "text/html"}
+        and part.get_content_disposition() != "attachment"
+        and part.get_filename() is None
+    )
 
 
 def is_attachment(part: Message) -> bool:
@@ -231,7 +310,8 @@ def iter_parts(part: Message, *, max_parts: int | None = None, include_container
     stops. That bounds both a high-fan-out tree and a deeply *nested* one (a
     "MIME bomb"), neither of which can drive unbounded work or blow the recursion
     limit (see :mod:`phishbowl.parse.limits`). ``max_parts`` defaults to
-    :data:`MAX_PARTS`, read dynamically so tests can lower it.
+    :data:`~phishbowl.parse.limits.MAX_PARTS`; :func:`~phishbowl.parse.mime.bounded_message`
+    already refuses larger trees, so this is a second, independent bound.
     """
     limit = MAX_PARTS if max_parts is None else max_parts
     visited = 0
@@ -256,60 +336,96 @@ def iter_parts(part: Message, *, max_parts: int | None = None, include_container
         yield node
 
 
-def parts_exceed_budget(part: Message, *, max_parts: int | None = None) -> bool:
-    """True if the MIME tree visits more than ``max_parts`` nodes.
-
-    Mirrors :func:`iter_parts`' node accounting exactly, so it answers "did (or
-    would) the walk truncate?" — letting the parser record a structural anomaly
-    when parts are dropped rather than silently losing them. Bounded and
-    iterative: it stops counting one past the cap.
-    """
-    limit = MAX_PARTS if max_parts is None else max_parts
-    visited = 0
-    stack: list[Message] = [part]
-    while stack:
-        node = stack.pop()
-        visited += 1
-        if visited > limit:
-            return True
-        if node.get_content_maintype() == "message":
-            continue
-        if node.is_multipart():
-            payload = node.get_payload()
-            if isinstance(payload, list):
-                stack.extend(payload)
-    return False
-
-
 def detect_type(data: bytes) -> str | None:
     """Sniff a content-type from leading magic bytes, or ``None`` if unknown."""
     for prefix, content_type in _SIGNATURES:
         if data.startswith(prefix):
             return content_type
+    head = data[:_MARKUP_SNIFF_BYTES].removeprefix(b"\xef\xbb\xbf").lstrip().lower()
+    if head.startswith(b"<?xml"):
+        # An XML prolog (and comments) may precede an SVG root element.
+        head = head[head.find(b"?>") + 2 :].lstrip() if b"?>" in head else b""
+        if head.startswith(b"<!--") and b"-->" in head:
+            head = head[head.find(b"-->") + 3 :].lstrip()
+    for prefix, content_type in _MARKUP_SIGNATURES:
+        if head.startswith(prefix):
+            return content_type
     return None
 
 
+# Unicode bidirectional controls. In a file name they reorder what the reader
+# sees ("invoice\u202efdp.exe" displays as "invoiceexe.pdf").
+_BIDI_CONTROLS = frozenset("\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
+
+# Where a file-name extension implies a detected content family, for the
+# extension-vs-content half of the TYPE_MISMATCH check.
+_EXTENSION_FAMILY = {
+    "pdf": "pdf",
+    "png": "image",
+    "jpg": "image",
+    "jpeg": "image",
+    "gif": "image",
+    "doc": "ole",
+    "xls": "ole",
+    "ppt": "ole",
+    "rtf": "rtf",
+    "html": "html",
+    "htm": "html",
+    "svg": "html",
+}
+
+
 def _extensions(filename: str | None) -> list[str]:
-    """Lowercased extension tokens of ``filename`` (``a.pdf.exe`` → pdf, exe)."""
+    """Lowercased extension tokens of ``filename`` (``a.pdf.exe`` → pdf, exe).
+
+    Trailing dots and spaces are dropped first, as Windows does when it saves
+    the file: ``invoice.pdf.js .`` is ``invoice.pdf.js`` on disk.
+    """
     if not filename:
         return []
-    name = filename.strip().rstrip(".")
+    name = filename.strip().rstrip(". \t")
     parts = name.split(".")
-    return [p.casefold() for p in parts[1:]] if len(parts) > 1 else []
+    return [p.strip().casefold() for p in parts[1:]] if len(parts) > 1 else []
+
+
+# Most zip entries whose flags are read, and how far from the end the
+# end-of-central-directory record may sit (22 bytes plus a 64 KiB comment).
+_MAX_ZIP_ENTRIES = 10_000
+_EOCD_SEARCH = 22 + 0xFFFF
 
 
 def _zip_is_encrypted(data: bytes) -> bool:
-    """Best-effort: is bit 0 of the zip local-file general-purpose flag set?
+    """Best-effort: does any zip entry have its encryption bit set?
 
-    We only read the fixed local file header — never inflate or extract.
+    Walks the central directory (found from the end-of-central-directory
+    record, so a prefixed or self-extracting zip still counts), reading each
+    entry's general-purpose flag — never inflating or extracting anything.
+    Falls back to the first local file header when there is no directory.
     """
-    if not data.startswith(b"PK\x03\x04") or len(data) < 8:
-        return False
-    try:
+    eocd = data.rfind(b"PK\x05\x06", max(0, len(data) - _EOCD_SEARCH))
+    if eocd >= 0 and len(data) >= eocd + 22:
+        count, size, offset = struct.unpack_from("<HII", data, eocd + 10)
+        start = eocd - size  # tolerate a prefix: the directory ends at the EOCD
+        if start < 0:
+            start = offset
+        position = start
+        for _ in range(min(count, _MAX_ZIP_ENTRIES)):
+            if data[position : position + 4] != b"PK\x01\x02" or len(data) < position + 46:
+                break
+            (flags,) = struct.unpack_from("<H", data, position + 8)
+            if flags & 0x0001:
+                return True
+            name_len, extra_len, comment_len = struct.unpack_from("<HHH", data, position + 28)
+            position += 46 + name_len + extra_len + comment_len
+    if data.startswith(b"PK\x03\x04") and len(data) >= 8:
         (flags,) = struct.unpack_from("<H", data, 6)
-    except struct.error:
-        return False
-    return bool(flags & 0x0001)
+        return bool(flags & 0x0001)
+    return False
+
+
+def _has_zip_directory(data: bytes) -> bool:
+    """True if ``data`` ends with a zip central directory (e.g. a prefixed zip)."""
+    return data.rfind(b"PK\x05\x06", max(0, len(data) - _EOCD_SEARCH)) >= 0
 
 
 def _flags(
@@ -337,8 +453,20 @@ def _flags(
     if detected_type in _EXECUTABLE_TYPES or last_ext in _DANGEROUS_EXTS:
         flags.append(AttachmentFlag.EXECUTABLE)
 
-    # DOUBLE_EXTENSION — two-plus extensions ending in a dangerous one.
-    if len(exts) >= 2 and last_ext in _DANGEROUS_EXTS:
+    # HTML — a browser-rendered document, by extension, declaration, or content.
+    declared = (declared_type or "").casefold()
+    if (
+        last_ext in _HTML_EXTS
+        or declared in _HTML_TYPES
+        or detected_type in {"text/html", "image/svg+xml"}
+    ):
+        flags.append(AttachmentFlag.HTML)
+
+    # DOUBLE_EXTENSION — two-plus extensions ending in a dangerous or markup one
+    # (``invoice.pdf.exe``, ``remittance.pdf.html``), or a bidi override that
+    # makes the displayed extension differ from the real one.
+    disguised = any(c in _BIDI_CONTROLS for c in filename or "")
+    if disguised or (len(exts) >= 2 and (last_ext in _DANGEROUS_EXTS or last_ext in _HTML_EXTS)):
         flags.append(AttachmentFlag.DOUBLE_EXTENSION)
 
     # TYPE_MISMATCH — declared family known and contradicts the detected family.
@@ -347,9 +475,14 @@ def _flags(
     # (zip / ole), so a real ``.docx`` (declared OOXML, zip bytes) is consistent,
     # while ``invoice.docx`` declared ``application/pdf`` with zip bytes still
     # fires because the *declaration* (pdf) disagrees with the bytes (zip).
-    declared_family = _DECLARED_FAMILY.get((declared_type or "").casefold())
+    # The extension is checked the same way: a PE named "invoice.pdf" with a
+    # generic declared type is still a mismatch.
+    declared_family = _DECLARED_FAMILY.get(declared)
     detected_family = _DETECTED_FAMILY.get(detected_type or "")
-    if declared_family and detected_family and declared_family != detected_family:
+    extension_family = _EXTENSION_FAMILY.get(last_ext or "")
+    if detected_family and any(
+        family and family != detected_family for family in (declared_family, extension_family)
+    ):
         flags.append(AttachmentFlag.TYPE_MISMATCH)
 
     # PASSWORD_PROTECTED — encrypted zip (best-effort, header flag only).
@@ -359,37 +492,71 @@ def _flags(
     return flags
 
 
+class _VerbatimGenerator(BytesGenerator):
+    """A generator that writes headers exactly as they were parsed.
+
+    The stdlib re-folds every header on output, and its folder re-measures the
+    whole line after each word: quadratic on a long hostile header. Writing the
+    raw value back (original folding included) is linear and more faithful.
+    """
+
+    def _write_headers(self, msg: Message) -> None:
+        for name, value in msg.raw_items():
+            if isinstance(value, str):
+                line = f"{name}: {value}{self._NL}"
+                self._fp.write(line.encode("utf-8", "surrogateescape"))
+            else:  # a Header object set programmatically; never from the parser
+                self._fp.write(self.policy.fold_binary(name, value))
+        self.write(self._NL)
+
+
+def message_part_bytes(part: Message) -> bytes:
+    """The enclosed email of a ``message/*`` part, as bytes.
+
+    The stdlib parses an attached message into a sub-message, so it is
+    re-serialized: headers exactly as parsed (original folding kept), no
+    ``From`` mangling, CRLF line endings — the most wire-faithful form it can
+    reproduce. A part that (against RFC 2046) is base64 or quoted-printable
+    encoded stays a string payload; it is transfer-decoded instead. Never raises.
+    """
+    try:
+        payload = part.get_payload()
+        if isinstance(payload, list) and payload:
+            payload = payload[0]
+        if isinstance(payload, Message):
+            buf = io.BytesIO()
+            _VerbatimGenerator(buf, mangle_from_=False).flatten(payload, linesep="\r\n")
+            data = buf.getvalue()
+        elif isinstance(payload, str):
+            data = payload.encode("utf-8", errors="replace")
+        else:
+            return b""
+        # The parser read an encoded body as a header-less "message"; undo the
+        # transfer encoding to recover the enclosed email.
+        encoding = str(part.get("Content-Transfer-Encoding", "")).strip().casefold()
+        if encoding == "base64":
+            return binascii.a2b_base64(data.strip())
+        if encoding == "quoted-printable":
+            return binascii.a2b_qp(data)
+        return data
+    except Exception:
+        return b""
+
+
 def _attachment_bytes(part: Message) -> bytes:
     """Transfer-decoded bytes of an attachment part (for hashing/sniffing).
 
-    For an attached ``message/rfc822``, ``get_payload(decode=True)`` returns
-    ``None`` (it's a container), so we serialize the enclosed message instead —
+    For an attached ``message/*`` part, ``get_payload(decode=True)`` returns
+    ``None`` (it's a container), so the enclosed message is serialized instead —
     still just reading bytes, never executing or extracting anything.
-
-    The enclosed message is flattened with no header re-wrapping, no ``From``
-    mangling, and CRLF line endings — the most wire-faithful form the stdlib
-    can reproduce. (Exact original bytes aren't recoverable once the email
-    package has parsed the sub-message, since it discards the original header
-    folding; this serialization is stable and content-complete.)
     """
+    if part.get_content_maintype() == "message":
+        return message_part_bytes(part)
     try:
         data = part.get_payload(decode=True)
     except Exception:
         data = None
-    if data is not None:
-        return data
-    if part.get_content_maintype() == "message":
-        try:
-            payload = part.get_payload()
-            if isinstance(payload, list) and payload:
-                buf = io.BytesIO()
-                BytesGenerator(buf, mangle_from_=False, maxheaderlen=0).flatten(
-                    payload[0], linesep="\r\n"
-                )
-                return buf.getvalue()
-        except Exception:
-            return b""
-    return b""
+    return data if data is not None else b""
 
 
 def build_attachment_from_bytes(
@@ -404,6 +571,8 @@ def build_attachment_from_bytes(
     Reads the bytes only to hash and sniff them — never executes, never extracts.
     """
     detected_type = detect_type(data) if data else None
+    if detected_type is None and data and _has_zip_directory(data):
+        detected_type = "application/zip"  # a zip behind a prefix is still a zip
     return Attachment(
         filename=filename,
         declared_type=declared_type,

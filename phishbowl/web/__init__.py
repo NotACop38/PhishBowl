@@ -7,7 +7,7 @@ defang → score → render the identical self-contained, zero-egress HTML repor
 :class:`~phishbowl.models.ParsedEmail` and the report layer unchanged, with no
 logic fork (the contract was designed for this, PRD §15 / §7).
 
-Every defensive invariant the CLI upholds holds here too (CLAUDE.md / PRD §4):
+Every defensive invariant the CLI upholds holds here too (AGENTS.md / PRD §4):
 the server never sends, never detonates, never fetches the analyzed email's
 URLs, and never auto-remediates. The upload path is additionally hardened
 against hostile *input*: size and type are enforced before any deep parsing,
